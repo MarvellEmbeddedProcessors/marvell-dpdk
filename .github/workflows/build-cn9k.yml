@@ -1,0 +1,131 @@
+name: build-cn9k
+
+on:
+  push:
+  schedule:
+    - cron: '0 0 * * 1'
+
+permissions:
+  contents: write
+  id-token: write
+  packages: write
+
+jobs:
+  ubuntu-cn9k-build:
+    name: ubuntu-cn9k-arm64
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: aarch64
+            distro: ubuntu22.04
+            compiler: gcc
+            library: static
+
+    steps:
+    - name: Checkout sources
+      uses: actions/checkout@v4
+    - name: Generate cache keys
+      id: get_ref_keys
+      run: |
+        echo 'ccache=ccache-${{ matrix.distro }}-${{ matrix.compiler }}-${{ matrix.arch }}-'$(date -u +%Y-w%W) >> $GITHUB_OUTPUT
+    - name: Retrieve ccache cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.ccache
+        key: ${{ steps.get_ref_keys.outputs.ccache }}-${{ github.ref }}
+        restore-keys: |
+          ${{ steps.get_ref_keys.outputs.ccache }}-refs/heads/main
+    - uses: uraimo/run-on-arch-action@v2.7.2
+      name: Build DPDK and generate package
+      id: build
+      with:
+        arch: ${{ matrix.arch }}
+        distro: ${{ matrix.distro }}
+        githubToken: ${{ github.token }}
+        setup: |
+          mkdir -p "${PWD}/artifacts"
+          mkdir -p ~/.ccache
+        dockerRunArgs: |
+          --volume "${PWD}/artifacts:/artifacts"
+          --volume "${HOME}/.ccache:/root/.ccache"
+        shell: /bin/bash
+        install: |
+          apt-get update -q -y
+          apt-get install -y build-essential ccache git software-properties-common
+          add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          apt-get update -q -y
+          apt-get install -y ccache libarchive-dev libbsd-dev libbpf-dev
+          apt-get install -y libfdt-dev libjansson-dev
+          apt-get install -y libssl-dev ninja-build pkg-config python3-pip
+          apt-get install -y python3-pyelftools python3-setuptools python3-wheel zlib1g-dev meson gcc
+          apt-get install -y gcc-13
+        run: |
+          export CC='ccache gcc-13'
+          echo "cache_dir = /root/.ccache" > /root/.ccache/ccache.conf
+          ccache -p
+          meson build -Dexamples=all -Denable_drivers="*/cnxk,net/ring" -Dplatform=cn9k --prefix="${PWD}/install"
+          ninja install -C build
+          sed -i "s/prefix=.*/prefix=/g" "${PWD}/install/lib/aarch64-linux-gnu/pkgconfig/libdpdk.pc"
+          sed -i "s/prefix=.*/prefix=/g" "${PWD}/install/lib/aarch64-linux-gnu/pkgconfig/libdpdk-libs.pc"
+          PKG_VERSION_NAME=`cat VERSION | awk -F'.' '{print $1"."$2}'`
+          MRVL_PKG_VERSION=`cat MRVL_VERSION`
+          DISTRO=ubuntu-`lsb_release -rs`
+          mkdir -p "${PWD}/install/debian"
+          mkdir -p "${PWD}/install/DEBIAN"
+          git config --global --add safe.directory "${PWD}"
+          git tag --points-at HEAD > /tmp/tags
+          [ -s /tmp/tags ] && PKG_POSTFIX= || PKG_POSTFIX=-devel
+          cd "${PWD}/install"
+          echo 'Source: dpdk' > debian/control
+          echo 'Package: dpdk-'$PKG_VERSION_NAME'-cn9k'$PKG_POSTFIX >> DEBIAN/control
+          echo 'Version: '$MRVL_PKG_VERSION >> DEBIAN/control
+          echo "Depends: `dpkg-shlibdeps -O bin/dpdk-testpmd | awk -F'Depends=' '{print $2}'`, libbsd-dev, libarchive-dev, libelf-dev, libjansson-dev, libacl1-dev, nettle-dev, liblzma-dev, libzstd-dev, liblz4-dev, libbz2-dev, libxml2-dev, libfdt-dev" >> DEBIAN/control
+          echo "Maintainer: Jerin Jacob (jerinj@marvell.com)" >> DEBIAN/control
+          echo "Architecture: arm64" >> DEBIAN/control
+          echo "Homepage: https://www.dpdk.org/" >> DEBIAN/control
+          echo "Description: DPDK Library for Marvell Octeon 9" >> DEBIAN/control
+          cd -
+          mv "${PWD}/install" "${PWD}/dpdk-${PKG_VERSION_NAME}-cn9k${PKG_POSTFIX}_${MRVL_PKG_VERSION}_arm64"
+          dpkg --build "dpdk-${PKG_VERSION_NAME}-cn9k${PKG_POSTFIX}_${MRVL_PKG_VERSION}_arm64"
+          cp "dpdk-${PKG_VERSION_NAME}-cn9k${PKG_POSTFIX}_${MRVL_PKG_VERSION}_arm64.deb" /artifacts/.
+          echo "PKG_VERSION_NAME=${PKG_VERSION_NAME}" >> /artifacts/env
+          echo "MRVL_PKG_VERSION=${MRVL_PKG_VERSION}" >> /artifacts/env
+          echo "PKG_POSTFIX=${PKG_POSTFIX}" >> /artifacts/env
+          echo "DISTRO=${DISTRO}" >> /artifacts/env
+    - name: Export version name
+      id: artifacts
+      run: |
+        source "${PWD}/artifacts/env"
+        echo $PKG_VERSION_NAME
+        echo "PKG_VERSION_NAME=${PKG_VERSION_NAME}" >> "$GITHUB_OUTPUT"
+        echo $MRVL_PKG_VERSION
+        echo "MRVL_PKG_VERSION=${MRVL_PKG_VERSION}" >> "$GITHUB_OUTPUT"
+        echo $PKG_POSTFIX
+        echo "PKG_POSTFIX=${PKG_POSTFIX}" >> "$GITHUB_OUTPUT"
+        [[ "$PKG_POSTFIX" == "-devel" ]] && TAG=devel || TAG=${MRVL_PKG_VERSION}
+        echo "TAG=${TAG}" >> "$GITHUB_OUTPUT"
+        echo "DISTRO=${DISTRO}" >> "$GITHUB_OUTPUT"
+    - name: Upload debian package as artifact
+      uses: actions/upload-artifact@v4.3.1
+      if: ${{ github.event_name == 'push' }}
+      with:
+        name: dpdk-${{ steps.artifacts.outputs.PKG_VERSION_NAME }}-cn9k${{ steps.artifacts.outputs.PKG_POSTFIX }}_${{ steps.artifacts.outputs.MRVL_PKG_VERSION }}_arm64.deb
+        path: ${{ github.workspace }}/artifacts/dpdk-${{ steps.artifacts.outputs.PKG_VERSION_NAME }}-cn9k${{ steps.artifacts.outputs.PKG_POSTFIX }}_${{ steps.artifacts.outputs.MRVL_PKG_VERSION }}_arm64.deb
+    - name: Delete existing release
+      uses: liudonghua123/delete-release-action@v1
+      if: ${{ github.event_name == 'push' }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        release_name: dpdk-${{ steps.artifacts.outputs.PKG_VERSION_NAME }}_${{ steps.artifacts.outputs.MRVL_PKG_VERSION }}-${{ steps.artifacts.outputs.DISTRO }}-${{ steps.artifacts.outputs.TAG }}
+        suppress_errors: true
+    - name: Release DPDK cn9k package
+      uses: softprops/action-gh-release@v2.0.4
+      if: ${{ github.event_name == 'push' }}
+      with:
+        tag_name: dpdk-${{ steps.artifacts.outputs.PKG_VERSION_NAME }}_${{ steps.artifacts.outputs.MRVL_PKG_VERSION }}-${{ steps.artifacts.outputs.DISTRO }}-${{ steps.artifacts.outputs.TAG }}
+        files: |
+            ${{ github.workspace }}/artifacts/dpdk-${{ steps.artifacts.outputs.PKG_VERSION_NAME }}-cn9k${{ steps.artifacts.outputs.PKG_POSTFIX }}_${{ steps.artifacts.outputs.MRVL_PKG_VERSION }}_arm64.deb

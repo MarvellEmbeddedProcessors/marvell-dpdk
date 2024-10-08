@@ -319,8 +319,10 @@ struct roc_npc_flow {
 	uint32_t mtr_id;
 #if defined(ROC_PLATFORM_CN20K)
 #define ROC_NPC_MAX_MCAM_WIDTH_DWORDS 8
+#define ROC_NPC_MAX_MCAM_PRIORITY     123
 #else
 #define ROC_NPC_MAX_MCAM_WIDTH_DWORDS 7
+#define ROC_NPC_MAX_MCAM_PRIORITY     32
 #endif
 	/* Contiguous match string */
 	uint64_t mcam_data[ROC_NPC_MAX_MCAM_WIDTH_DWORDS];
@@ -487,5 +489,6 @@ int __roc_api roc_npc_mcam_move(struct roc_npc *roc_npc, uint16_t old_ent, uint1
 void *__roc_api roc_npc_aged_flow_ctx_get(struct roc_npc *roc_npc, uint32_t mcam_id);
 void __roc_api roc_npc_sdp_channel_get(struct roc_npc *roc_npc, uint16_t *chan_base,
 				       uint16_t *chan_mask);
-int roc_npc_mcam_get_stats(struct roc_npc *roc_npc, struct roc_npc_flow *flow, uint64_t *count);
+int __roc_api roc_npc_mcam_get_stats(struct roc_npc *roc_npc, struct roc_npc_flow *flow,
+				     uint64_t *count);
 #endif /* _ROC_NPC_H_ */

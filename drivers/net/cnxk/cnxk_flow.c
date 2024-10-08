@@ -1083,10 +1083,14 @@ cnxk_flow_query_common(struct rte_eth_dev *eth_dev, struct rte_flow *flow,
 		npc = &rep_dev->parent_dev->npc;
 	}
 
-	if (in_flow->use_pre_alloc)
+	if (in_flow->use_pre_alloc) {
 		rc = roc_npc_inl_mcam_read_counter(in_flow->ctr_id, &query->hits);
-	else
-		rc = roc_npc_mcam_read_counter(npc, in_flow->ctr_id, &query->hits);
+	} else {
+		if (roc_model_is_cn20k())
+			rc = roc_npc_mcam_get_stats(npc, in_flow, &query->hits);
+		else
+			rc = roc_npc_mcam_read_counter(npc, in_flow->ctr_id, &query->hits);
+	}
 	if (rc != 0) {
 		errcode = EIO;
 		errmsg = "Error reading flow counter";

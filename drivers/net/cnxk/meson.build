@@ -18,6 +18,13 @@ if soc_type != 'cn9k' and soc_type != 'cn10k' and soc_type != 'cn20k'
         soc_type = 'all'
 endif
 
+if soc_type == 'cn10k' or soc_type == 'all'
+    dpdk_conf.set('CNXK_PLATFORM_CN10K', 1)
+elif soc_type == 'cn20k'
+    dpdk_conf.set('CNXK_PLATFORM_CN20K', 1)
+endif
+
+
 sources = files(
         'cnxk_ethdev.c',
         'cnxk_ethdev_cman.c',
@@ -146,9 +153,9 @@ if soc_type == 'cn10k' or soc_type == 'all'
 sources += files(
         'cn10k_ethdev.c',
         'cn10k_ethdev_sec.c',
-        'cn10k_flow.c',
         'cn10k_rx_select.c',
         'cn10k_tx_select.c',
+        'cnxk_flow_wrapper.c',
 )
 
 if host_machine.cpu_family().startswith('aarch') and not disable_template
@@ -238,6 +245,7 @@ sources += files(
         'cn20k_ethdev.c',
         'cn20k_rx_select.c',
         'cn20k_tx_select.c',
+        'cnxk_flow_wrapper.c',
 )
 
 if host_machine.cpu_family().startswith('aarch') and not disable_template

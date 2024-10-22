@@ -47,8 +47,11 @@
 
 #define NPC_MCAM_KEX_FIELD_MAX	  23
 #define NPC_MCAM_MAX_PROTO_FIELDS (NPC_MCAM_KEX_FIELD_MAX + 1)
-#define NPC_MCAM_KEY_X4_WORDS	  7 /* Number of 64-bit words */
-#define NPC_CN20K_MCAM_KEY_X4_WORDS	  8 /* Number of 64-bit words */
+#if defined(ROC_PLATFORM_CN20K)
+#define NPC_MCAM_KEY_X4_WORDS 8 /* Number of 64-bit words */
+#else
+#define NPC_MCAM_KEY_X4_WORDS 7 /* Number of 64-bit words */
+#endif
 
 #define NPC_RVUPF_MAX_9XXX 0x10 /* HRM: RVU_PRIV_CONST */
 #define NPC_RVUPF_MAX_98XX 0x18 /* HRM: RVU_PRIV_CONST */

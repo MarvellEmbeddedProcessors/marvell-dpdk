@@ -516,7 +516,7 @@ npc_mcam_write_entry(struct mbox *mbox, struct roc_npc_flow *mcam)
 		if (mcam->use_ctr)
 			cn20k_req->cntr = mcam->ctr_id;
 
-		for (i = 0; i < NPC_CN20K_MCAM_KEY_X4_WORDS; i++) {
+		for (i = 0; i < NPC_MCAM_KEY_X4_WORDS; i++) {
 			cn20k_req->entry_data.kw[i] = mcam->mcam_data[i];
 			cn20k_req->entry_data.kw_mask[i] = mcam->mcam_mask[i];
 		}

@@ -2,9 +2,9 @@
  * Copyright(C) 2021 Marvell.
  */
 #include "cn10k_ethdev.h"
+#include "cn10k_flow.h"
 #include "cn10k_rx.h"
 #include "cn10k_tx.h"
-#include "cnxk_flow_wrapper.h"
 
 static uint16_t
 nix_rx_offload_flags(struct rte_eth_dev *eth_dev)
@@ -913,9 +913,9 @@ npc_flow_ops_override(void)
 	init_once = 1;
 
 	/* Update platform specific ops */
-	cnxk_flow_ops.create = cnxk_flow_create_wrapper;
-	cnxk_flow_ops.destroy = cnxk_flow_destroy_wrapper;
-	cnxk_flow_ops.info_get = cnxk_flow_info_get_wrapper;
+	cnxk_flow_ops.create = cn10k_flow_create;
+	cnxk_flow_ops.destroy = cn10k_flow_destroy;
+	cnxk_flow_ops.info_get = cn10k_flow_info_get;
 }
 
 static int

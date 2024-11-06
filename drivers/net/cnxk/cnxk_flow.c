@@ -977,14 +977,6 @@ clean:
 	return flow;
 }
 
-struct roc_npc_flow *
-cnxk_flow_create(struct rte_eth_dev *eth_dev, const struct rte_flow_attr *attr,
-		 const struct rte_flow_item pattern[], const struct rte_flow_action actions[],
-		 struct rte_flow_error *error)
-{
-	return cnxk_flow_create_common(eth_dev, attr, pattern, actions, error, false);
-}
-
 int
 cnxk_flow_destroy_common(struct rte_eth_dev *eth_dev, struct roc_npc_flow *flow,
 			 struct rte_flow_error *error, bool is_rep)

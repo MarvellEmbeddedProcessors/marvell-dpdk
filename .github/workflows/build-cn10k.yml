@@ -23,6 +23,10 @@ jobs:
             distro: ubuntu22.04
             compiler: gcc
             library: static
+          - arch: aarch64
+            distro: ubuntu_latest
+            compiler: gcc
+            library: static
 
     steps:
     - name: Checkout sources
@@ -54,9 +58,12 @@ jobs:
         shell: /bin/bash
         install: |
           apt-get update -q -y
-          apt-get install -y build-essential ccache git software-properties-common
-          add-apt-repository -y ppa:ubuntu-toolchain-r/test
-          apt-get update -q -y
+          apt-get install -y build-essential ccache git software-properties-common lsb-release
+          DISTRO=`lsb_release -rs`
+          if [ $DISTRO == "22.04" ]; then
+            add-apt-repository -y ppa:ubuntu-toolchain-r/test
+            apt-get update -q -y
+          fi
           apt-get install -y ccache libarchive-dev libbsd-dev libbpf-dev
           apt-get install -y libfdt-dev libjansson-dev
           apt-get install -y libssl-dev ninja-build pkg-config python3-pip

@@ -46,33 +46,52 @@ declare -i SCLK
 declare -i RCLK
 declare -i REF_PERF_NUMBER
 
+# Get CPU PART NUMBER
+PARTNUM_106XX=0xd49
+PARTNUM=$(grep -m 1 'CPU part' /proc/cpuinfo | awk -F': ' '{print $2}')
+
+if [[ $PARTNUM == $PARTNUM_98XX ]]; then
+        HW="cn98"
+else
+        if [[ $PARTNUM == $PARTNUM_106XX ]]; then
+                HW="cn106"
+        else
+                HW="cn96"
+        fi
+fi
+
+# get chip number and RCLK
 function get_system_info()
 {
-	local sysclk_dir
-	local fp_rclk
-	local fp_sclk
-	local div=1000000
+        local sysclk_dir
+        local fp_rclk
+        local fp_sclk
+        local div=1000000
 
-	sysclk_dir="/sys/kernel/debug/clk"
-	fp_rclk="$sysclk_dir/rclk/clk_rate"
-	fp_sclk="$sysclk_dir/sclk/clk_rate"
+        sysclk_dir="/sys/kernel/debug/clk"
+        if [[ $PARTNUM == $PARTNUM_106XX ]]; then
+                fp_rclk="$sysclk_dir/coreclk/clk_rate"
+        else
+                fp_rclk="$sysclk_dir/rclk/clk_rate"
+        fi
+        fp_sclk="$sysclk_dir/sclk/clk_rate"
 
-	if $SUDO test -f "$fp_rclk"; then
-		RCLK=$(echo "`$SUDO cat $fp_rclk` / $div" | bc)
-	else
-		echo "$fp_rclk not available"
-		exit 1
-	fi
+        if $SUDO test -f "$fp_rclk"; then
+                RCLK=$(echo "`$SUDO cat $fp_rclk` / $div" | bc)
+        else
+                echo "$fp_rclk not available"
+                exit 1
+        fi
 
-	if $SUDO test -f "$fp_sclk"; then
-		SCLK=$(echo "`$SUDO cat $fp_sclk` / $div" | bc)
-	else
-		echo "$fp_sclk not available"
-		exit 1
-	fi
+        if $SUDO test -f "$fp_sclk"; then
+                SCLK=$(echo "`$SUDO cat $fp_sclk` / $div" | bc)
+        else
+                echo "$fp_sclk not available"
+                exit 1
+        fi
 
-	echo "RCLK:   $RCLK Mhz"
-	echo "SCLK:   $SCLK Mhz"
+        echo "RCLK:   $RCLK Mhz"
+        echo "SCLK:   $SCLK Mhz"
 }
 
 function is_perf_pass()
@@ -96,8 +115,9 @@ function is_perf_pass()
 }
 
 get_system_info
-FNAME="rclk"${RCLK}"_sclk"${SCLK}".96xx"
-FPATH="$SCRIPTPATH/ref_numbers/cn9k/$FNAME"
+
+FNAME="rclk"${RCLK}"_sclk"${SCLK}".${HW}"
+FPATH="$SCRIPTPATH/ref_numbers/$FNAME"
 echo "Reference numbers file:$FPATH"
 
 if [ ! -f "$FPATH" ]; then

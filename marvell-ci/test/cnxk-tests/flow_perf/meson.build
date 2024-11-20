@@ -15,9 +15,15 @@ test_dir = meson.current_build_dir()
 
 # Copy the required scripts to build directory.
 run_command(copy_data, test_script)
-run_command(copy_data, 'ref_numbers/cn9k/rclk2200_sclk1000.96xx')
-run_command(copy_data, 'ref_numbers/cn9k/rclk2200_sclk1100.96xx')
-run_command(copy_data, 'ref_numbers/cn9k/rclk1800_sclk1000.96xx')
+run_command(copy_data, 'ref_numbers/rclk2200_sclk1000.cn96')
+run_command(copy_data, 'ref_numbers/rclk1800_sclk1000.cn96')
+run_command(copy_data, 'ref_numbers/rclk2200_sclk1100.cn96')
+run_command(copy_data, 'ref_numbers/rclk1800_sclk1000.cn106')
+run_command(copy_data, 'ref_numbers/rclk2000_sclk1000.cn106')
+run_command(copy_data, 'ref_numbers/rclk2200_sclk1000.cn106')
+run_command(copy_data, 'ref_numbers/rclk2200_sclk1100.cn106')
+run_command(copy_data, 'ref_numbers/rclk2500_sclk1000.cn106')
+run_command(copy_data, 'ref_numbers/rclk2500_sclk1100.cn106')
 
 # Add the meson test
 test(

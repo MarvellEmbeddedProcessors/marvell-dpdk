@@ -71,8 +71,8 @@ function setup_ipsec_mb()
 	mkdir -p $BUILD_ROOT/ipsec_mb
 
 	pushd $BUILD_ROOT/ipsec_mb
-	fetch_dep https://gitlab.arm.com/arm-reference-solutions/ipsec-mb/-/archive/SECLIB-IPSEC-2023.06.20/ipsec-mb-SECLIB-IPSEC-2023.06.20.tar.gz
-	tar -zxvf ipsec-mb-SECLIB-IPSEC-2023.06.20.tar.gz --strip-components=1
+	fetch_dep https://gitlab.arm.com/arm-reference-solutions/ipsec-mb/-/archive/SECLIB-IPSEC-2024.07.08/ipsec-mb-SECLIB-IPSEC-2024.07.08.tar.gz
+	tar -zxvf ipsec-mb-SECLIB-IPSEC-2024.07.08.tar.gz --strip-components=1
 	SHARED=y CC=aarch64-marvell-linux-gnu-gcc \
 		make -C lib AESNI_EMU=y ARCH=aarch64 PREFIX=$INSTALL_ROOT NOLDCONFIG=y
 	SHARED=y CC=aarch64-marvell-linux-gnu-gcc \

@@ -8,6 +8,13 @@ test_dir = meson.current_build_dir()
 # Test executable
 test_exec='cnxk-extbuf'
 
+app_cflags = ['-Wno-address-of-packed-member']
+foreach flag:app_cflags
+    if cc.has_argument(flag)
+        cflags += flag
+    endif
+endforeach
+
 # Create the test executable
 extbuf_test=executable(
     test_exec,

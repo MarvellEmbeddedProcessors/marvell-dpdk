@@ -150,7 +150,7 @@ per_lcore_mbuf_perf_test(void *arg)
 	while (time_diff/hz < TIME_S) {
 		ret = test_loop(mp, n_keep, n_get_bulk, n_put_bulk, mbufs);
 		if (ret < 0) {
-			free(mbufs);
+			rte_free(mbufs);
 			goto out;
 		}
 

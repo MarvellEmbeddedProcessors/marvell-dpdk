@@ -933,7 +933,10 @@ main(int argc, char **argv)
 		printf("Creating queues: nb_rxq=%d nb_txq=%u... ",
 		       nb_rx_queue, n_tx_queue);
 
-		rte_eth_dev_info_get(portid, &dev_info);
+		if (rte_eth_dev_info_get(portid, &dev_info))
+			rte_exit(EXIT_FAILURE,
+				 "Failed to get device information for port %d\n",
+				 portid);
 
 		ret = config_port_max_pkt_len(&local_port_conf, &dev_info);
 		if (ret != 0)
@@ -1065,7 +1068,11 @@ main(int argc, char **argv)
 			printf("rxq=%d,%d,%d ", portid, queueid, socketid);
 			fflush(stdout);
 
-			rte_eth_dev_info_get(portid, &dev_info);
+			if (rte_eth_dev_info_get(portid, &dev_info))
+				rte_exit(EXIT_FAILURE,
+					 "Error during getting device (port %u) info\n",
+					 portid);
+
 			rxq_conf = dev_info.default_rxconf;
 			rxq_conf.offloads = port_conf.rxmode.offloads;
 			if (!per_port_pool)

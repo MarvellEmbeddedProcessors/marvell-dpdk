@@ -1373,6 +1373,7 @@ virtio_crypto_sym_configure_session(
 		}
 		break;
 	default:
+		ret = -ENOTSUP;
 		VIRTIO_CRYPTO_SESSION_LOG_ERR(
 			"Unsupported operation chain order parameter");
 		goto error_out;
@@ -1380,7 +1381,7 @@ virtio_crypto_sym_configure_session(
 	return 0;
 
 error_out:
-	return -1;
+	return ret;
 }
 
 static void

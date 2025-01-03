@@ -11,7 +11,9 @@ SKIP_SYNC=${SKIP_SYNC:-}
 SKIP_TARGET_SETUP=${SKIP_TARGET_SETUP:-}
 EP_HOST=${EP_HOST:-?}
 EP_BOARD=${EP_BOARD:-?}
-EP_FILES=${EP_FILES:-/tmp/ep_files_ci}
+EP_PREBUILT_BINARIES_SERVER=${EP_PREBUILT_BINARIES_SERVER:-}
+EP_PREBUILT_BINARIES_PATH=${EP_PREBUILT_BINARIES_PATH:-}
+EP_DIR=${EP_DIR:-/tmp/dpdk}
 TARGET_SSH_CMD=${TARGET_SSH_CMD:-"ssh"}
 TARGET_SCP_CMD=${TARGET_SCP_CMD:-"scp"}
 REMOTE_HOST="$TARGET_SSH_CMD $EP_HOST -n"
@@ -67,9 +69,16 @@ function ep_setup()
 		return
 	fi
 
-	TARGET_URL=$EP_BOARD AGENT_PATH=$EP_FILES MODULE_PATH=$EP_FILES \
+	$TARGET_SSH_CMD $EP_BOARD mkdir -p $EP_DIR/prebuilt
+	$TARGET_SSH_CMD $EP_HOST mkdir -p $EP_DIR/prebuilt
+	$TARGET_SCP_CMD -3 -r $EP_PREBUILT_BINARIES_SERVER:$EP_PREBUILT_BINARIES_PATH/ep/prebuilt/* $EP_BOARD:$EP_DIR/prebuilt
+	$TARGET_SCP_CMD -3 -r $EP_PREBUILT_BINARIES_SERVER:$EP_PREBUILT_BINARIES_PATH/host/prebuilt/* $EP_HOST:$EP_DIR/prebuilt
+	echo "Setting up EP"
+	TARGET_URL=$EP_BOARD AGENT_PATH=$EP_DIR/prebuilt MODULE_PATH=$EP_DIR/prebuilt \
 		$PROJECT_ROOT/marvell-ci/test/board/cnxk-ep-setup.sh
-	TARGET_URL=$EP_HOST HP=1024 $PROJECT_ROOT/marvell-ci/test/board/cnxk-ep-setup.sh
+	echo "Setting up EP Host"
+	TARGET_URL=$EP_HOST HP=1024 MODULE_PATH=$EP_DIR/prebuilt \
+		$PROJECT_ROOT/marvell-ci/test/board/cnxk-ep-setup.sh
 }
 
 function run_test()
@@ -170,7 +179,7 @@ function test_exit()
 	trap - ERR
 	trap - QUIT
 
-	$REMOTE_HOST 'dmesg; uptime; cat /proc/uptime' > remote_dmesg.log
+	$REMOTE_HOST 'sudo dmesg; uptime; cat /proc/uptime' > remote_dmesg.log
 	save_log remote_dmesg.log
 
 	echo "###########################################################"

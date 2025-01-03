@@ -12,8 +12,19 @@ REMOTE_DIR=${REMOTE_DIR:-/tmp/dpdk}
 TPMD_PROMPT="^testpmd> $"
 TPMD_PFIX="endpoint"
 EP_BOARD=${EP_BOARD:?}
-EP_HOST_IF=${EP_HOST_IF:-$(lspci -d :ba03 | head -1 | awk '{ print $1 }')}
 EP_BOARD_IF=${EP_BOARD_IF:-0002:20:00.2}
+
+PART=${PART:-"ba"} # Default to 105xx
+EP_HOST_IF=${EP_HOST_IF:-$(lspci -d :${PART}03 | head -1 | awk '{ print $1 }')}
+if [[ -z $EP_HOST_IF ]]; then
+	PART="b9" # 106xx
+	EP_HOST_IF=$(lspci -d :${PART}03 | head -1 | awk '{ print $1 }')
+fi
+
+if [[ -z $EP_HOST_IF ]]; then
+	echo "No endpoint interface found"
+	exit 1
+fi
 
 # Start testpmd in EP board
 bin=$(find_bin $EP_BOARD dpdk-testpmd $REMOTE_DIR)

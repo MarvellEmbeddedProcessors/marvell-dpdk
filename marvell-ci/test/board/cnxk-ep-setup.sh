@@ -49,6 +49,7 @@ setup_host()
 {
 	local host_pf
 	local host_vf
+	local part
 
 	VFIO_DEVBIND=${VFIO_DEVBIND:-$(command -v oxk-devbind-basic.sh)}
 	if [[ ! -x $VFIO_DEVBIND ]]; then
@@ -74,13 +75,60 @@ setup_host()
 		'
 	fi
 
-	host_pf=$(lspci -Dd :ba00 | head -1 | awk '{ print $1 }')
+	sleep 5
+
+	part="ba" # CN105xx
+	host_pf=$(lspci -Dd :${part}00 | head -1 | awk '{ print $1 }')
+	if [[ -z $host_pf ]]; then
+		part="b9" # CN106xx
+		host_pf=$(lspci -Dd :${part}00 | head -1 | awk '{ print $1 }')
+		if [[ -z $host_pf ]]; then
+			echo "No host PF found"
+			exit 1
+		fi
+	fi
 	echo 2 > /sys/bus/pci/devices/${host_pf}/sriov_numvfs
 
-	host_vf=$(lspci -Dd :ba03 | head -1 | awk '{ print $1 }')
+	host_vf=$(lspci -Dd :${part}03 | head -1 | awk '{ print $1 }')
 	modprobe vfio
 	echo 1 > /sys/module/vfio/parameters/enable_unsafe_noiommu_mode
 	$VFIO_DEVBIND -b vfio-pci $host_vf
+}
+
+function get_part()
+{
+	local vendor
+	local dev_id
+	local subsys_dev_id
+	local part
+	local vendor_cavium="0x177d"
+	# RVU device IDs   RVU_PF  RVU_VF  RVU_AF  SSO_PF  SSO_VF  NPA_PF  NPA_VF  RVU_AFVF CPT_PF  CPT_VF
+	local rvu_dev_ids="0xa063  0xa064  0xa065  0xa0f9  0xa0fa  0xa0fb  0xa0fc  0xa0f8   0xa0f2  0xa0f3"
+
+	set +x
+	for d in $(ls /sys/bus/pci/devices); do
+		local is_rvu_dev=0
+
+		vendor=$(cat /sys/bus/pci/devices/$d/vendor)
+		if [[ "$vendor" != "$vendor_cavium" ]]; then
+			continue
+		fi
+		dev_id=$(cat /sys/bus/pci/devices/$d/device)
+		for r in $rvu_dev_ids; do
+			if [[ "$dev_id" == "$r" ]]; then
+				is_rvu_dev=1
+				break
+			fi
+		done
+		if [[ $is_rvu_dev == 0 ]]; then
+			continue
+		fi
+		subsys_dev_id=$(cat /sys/bus/pci/devices/$d/subsystem_device)
+		part=${subsys_dev_id:2:2}
+		break
+	done
+	set -x
+	echo $part
 }
 
 setup_board()
@@ -88,6 +136,10 @@ setup_board()
 	local sdp_vf1
 	local sdp_vf1_if
 	local sdp_vf2
+	local part_105="0xba"
+	local part_106="0xb9"
+	local part
+	local cfg
 
 	if [[ ! -e /sys/module/pcie_marvell_cnxk_ep ]]; then
 		if [[ -e $MODULE_PATH/pcie-marvell-cnxk-ep.ko ]]; then
@@ -103,7 +155,16 @@ setup_board()
 	sdp_vf1=$(lspci -d :a0f7 | head -1 | awk -e '{ print $1 }')
 	sdp_vf1_if=$(ls /sys/bus/pci/devices/${sdp_vf1}/net)
 	ifconfig $sdp_vf1_if up
-	$AGENT_PATH/octep_cp_agent $AGENT_PATH/cnf105xx.cfg &> /tmp/octep_cp_agent_log.txt &
+	part=$(get_part)
+	if [[ "0x$part" == "$part_105" ]]; then
+		cfg="cnf105xx.cfg"
+	elif [[ "0x$part" == "$part_106" ]]; then
+		cfg="cn106xx.cfg"
+	else
+		echo "Unsupported part $part"
+		exit 1
+	fi
+	$AGENT_PATH/octep_cp_agent $AGENT_PATH/$cfg &> /tmp/octep_cp_agent_log.txt &
 
 	sdp_vf2=$(lspci -Dd :a0f7 | head -2 | tail -1 | awk -e '{ print $1 }')
 	$VFIO_DEVBIND -b vfio-pci $sdp_vf2

@@ -15,6 +15,7 @@
 
 #include "hw/cpt.h"
 #include "test_cases.h"
+#include "ucode/ae.h"
 #include "ucode/se.h"
 
 #define TEST_SUCCESS EXIT_SUCCESS
@@ -61,6 +62,8 @@ uc_opcode_major_to_str(uint16_t major_opcode)
 		return "Flexi Crypto";
 	case ROC_IE_OT_MAJOR_OP_PROCESS_OUTBOUND_IPSEC:
 		return "IPsec Outbound";
+	case ROC_AE_MAJOR_OP_MODEX:
+		return "MODEX";
 	default:
 		return "Invalid";
 	}
@@ -380,6 +383,8 @@ cptr_ctx_init(struct test_ctx *test_ctx, struct test_case_params *tc_params)
 
 	if (opcode_major == ROC_IE_OT_MAJOR_OP_PROCESS_OUTBOUND_IPSEC)
 		return cptr_ipsec_outb_init(test_ctx, tc_params);
+	else if (opcode_major == ROC_AE_MAJOR_OP_MODEX)
+		return 0;
 
 	ret = rte_mempool_get_bulk(test_ctx->cptr_mp, test_ctx->cptrs, NB_CPTR);
 	if (ret) {
@@ -505,6 +510,47 @@ ipsec_inst_populate(struct cpt_inst_s *inst, struct test_case_params *tc_params)
 	memcpy(dptr, &td->input_text.data, td->input_text.len);
 	inst->dptr = (uint64_t)dptr;
 }
+
+static void
+asym_rsa_inst_populate(struct cpt_inst_s *inst, struct test_case_params *tc_params)
+{
+	uint32_t mod_len = rsa_xform.rsa.n.length;
+	uint32_t exp_len = rsa_xform.rsa.e.length;
+	struct rsa_test_data *td = &tc_params->rsa;
+	uint64_t total_key_len;
+	uint32_t in_size, dlen;
+	uint8_t *dptr;
+
+	dptr = tc_params->dptr;
+	inst->w0.u64 = 0;
+	inst->w2.u64 = 0;
+	inst->w7.u64 = 0;
+
+	inst->w4.s.opcode_major = tc_params->opcode_major;
+	inst->w4.s.opcode_minor = tc_params->opcode_minor;
+
+	inst->dptr = (uint64_t)tc_params->dptr;
+	inst->rptr = (uint64_t)tc_params->rptr;
+
+	total_key_len = mod_len + exp_len;
+	memcpy(dptr, rsa_xform.rsa.n.data, mod_len);
+	dptr += mod_len;
+	memcpy(dptr, rsa_xform.rsa.e.data, exp_len);
+	dptr += exp_len;
+
+	in_size = td->message.len;
+	memcpy(dptr, &td->message.data, in_size);
+
+	dlen = total_key_len + in_size;
+
+	inst->w4.s.opcode_major = tc_params->opcode_major;
+	inst->w4.s.opcode_minor = tc_params->opcode_minor;
+	inst->w4.s.param1 = mod_len;
+	inst->w4.s.param2 = ROC_AE_CPT_BLOCK_TYPE2 | ((uint16_t)(exp_len) << 1);
+	inst->w4.s.dlen = dlen;
+	inst->w7.s.egrp = ROC_CPT_DFLT_ENG_GRP_AE;
+}
+
 static void
 inst_populate(struct cpt_inst_s *inst, struct test_case_params *tc_params)
 {
@@ -531,6 +577,9 @@ inst_populate(struct cpt_inst_s *inst, struct test_case_params *tc_params)
 	case ROC_IE_OT_MAJOR_OP_PROCESS_OUTBOUND_IPSEC:
 		inst->w7.s.egrp = ROC_CPT_DFLT_ENG_GRP_SE_IE;
 		ipsec_inst_populate(inst, tc_params);
+		break;
+	case ROC_AE_MAJOR_OP_MODEX:
+		asym_rsa_inst_populate(inst, tc_params);
 		break;
 	default:
 		rte_panic("Invalid opcode\n");
@@ -648,7 +697,7 @@ test_cpt_raw_api(struct test_ctx *ctx, struct test_case_params *tc_params, int n
 	/* Calculate average throughput (Gbps) in bits per second */
 	throughput_gbps = ((ops_per_second * tc_params->dlen * 8) / 1000000000);
 
-	printf("%18s%#18x%18u%18u%18u%18"PRIu64"%18.2f%18.2f%18.2f\n",
+	printf("%18s%#18x%18u%18u%18u%18"PRIu64"%18.2f%18.5f%18.5f\n",
 			uc_opcode_major_to_str(tc_params->opcode_major),
 			tc_params->opcode_minor,
 			tc_params->ctx_val,

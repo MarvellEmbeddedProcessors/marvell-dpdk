@@ -188,7 +188,6 @@ cnxk_flow_create(struct rte_eth_dev *eth_dev, const struct rte_flow_attr *attr,
 		if (mtr)
 			nix_mtr_chain_reset(eth_dev, mtr->mtr_id);
 
-		return NULL;
 	} else {
 		if (mtr)
 			cnxk_mtr_connect(eth_dev, mtr->mtr_id);

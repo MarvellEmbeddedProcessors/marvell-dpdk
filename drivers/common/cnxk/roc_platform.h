@@ -343,6 +343,14 @@ extern int cnxk_logtype_esw;
 	RTE_LOG_DP_LINE_PREFIX(DEBUG, CNXK, "%s():%u ", __func__ RTE_LOG_COMMA __LINE__, \
 		__VA_ARGS__)
 
+/* append dbdf to name */
+#define plt_pci_dev_name(devname, name, dev)                                                       \
+	({                                                                                         \
+		snprintf((devname), sizeof(devname), "%s" PCI_PRI_FMT, (name), (dev)->addr.domain, \
+			 (dev)->addr.bus, (dev)->addr.devid, (dev)->addr.function);                \
+		devname;                                                                           \
+	})
+
 #ifdef __cplusplus
 #define CNXK_PCI_ID(subsystem_dev, dev)                                        \
 {                                                                      \

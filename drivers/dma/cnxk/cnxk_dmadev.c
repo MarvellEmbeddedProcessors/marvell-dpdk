@@ -9,6 +9,53 @@
 static int cnxk_stats_reset(struct rte_dma_dev *dev, uint16_t vchan);
 
 static int
+parse_val_u16(const char *key, const char *value, void *extra_args)
+{
+	RTE_SET_USED(key);
+	uint16_t val;
+
+	val = atoi(value);
+
+	*(uint16_t *)extra_args = val;
+
+	return 0;
+}
+
+static int
+cn20k_dmadev_parse_devargs(struct rte_devargs *devargs, struct cnxk_dpi_vf_s *dpivf)
+{
+	uint16_t num_vchans = CN20K_DPI_DEF_VCHANS;
+	uint16_t num_lfs = num_vchans >> 1; /* Each LF has 2 rings */
+	struct rte_kvargs *kvlist;
+
+	if (devargs == NULL)
+		goto null_devargs;
+
+	kvlist = rte_kvargs_parse(devargs->args, NULL);
+	if (kvlist == NULL)
+		goto exit;
+
+	rte_kvargs_process(kvlist, CN20K_DPI_NUM_VCHANS, &parse_val_u16, &num_vchans);
+	rte_kvargs_process(kvlist, CN20K_DPI_NUM_LFS, &parse_val_u16, &num_lfs);
+
+	if (!num_vchans || !num_lfs || (num_vchans == CN20K_DPI_MAX_VCHANS) ||
+	    (num_lfs == CN20K_DPI_MAX_LFS))
+		goto exit;
+
+	if (!rte_is_power_of_2(num_vchans) || !rte_is_power_of_2(num_lfs)) {
+		plt_err("num_vchans or num_lfs is not a power of 2");
+		goto exit;
+	}
+null_devargs:
+	dpivf->num_vchans = num_vchans;
+	dpivf->rdpi.nr_lfs = num_lfs;
+
+	return 0;
+exit:
+	return -EINVAL;
+}
+
+static int
 cnxk_dmadev_info_get(const struct rte_dma_dev *dev, struct rte_dma_info *dev_info, uint32_t size)
 {
 	struct cnxk_dpi_vf_s *dpivf = dev->fp_obj->dev_private;
@@ -24,9 +71,18 @@ cnxk_dmadev_info_get(const struct rte_dma_dev *dev, struct rte_dma_info *dev_inf
 		dev_info->dev_capa |= RTE_DMA_CAPA_PRI_POLICY_SP;
 		dev_info->nb_priorities = CN10K_DPI_MAX_PRI;
 	}
-	dev_info->max_desc = CNXK_DPI_MAX_DESC;
-	dev_info->min_desc = CNXK_DPI_MIN_DESC;
-	dev_info->max_sges = CNXK_DPI_MAX_POINTER;
+
+	if (roc_model_is_cn20k()) {
+		dev_info->max_desc = CN20K_DPI_MAX_DESC / dpivf->vchans_per_ring;
+		dev_info->min_desc = CN20K_DPI_MIN_DESC;
+		dev_info->max_sges = CN20K_DPI_MAX_POINTER;
+		dev_info->max_vchans = dpivf->num_vchans;
+	} else {
+		dev_info->max_desc = CNXK_DPI_MAX_DESC;
+		dev_info->min_desc = CNXK_DPI_MIN_DESC;
+		dev_info->max_sges = CNXK_DPI_MAX_POINTER;
+		dev_info->max_vchans = CNXK_DPI_MAX_VCHANS_PER_QUEUE;
+	}
 
 	return 0;
 }
@@ -51,8 +107,10 @@ cnxk_dmadev_vchan_free(struct cnxk_dpi_vf_s *dpivf, uint16_t vchan)
 
 	for (; i < num_vchans; i++) {
 		dpi_conf = &dpivf->conf[i];
-		rte_free(dpi_conf->c_desc.compl_ptr);
-		dpi_conf->c_desc.compl_ptr = NULL;
+		if (dpi_conf->c_desc.compl_ptr) {
+			rte_free(dpi_conf->c_desc.compl_ptr);
+			dpi_conf->c_desc.compl_ptr = NULL;
+		}
 	}
 
 	return 0;
@@ -102,6 +160,9 @@ static int
 cnxk_dmadev_configure(struct rte_dma_dev *dev, const struct rte_dma_conf *conf, uint32_t conf_sz)
 {
 	struct cnxk_dpi_vf_s *dpivf = NULL;
+	struct roc_dpi_lf *lf;
+	uint16_t num_rings;
+	int rc = 0;
 
 	RTE_SET_USED(conf_sz);
 	dpivf = dev->fp_obj->dev_private;
@@ -110,11 +171,63 @@ cnxk_dmadev_configure(struct rte_dma_dev *dev, const struct rte_dma_conf *conf, 
 	 * Free up vchan memory if any, before configuring num_vchans.
 	 */
 	cnxk_dmadev_vchan_free(dpivf, RTE_DMA_ALL_VCHAN);
+
 	dpivf->num_vchans = conf->nb_vchans;
+	if (!rte_is_power_of_2(dpivf->num_vchans))
+		dpivf->num_vchans = rte_align32pow2(dpivf->num_vchans);
+
 	if (roc_feature_dpi_has_priority())
 		dpivf->rdpi.priority = conf->priority;
 
-	return 0;
+	if (roc_model_is_cn20k()) {
+		num_rings = dpivf->rdpi.nr_lfs << 1;
+
+		if (dpivf->num_vchans > num_rings) {
+			dpivf->vchans_per_ring = dpivf->num_vchans / num_rings;
+		} else {
+			/* Each vchan has got it's own hardware ring */
+			dpivf->vchans_per_ring = 1;
+			dpivf->rdpi.nr_lfs = dpivf->num_vchans >> 1;
+			if (!dpivf->rdpi.nr_lfs)
+				dpivf->rdpi.nr_lfs = 1;
+		}
+
+		if ((CN20K_DPI_MAX_DESC / dpivf->vchans_per_ring) < CN20K_DPI_MIN_DESC) {
+			rc = -EINVAL;
+			plt_err("Very few LFs are requested than required");
+			goto error;
+		}
+
+		num_rings = dpivf->rdpi.nr_lfs << 1;
+		dpivf->ring_conf = rte_zmalloc("dpi_ring_conf", sizeof(struct cn20k_ring_conf) *
+					       num_rings, 0);
+		if (dpivf->ring_conf == NULL) {
+			plt_err("Failed to allocate memory for ring conf");
+			rc = -ENOMEM;
+			goto error;
+		}
+
+		rc = roc_dpi_dev_init(&dpivf->rdpi, offsetof(struct rte_event_dma_adapter_op,
+				      impl_opaque));
+		if (rc < 0)
+			goto error;
+
+		dev->state = RTE_DMA_DEV_READY;
+
+		lf = &(dpivf->rdpi.lfs[0]);
+		rc = roc_dpi_lf_chan_tbl_alloc(lf, dpivf->num_vchans);
+		if (rc < 0) {
+			plt_err("Failed to allocate chan tbl");
+			goto error;
+		}
+
+		dpivf->chan_tbl = lf->chan_tbl;
+	}
+
+	return rc;
+
+error:
+	return rc;
 }
 
 static int
@@ -230,6 +343,87 @@ cn10k_dmadev_setup_hdr(union cnxk_dpi_instr_cmd *header, const struct rte_dma_vc
 }
 
 static int
+cn20k_dmadev_setup(struct cnxk_dpi_vf_s *dpivf, uint16_t vchan,
+		    const struct rte_dma_vchan_conf *conf)
+{
+	struct cnxk_dpi_conf *dpi_conf = &dpivf->conf[vchan];
+	struct cn20k_ring_conf *rconf = dpivf->ring_conf;
+	uint16_t ridx, max_desc, num_rings;
+	union cnxk_dpi_instr_cmd *header;
+	int rc = 0;
+	int aura;
+
+	header = (union cnxk_dpi_instr_cmd *)&dpi_conf->cmd.u;
+	header->cn20k.ct = DPI_HDR_PT_ZBW_CA;
+	header->cn20k.xt = 0;
+
+	switch (conf->direction) {
+	case RTE_DMA_DIR_DEV_TO_MEM:
+		dpi_conf->cfg.xtype = DPI_XTYPE_INBOUND;
+		dpi_conf->cfg.rport = conf->src_port.pcie.coreid;
+		dpi_conf->cfg.wport = 0;
+		dpi_conf->chan_cfg.pf_func = conf->src_port.pcie.pfid;
+		dpi_conf->chan_cfg.vf_func = conf->src_port.pcie.vfid;
+		dpi_conf->chan_cfg.valid = 1;
+		break;
+	case RTE_DMA_DIR_MEM_TO_DEV:
+		dpi_conf->cfg.xtype = DPI_XTYPE_OUTBOUND;
+		dpi_conf->cfg.rport = 0;
+		dpi_conf->cfg.wport = conf->dst_port.pcie.coreid;
+		dpi_conf->chan_cfg.pf_func = conf->src_port.pcie.pfid;
+		dpi_conf->chan_cfg.vf_func = conf->src_port.pcie.vfid;
+		dpi_conf->chan_cfg.valid = 1;
+		aura = dmadev_src_buf_aura_get(conf->auto_free.m2d.pool, "cn20k_mempool_ops");
+		if (aura < 0)
+			return aura;
+		header->cn20k.aura = aura;
+		break;
+	case RTE_DMA_DIR_MEM_TO_MEM:
+		dpi_conf->cfg.xtype = DPI_XTYPE_INTERNAL_ONLY;
+		dpi_conf->cfg.rport = 0;
+		dpi_conf->cfg.wport = 0;
+		break;
+	case RTE_DMA_DIR_DEV_TO_DEV:
+		dpi_conf->cfg.xtype = DPI_XTYPE_EXTERNAL_ONLY;
+		dpi_conf->cfg.rport = conf->src_port.pcie.coreid;
+		dpi_conf->cfg.wport = conf->dst_port.pcie.coreid;
+	};
+
+	max_desc = conf->nb_desc;
+	if (!rte_is_power_of_2(max_desc))
+		max_desc = rte_align32pow2(max_desc);
+
+	num_rings = dpivf->rdpi.nr_lfs << 1;
+
+	for (ridx = 0; ridx < num_rings; ridx++) {
+		if (!rconf[ridx].used) {
+			if (!rconf[ridx].num_vchans) {
+				rconf[ridx].direction = conf->direction;
+				rconf[ridx].num_desc = max_desc;
+			} else if ((rconf[ridx].direction == conf->direction) &&
+				   (rconf[ridx].num_vchans < dpivf->vchans_per_ring)) {
+				rconf[ridx].num_desc += max_desc;
+			} else {
+				continue;
+			}
+
+			rconf[ridx].num_vchans++;
+			dpi_conf->ridx = ridx;
+
+			if (rconf[ridx].num_vchans == dpivf->vchans_per_ring)
+				rconf[ridx].used = true;
+
+			break;
+		}
+	}
+
+	if (ridx == num_rings)
+		rc = -ENODEV;
+
+	return rc;
+}
+
+static int
 cnxk_dmadev_vchan_setup(struct rte_dma_dev *dev, uint16_t vchan,
 			const struct rte_dma_vchan_conf *conf, uint32_t conf_sz)
 {
@@ -244,7 +438,9 @@ cnxk_dmadev_vchan_setup(struct rte_dma_dev *dev, uint16_t vchan,
 
 	header = (union cnxk_dpi_instr_cmd *)&dpi_conf->cmd.u;
 
-	if (dpivf->is_cn10k)
+	if (roc_model_is_cn20k())
+		ret = cn20k_dmadev_setup(dpivf, vchan, conf);
+	else if (roc_model_is_cn10k())
 		ret = cn10k_dmadev_setup_hdr(header, conf);
 	else
 		ret = cn9k_dmadev_setup_hdr(header, conf);
@@ -274,8 +470,113 @@ cnxk_dmadev_vchan_setup(struct rte_dma_dev *dev, uint16_t vchan,
 		dpi_conf->c_desc.compl_ptr[i * CNXK_DPI_COMPL_OFFSET] = CNXK_DPI_REQ_CDATA;
 
 	dpi_conf->c_desc.max_cnt = (max_desc - 1);
+	dpi_conf->cfg_done = true;
 
 	return 0;
+}
+
+static int
+cn20k_dmadev_queue_setup(struct cnxk_dpi_vf_s *dpivf)
+{
+	struct cn20k_ring_conf *rconf = dpivf->ring_conf;
+	struct roc_dpi *rdpi = &dpivf->rdpi;
+	struct cnxk_dpi_conf *dpi_conf;
+	struct roc_dpi_lf_que *que;
+	struct roc_dpi_lf_ring_cfg cfg;
+	struct roc_dpi_lf *lf;
+	uint16_t idx, qidx, ridx, vchan;
+	int rc = 0;
+
+	for (idx = 0; idx < rdpi->nr_lfs; idx++) {
+		lf = &rdpi->lfs[idx];
+		lf->chan_tbl = dpivf->chan_tbl;
+
+		for (qidx = 0; qidx < 2; qidx++) {
+			ridx = (idx << 1) + qidx;
+
+			if (!rconf[ridx].used)
+				continue;
+
+			que = &lf->queue[qidx];
+
+			que->qsize = rconf[ridx].num_desc;
+			que->cmd_len = DPI_CMD_SIZE_128B;
+			que->first_skip = 0;
+			que->later_skip = 0;
+			memset(&cfg, 0, sizeof(cfg));
+			cfg.ring_idx = qidx;
+			cfg.isize = que->cmd_len / DPI_CMD_SIZE_128B;
+			cfg.xtype = DPI_XTYPE_INTERNAL_ONLY;
+			cfg.rport = 0; /* Default is PEM:0 */
+			cfg.wport = 0; /* Default is PEM:0 */
+			cfg.pri = 0;   /* 0 - High Priority */
+
+			rc = roc_dpi_lf_ring_init(que, &cfg);
+			if (rc)
+				return rc;
+
+			for (vchan = 0; vchan < dpivf->num_vchans; vchan++) {
+				dpi_conf = &dpivf->conf[vchan];
+
+				if (dpi_conf->ridx == ridx) {
+					dpi_conf->que = que;
+					dpi_conf->dbell = lf->rbase + DPI_LF_RINGX_WIDX(qidx);
+				}
+			}
+		}
+
+		rc = roc_dpi_lf_chan_tbl_select(lf);
+		if (rc)
+			return rc;
+
+		/* FIX ME */
+		rc = roc_dpi_lf_pffunc_cfg(lf);
+		if (rc)
+			return rc;
+	}
+
+	return rc;
+}
+
+static int
+cn20k_dmadev_chan_tbl_setup(struct cnxk_dpi_vf_s *dpivf)
+{
+	uint16_t vchan, idx = 0, offset = 0;
+	struct cnxk_dpi_conf *dpi_conf;
+	uint64_t config[64] = {0};
+	struct roc_dpi_lf *lf;
+	int rc = 0;
+
+	lf = &(dpivf->rdpi.lfs[0]);
+
+	for (vchan = 0; vchan < dpivf->num_vchans; vchan++) {
+		dpi_conf = &dpivf->conf[vchan];
+		if (!dpi_conf->cfg_done || (dpi_conf->cfg.xtype == DPI_XTYPE_INTERNAL_ONLY))
+			continue;
+
+		dpi_conf->cmd.cn20k.chan = idx;
+		config[idx++] = dpi_conf->chan_cfg.u;
+
+		if (idx == 64) {
+			rc = roc_dpi_lf_chan_tbl_update(lf, config, offset, idx);
+			if (rc < 0) {
+				plt_err("Failed to update chan tbl = %d", rc);
+				return rc;
+			}
+			offset += idx;
+			idx = 0;
+		}
+	}
+
+	if (idx) {
+		rc = roc_dpi_lf_chan_tbl_update(lf, config, offset, idx);
+		if (rc < 0) {
+			plt_err("Failed to update chan tbl = %d", rc);
+			return rc;
+		}
+	}
+
+	return rc;
 }
 
 static int
@@ -295,11 +596,30 @@ cnxk_dmadev_start(struct rte_dma_dev *dev)
 		dpi_conf->c_desc.head = 0;
 		dpi_conf->c_desc.tail = 0;
 		dpi_conf->desc_idx = 0;
+
+		if (dpi_conf->c_desc.compl_ptr == NULL)
+			continue;
+
 		for (j = 0; j < dpi_conf->c_desc.max_cnt + 1; j++)
 			dpi_conf->c_desc.compl_ptr[j * CNXK_DPI_COMPL_OFFSET] = CNXK_DPI_REQ_CDATA;
 		nb_desc += dpi_conf->c_desc.max_cnt + 1;
 		cnxk_stats_reset(dev, i);
 		dpi_conf->completed_offset = 0;
+	}
+
+	if (roc_model_is_cn20k()) {
+		for (i = 0; i < (dpivf->rdpi.nr_lfs << 1); i++)
+			dpivf->ring_conf[i].pending = 0;
+		roc_dpi_reset(&dpivf->rdpi);
+		rc = cn20k_dmadev_queue_setup(dpivf);
+		if (rc)
+			goto error;
+
+		rc = cn20k_dmadev_chan_tbl_setup(dpivf);
+		if (rc)
+			goto error;
+
+		goto enable_dpi;
 	}
 
 	queue_buf_sz = CNXK_DPI_QUEUE_BUF_SIZE_V2;
@@ -338,6 +658,7 @@ cnxk_dmadev_start(struct rte_dma_dev *dev)
 	dpivf->chunk_head = 0;
 	dpivf->chunk_size_m1 = (queue_buf_sz >> 3) - 2;
 
+enable_dpi:
 	roc_dpi_enable(&dpivf->rdpi);
 error:
 	return rc;
@@ -348,14 +669,18 @@ cnxk_dmadev_stop(struct rte_dma_dev *dev)
 {
 	struct cnxk_dpi_vf_s *dpivf = dev->fp_obj->dev_private;
 
-	if (roc_dpi_wait_queue_idle(&dpivf->rdpi))
-		return -EAGAIN;
+	if (!roc_model_is_cn20k()) {
+		if (roc_dpi_wait_queue_idle(&dpivf->rdpi))
+			return -EAGAIN;
+	}
 
 	roc_dpi_disable(&dpivf->rdpi);
-	rte_mempool_free(dpivf->chunk_pool);
-	dpivf->chunk_pool = NULL;
-	dpivf->chunk_base = NULL;
-	dpivf->chunk_size_m1 = 0;
+	if (!roc_model_is_cn20k()) {
+		rte_mempool_free(dpivf->chunk_pool);
+		dpivf->chunk_pool = NULL;
+		dpivf->chunk_base = NULL;
+		dpivf->chunk_size_m1 = 0;
+	}
 
 	return 0;
 }
@@ -364,9 +689,14 @@ static int
 cnxk_dmadev_close(struct rte_dma_dev *dev)
 {
 	struct cnxk_dpi_vf_s *dpivf = dev->fp_obj->dev_private;
+	struct roc_dpi_lf *lf;
 
 	roc_dpi_disable(&dpivf->rdpi);
 	cnxk_dmadev_vchan_free(dpivf, RTE_DMA_ALL_VCHAN);
+	if (roc_model_is_cn20k()) {
+		lf = &(dpivf->rdpi.lfs[0]);
+		roc_dpi_lf_chan_tbl_free(lf);
+	}
 	roc_dpi_dev_fini(&dpivf->rdpi);
 
 	/* Clear all flags as we close the device. */
@@ -466,6 +796,25 @@ cnxk_dmadev_submit(void *dev_private, uint16_t vchan)
 }
 
 static int
+cn20k_dmadev_submit(void *dev_private, uint16_t vchan)
+{
+	struct cnxk_dpi_vf_s *dpivf = dev_private;
+	const struct cnxk_dpi_conf *dpi_conf = &dpivf->conf[vchan];
+	struct cn20k_ring_conf *ring_conf = &dpivf->ring_conf[dpi_conf->ridx];
+	uint16_t num_words = ring_conf->pending;
+
+	if (!num_words)
+		return 0;
+
+	rte_wmb();
+	plt_write64(num_words, dpi_conf->dbell);
+
+	ring_conf->pending = 0;
+
+	return 0;
+}
+
+static int
 cnxk_stats_get(const struct rte_dma_dev *dev, uint16_t vchan, struct rte_dma_stats *rte_stats,
 	       uint32_t size)
 {
@@ -546,10 +895,8 @@ cnxk_dmadev_probe(struct rte_pci_driver *pci_drv __rte_unused, struct rte_pci_de
 	char name[RTE_DEV_NAME_MAX_LEN];
 	struct rte_dma_dev *dmadev;
 	struct roc_dpi *rdpi = NULL;
+	uint16_t num_rings;
 	int rc;
-
-	if (!pci_dev->mem_resource[0].addr)
-		return -ENODEV;
 
 	rc = roc_plt_init();
 	if (rc) {
@@ -566,28 +913,67 @@ cnxk_dmadev_probe(struct rte_pci_driver *pci_drv __rte_unused, struct rte_pci_de
 	}
 
 	dpivf = dmadev->data->dev_private;
+	dmadev->device = &pci_dev->device;
+
+	if (roc_model_is_cn20k()) {
+		/* Parse devargs string */
+		rc = cn20k_dmadev_parse_devargs(dmadev->device->devargs, dpivf);
+		if (rc) {
+			plt_err("Failed to parse devargs rc=%d", rc);
+			goto err_out_free;
+		}
+
+		num_rings = dpivf->rdpi.nr_lfs << 1;
+
+		if (dpivf->num_vchans > num_rings) {
+			dpivf->vchans_per_ring = dpivf->num_vchans / num_rings;
+		} else {
+			/* Each vchan has got it's own hardware ring */
+			dpivf->vchans_per_ring = 1;
+			dpivf->rdpi.nr_lfs = dpivf->num_vchans >> 1;
+		}
+	}
 
 	dmadev->device = &pci_dev->device;
 	dmadev->fp_obj->dev_private = dpivf;
 	dmadev->dev_ops = &cnxk_dmadev_ops;
 
-	dmadev->fp_obj->copy = cnxk_dmadev_copy;
-	dmadev->fp_obj->copy_sg = cnxk_dmadev_copy_sg;
 	dmadev->fp_obj->submit = cnxk_dmadev_submit;
 	dmadev->fp_obj->completed = cnxk_dmadev_completed;
 	dmadev->fp_obj->completed_status = cnxk_dmadev_completed_status;
 	dmadev->fp_obj->burst_capacity = cnxk_damdev_burst_capacity;
 
 	if (roc_model_is_cn10k()) {
-		dpivf->is_cn10k = true;
 		dmadev->fp_obj->copy = cn10k_dmadev_copy;
 		dmadev->fp_obj->copy_sg = cn10k_dmadev_copy_sg;
+		dpivf->num_vchans = CNXK_DPI_MAX_VCHANS_PER_QUEUE;
+	} else if (roc_model_is_cn20k()) {
+		dmadev->fp_obj->submit = cn20k_dmadev_submit;
+		dmadev->fp_obj->copy = cn20k_dmadev_copy;
+		dmadev->fp_obj->copy_sg = cn20k_dmadev_copy_sg;
+	} else {
+		dmadev->fp_obj->copy = cnxk_dmadev_copy;
+		dmadev->fp_obj->copy_sg = cnxk_dmadev_copy_sg;
+		dpivf->num_vchans = CNXK_DPI_MAX_VCHANS_PER_QUEUE;
+	}
+
+	dpivf->conf = rte_zmalloc("dpi_vchan_conf", dpivf->num_vchans *
+				  sizeof(struct cnxk_dpi_conf), 0);
+	if (dpivf->conf == NULL) {
+		plt_err("Failed to allocate memory for vchan conf");
+		rc = -ENOMEM;
+		goto err_out_free;
 	}
 
 	dpivf->mcs_lock = NULL;
 	rdpi = &dpivf->rdpi;
 
 	rdpi->pci_dev = pci_dev;
+
+	/* Allocate and initialize the required DPI LFs in .dev_configure() */
+	if (roc_model_is_cn20k())
+		return 0;
+
 	rc = roc_dpi_dev_init(rdpi, offsetof(struct rte_event_dma_adapter_op, impl_opaque));
 	if (rc < 0)
 		goto err_out_free;
@@ -616,6 +1002,8 @@ cnxk_dmadev_remove(struct rte_pci_device *pci_dev)
 
 static const struct rte_pci_id cnxk_dma_pci_map[] = {
 	{RTE_PCI_DEVICE(PCI_VENDOR_ID_CAVIUM, PCI_DEVID_CNXK_DPI_VF)},
+	{RTE_PCI_DEVICE(PCI_VENDOR_ID_CAVIUM, PCI_DEVID_CN20K_DPI_PF)},
+	{RTE_PCI_DEVICE(PCI_VENDOR_ID_CAVIUM, PCI_DEVID_CN20K_DPI_VF)},
 	{
 		.vendor_id = 0,
 	},

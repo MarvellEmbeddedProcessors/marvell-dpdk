@@ -435,6 +435,114 @@ cn10k_dmadev_copy_sg(void *dev_private, uint16_t vchan, const struct rte_dma_sge
 	return dpi_conf->desc_idx++;
 }
 
+int
+cn20k_dmadev_copy(void *dev_private, uint16_t vchan, rte_iova_t src, rte_iova_t dst,
+		  uint32_t length, uint64_t flags)
+{
+	struct cnxk_dpi_vf_s *dpivf = dev_private;
+	struct cnxk_dpi_conf *dpi_conf = &dpivf->conf[vchan];
+	struct roc_dpi_lf_que *queue = dpi_conf->que;
+	struct cn20k_ring_conf *ring_conf;
+	uint8_t *comp_ptr;
+	uint64_t *cmd;
+
+	if (unlikely(((dpi_conf->c_desc.tail + 1) & dpi_conf->c_desc.max_cnt) ==
+		     dpi_conf->c_desc.head))
+		return -ENOSPC;
+
+	if (dpivf->vchans_per_ring == 1) {
+		cmd = queue->cmd_base + (dpi_conf->c_desc.tail << 4);
+	} else {
+		cmd = queue->cmd_base + (queue->widx << 4);
+		queue->widx = (queue->widx + 1) & (queue->qsize - 1);
+	}
+
+	ring_conf = &(dpivf->ring_conf[dpi_conf->ridx]);
+	comp_ptr = &dpi_conf->c_desc.compl_ptr[dpi_conf->c_desc.tail * CNXK_DPI_COMPL_OFFSET];
+
+	cmd[1] = (uint64_t)comp_ptr;
+	cmd[4] = ((uint64_t)length << 32) | length;
+	cmd[5] = src;
+	cmd[6] = dst;
+	cmd[0] = DPI_CMD_VLD_BIT | dpi_conf->cmd.u | 0x11U;
+
+	CNXK_DPI_STRM_INC(dpi_conf->c_desc, tail);
+
+	if (flags & RTE_DMA_OP_FLAG_SUBMIT) {
+		rte_wmb();
+		plt_write64(ring_conf->pending + 1, dpi_conf->dbell);
+		dpi_conf->stats.submitted += ring_conf->pending + 1;
+		ring_conf->pending = 0;
+	} else {
+		ring_conf->pending++;
+	}
+
+	return dpi_conf->desc_idx++;
+}
+
+/* Helper macro to write length and address */
+#define DPI_WRITE_SEGMENT(ptr, seg, i, idx, eidx) \
+	do { \
+		if (i % 2 == 0) { \
+			eidx = idx; \
+			ptr[idx++] = seg[i].length; \
+		} else { \
+			ptr[eidx] |= ((uint64_t)seg[i].length << 32); \
+		} \
+		ptr[idx++] = (uint64_t)seg[i].addr; \
+	} while (0)
+
+int
+cn20k_dmadev_copy_sg(void *dev_private, uint16_t vchan, const struct rte_dma_sge *src,
+		     const struct rte_dma_sge *dst, uint16_t nb_src, uint16_t nb_dst,
+		     uint64_t flags)
+{
+	struct cnxk_dpi_vf_s *dpivf = dev_private;
+	struct cnxk_dpi_conf *dpi_conf = &dpivf->conf[vchan];
+	struct roc_dpi_lf_que *queue = dpi_conf->que;
+	struct cn20k_ring_conf *ring_conf = &dpivf->ring_conf[dpi_conf->ridx];
+	uint8_t *comp_ptr, i;
+	uint16_t idx = 4;
+	uint8_t eidx = 0;
+	uint64_t *cmd;
+
+	if (unlikely(((dpi_conf->c_desc.tail + 1) & dpi_conf->c_desc.max_cnt) ==
+		     dpi_conf->c_desc.head))
+		return -ENOSPC;
+
+	if (dpivf->vchans_per_ring == 1) {
+		cmd = queue->cmd_base + (dpi_conf->c_desc.tail << 4);
+	} else {
+		cmd = queue->cmd_base + (queue->widx << 4);
+		queue->widx = (queue->widx + 1) & (queue->qsize - 1);
+	}
+	comp_ptr = &dpi_conf->c_desc.compl_ptr[dpi_conf->c_desc.tail * CNXK_DPI_COMPL_OFFSET];
+	CNXK_DPI_STRM_INC(dpi_conf->c_desc, tail);
+
+	cmd[1] = (uint64_t)comp_ptr;
+
+	/* Fill source segments */
+	for (i = 0; i < nb_src; i++)
+		DPI_WRITE_SEGMENT(cmd, src, i, idx, eidx);
+
+	/* Fill destination segments */
+	for (i = 0; i < nb_dst; i++)
+		DPI_WRITE_SEGMENT(cmd, dst, i, idx, eidx);
+
+	cmd[0] = DPI_CMD_VLD_BIT | dpi_conf->cmd.u | (nb_dst << 4) | nb_src;
+
+	if (flags & RTE_DMA_OP_FLAG_SUBMIT) {
+		rte_wmb();
+		plt_write64(ring_conf->pending + 1, dpi_conf->dbell);
+		dpi_conf->stats.submitted += ring_conf->pending + 1;
+		ring_conf->pending = 0;
+	} else {
+		ring_conf->pending++;
+	}
+
+	return dpi_conf->desc_idx++;
+}
+
 static inline uint64_t
 cnxk_dma_adapter_format_event(uint64_t event)
 {

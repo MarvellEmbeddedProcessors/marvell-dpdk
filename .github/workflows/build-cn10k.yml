@@ -13,16 +13,7 @@ permissions:
 jobs:
   ubuntu-cn10k-build:
     name: ubuntu-cn10k-arm64
-    runs-on: ubuntu-latest
-
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - arch: aarch64
-            distro: ubuntu22.04
-            compiler: gcc
-            library: static
+    runs-on: ubuntu-22.04-arm
 
     steps:
     - name: Checkout sources
@@ -30,7 +21,7 @@ jobs:
     - name: Generate cache keys
       id: get_ref_keys
       run: |
-        echo 'ccache=ccache-${{ matrix.distro }}-${{ matrix.compiler }}-${{ matrix.arch }}-'$(date -u +%Y-w%W) >> $GITHUB_OUTPUT
+        echo 'ccache=ccache-'$(date -u +%Y-m%M) >> $GITHUB_OUTPUT
     - name: Retrieve ccache cache
       uses: actions/cache@v4
       with:
@@ -38,33 +29,22 @@ jobs:
         key: ${{ steps.get_ref_keys.outputs.ccache }}-${{ github.ref }}
         restore-keys: |
           ${{ steps.get_ref_keys.outputs.ccache }}-refs/heads/main
-    - uses: uraimo/run-on-arch-action@v2.8.1
-      name: Build DPDK and generate package
+    - name: Build DPDK and generate package
       id: build
-      with:
-        arch: ${{ matrix.arch }}
-        distro: ${{ matrix.distro }}
-        githubToken: ${{ github.token }}
-        setup: |
+      run: |
           mkdir -p "${PWD}/artifacts"
           mkdir -p ~/.ccache
-        dockerRunArgs: |
-          --volume "${PWD}/artifacts:/artifacts"
-          --volume "${HOME}/.ccache:/root/.ccache"
-        shell: /bin/bash
-        install: |
-          apt-get update -q -y
-          apt-get install -y build-essential ccache git software-properties-common
-          add-apt-repository -y ppa:ubuntu-toolchain-r/test
-          apt-get update -q -y
-          apt-get install -y ccache libarchive-dev libbsd-dev libbpf-dev
-          apt-get install -y libfdt-dev libjansson-dev
-          apt-get install -y libssl-dev ninja-build pkg-config python3-pip
-          apt-get install -y python3-pyelftools python3-setuptools python3-wheel zlib1g-dev meson gcc
-          apt-get install -y gcc-13
-        run: |
+          sudo apt-get update -q -y
+          sudo apt-get install -y build-essential ccache git software-properties-common
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update -q -y
+          sudo apt-get install -y ccache libarchive-dev libbsd-dev libbpf-dev
+          sudo apt-get install -y libfdt-dev libjansson-dev
+          sudo apt-get install -y libssl-dev ninja-build pkg-config python3-pip
+          sudo apt-get install -y python3-pyelftools python3-setuptools python3-wheel zlib1g-dev meson gcc
+          sudo apt-get install -y gcc-13
           export CC='ccache gcc-13'
-          echo "cache_dir = /root/.ccache" > /root/.ccache/ccache.conf
+          echo "cache_dir = ~/.ccache" > ~/.ccache/ccache.conf
           ccache -p
           meson build -Dexamples=all -Denable_drivers="*/cnxk,net/ring,net/tap" -Dplatform=cn10k --prefix="${PWD}/install"
           ninja install -C build
@@ -90,11 +70,11 @@ jobs:
           cd -
           mv "${PWD}/install" "${PWD}/dpdk-${PKG_VERSION_NAME}-cn10k${PKG_POSTFIX}_${MRVL_PKG_VERSION}_arm64"
           dpkg --build "dpdk-${PKG_VERSION_NAME}-cn10k${PKG_POSTFIX}_${MRVL_PKG_VERSION}_arm64"
-          cp "dpdk-${PKG_VERSION_NAME}-cn10k${PKG_POSTFIX}_${MRVL_PKG_VERSION}_arm64.deb" /artifacts/.
-          echo "PKG_VERSION_NAME=${PKG_VERSION_NAME}" >> /artifacts/env
-          echo "MRVL_PKG_VERSION=${MRVL_PKG_VERSION}" >> /artifacts/env
-          echo "PKG_POSTFIX=${PKG_POSTFIX}" >> /artifacts/env
-          echo "DISTRO=${DISTRO}" >> /artifacts/env
+          cp "dpdk-${PKG_VERSION_NAME}-cn10k${PKG_POSTFIX}_${MRVL_PKG_VERSION}_arm64.deb" ${PWD}/artifacts/.
+          echo "PKG_VERSION_NAME=${PKG_VERSION_NAME}" >> ${PWD}/artifacts/env
+          echo "MRVL_PKG_VERSION=${MRVL_PKG_VERSION}" >> ${PWD}/artifacts/env
+          echo "PKG_POSTFIX=${PKG_POSTFIX}" >> ${PWD}/artifacts/env
+          echo "DISTRO=${DISTRO}" >> ${PWD}/artifacts/env
     - name: Export version name
       id: artifacts
       run: |

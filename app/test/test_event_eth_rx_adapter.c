@@ -824,6 +824,7 @@ static int
 adapter_queues_add_del(void)
 {
 	struct rte_event_eth_rx_adapter_queue_conf *queue_conf;
+	struct rte_event_dev_info event_dev_info;
 	struct rte_eth_dev_info dev_info;
 	uint16_t i, max_rx_queues;
 	int32_t *rx_queue_ids;
@@ -831,8 +832,7 @@ adapter_queues_add_del(void)
 	uint32_t cap;
 	int err;
 
-	err = rte_event_eth_rx_adapter_caps_get(TEST_DEV_ID, TEST_ETHDEV_ID,
-						&cap);
+	err = rte_event_eth_rx_adapter_caps_get(TEST_DEV_ID, TEST_ETHDEV_ID, &cap);
 	TEST_ASSERT(err == 0, "Expected 0 got %d", err);
 
 	err = rte_eth_dev_info_get(TEST_ETHDEV_ID, &dev_info);
@@ -840,17 +840,19 @@ adapter_queues_add_del(void)
 
 	max_rx_queues = RTE_MIN(dev_info.max_rx_queues, MAX_NUM_RX_QUEUE);
 
+	err = rte_event_dev_info_get(TEST_DEV_ID, &event_dev_info);
+	TEST_ASSERT(err == 0, "Expected 0 got %d", err);
+
 	queue_conf = rte_zmalloc(NULL, sizeof(*queue_conf) * max_rx_queues, 0);
 	TEST_ASSERT(queue_conf != NULL, "Failed to allocate memory");
 
-	rx_queue_ids =
-		rte_zmalloc(NULL, sizeof(*rx_queue_ids) * max_rx_queues, 0);
+	rx_queue_ids = rte_zmalloc(NULL, sizeof(*rx_queue_ids) * max_rx_queues, 0);
 	TEST_ASSERT(rx_queue_ids != NULL, "Failed to allocate memory");
 
 	ev.sched_type = RTE_SCHED_TYPE_ATOMIC;
 	for (i = 0; i < max_rx_queues; i++) {
 		rx_queue_ids[i] = i;
-		ev.queue_id = i;
+		ev.queue_id = i % event_dev_info.max_event_queues;
 		if (cap & RTE_EVENT_ETH_RX_ADAPTER_CAP_OVERRIDE_FLOW_ID) {
 			ev.flow_id = 1;
 			queue_conf[i].rx_queue_flags =
@@ -865,16 +867,15 @@ adapter_queues_add_del(void)
 						  rx_queue_ids, queue_conf, 0);
 	TEST_ASSERT(err == -EINVAL, "Expected -EINVAL got %d", err);
 
-	err = rte_event_eth_rx_adapter_queues_add(1, TEST_ETHDEV_ID, NULL,
-						  queue_conf, 0);
+	err = rte_event_eth_rx_adapter_queues_add(TEST_INST_ID + 1, TEST_ETHDEV_ID,
+						  NULL, queue_conf, 0);
 	TEST_ASSERT(err == -EINVAL, "Expected -EINVAL got %d", err);
 
 	err = rte_event_eth_rx_adapter_queues_add(TEST_INST_ID, TEST_ETHDEV_ID,
 						  rx_queue_ids, queue_conf, 1);
 	TEST_ASSERT(err == 0, "Expected 0 got %d", err);
 
-	err = rte_event_eth_rx_adapter_queue_del(TEST_INST_ID, TEST_ETHDEV_ID,
-						 0);
+	err = rte_event_eth_rx_adapter_queue_del(TEST_INST_ID, TEST_ETHDEV_ID, 0);
 	TEST_ASSERT(err == 0, "Expected 0 got %d", err);
 
 	if (cap & RTE_EVENT_ETH_RX_ADAPTER_CAP_MULTI_EVENTQ) {

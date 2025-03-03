@@ -710,7 +710,7 @@ typedef int (*eventdev_eth_rx_adapter_queue_add_t)(
 		const struct rte_event_eth_rx_adapter_queue_conf *queue_conf);
 
 /**
- * Add ethernet Rx queues to event device. This callback is invoked if
+ * Add ethernet Rx queues to event device in burst. This callback is invoked if
  * the caps returned from rte_eventdev_eth_rx_adapter_caps_get(, eth_port_id)
  * has RTE_EVENT_ETH_RX_ADAPTER_CAP_INTERNAL_PORT set.
  *
@@ -1609,9 +1609,9 @@ struct eventdev_ops {
 	eventdev_eth_rx_adapter_caps_get_t eth_rx_adapter_caps_get;
 	/**< Get ethernet Rx adapter capabilities */
 	eventdev_eth_rx_adapter_queue_add_t eth_rx_adapter_queue_add;
-	/**< Add Rx queue to ethernet Rx adapter */
-	eventdev_eth_rx_adapter_queues_add_t eth_rx_adapter_queues_add;
 	/**< Add Rx queues to ethernet Rx adapter */
+	eventdev_eth_rx_adapter_queues_add_t eth_rx_adapter_queues_add;
+	/**< Add Rx queues to ethernet Rx adapter in burst */
 	eventdev_eth_rx_adapter_queue_del_t eth_rx_adapter_queue_del;
 	/**< Delete Rx queues from ethernet Rx adapter */
 	eventdev_eth_rx_adapter_queue_conf_get_t eth_rx_adapter_queue_conf_get;

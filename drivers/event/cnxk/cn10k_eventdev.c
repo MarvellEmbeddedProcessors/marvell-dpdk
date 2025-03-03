@@ -690,6 +690,22 @@ cn10k_sso_rx_offload_cb(uint16_t port_id, uint64_t flags)
 }
 
 static int
+cn10k_sso_configure_queue_stash_default(struct cnxk_sso_evdev *dev, uint16_t hwgrp)
+{
+	struct roc_sso_hwgrp_stash stash;
+	int rc;
+
+	stash.hwgrp = hwgrp;
+	stash.stash_offset = CN10K_SSO_DEFAULT_STASH_OFFSET;
+	stash.stash_count = CN10K_SSO_DEFAULT_STASH_LENGTH;
+	rc = roc_sso_hwgrp_stash_config(&dev->sso, &stash, 1);
+	if (rc)
+		plt_warn("failed to configure HWGRP WQE stashing rc = %d", rc);
+
+	return rc;
+}
+
+static int
 cn10k_sso_rx_adapter_queue_add(
 	const struct rte_eventdev *event_dev, const struct rte_eth_dev *eth_dev,
 	int32_t rx_queue_id,
@@ -697,8 +713,8 @@ cn10k_sso_rx_adapter_queue_add(
 {
 	struct cnxk_eth_dev *cnxk_eth_dev = eth_dev->data->dev_private;
 	struct cnxk_sso_evdev *dev = cnxk_sso_pmd_priv(event_dev);
-	struct roc_sso_hwgrp_stash stash;
 	struct cn10k_eth_rxq *rxq;
+	uint16_t nb_rx_queues;
 	void *lookup_mem;
 	int rc;
 
@@ -706,8 +722,9 @@ cn10k_sso_rx_adapter_queue_add(
 	if (rc)
 		return -EINVAL;
 
-	rc = cnxk_sso_rx_adapter_queue_add(event_dev, eth_dev, rx_queue_id,
-					   queue_conf);
+	nb_rx_queues = rx_queue_id == -1 ? 0 : 1;
+	rc = cnxk_sso_rx_adapter_queues_add(event_dev, eth_dev, &rx_queue_id, queue_conf,
+					    nb_rx_queues);
 	if (rc)
 		return -EINVAL;
 
@@ -718,18 +735,11 @@ cn10k_sso_rx_adapter_queue_add(
 	lookup_mem = rxq->lookup_mem;
 	cn10k_sso_set_priv_mem(event_dev, lookup_mem);
 	cn10k_sso_fp_fns_set((struct rte_eventdev *)(uintptr_t)event_dev);
-	if (roc_feature_sso_has_stash() && dev->nb_event_ports > 1) {
-		stash.hwgrp = queue_conf->ev.queue_id;
-		stash.stash_offset = CN10K_SSO_DEFAULT_STASH_OFFSET;
-		stash.stash_count = CN10K_SSO_DEFAULT_STASH_LENGTH;
-		rc = roc_sso_hwgrp_stash_config(&dev->sso, &stash, 1);
-		if (rc < 0)
-			plt_warn("failed to configure HWGRP WQE stashing rc = %d", rc);
-	}
+	if (roc_feature_sso_has_stash() && dev->nb_event_ports > 1)
+		rc = cn10k_sso_configure_queue_stash_default(dev, queue_conf->ev.queue_id);
 
-	return 0;
+	return rc;
 }
-
 static int
 cn10k_sso_rx_adapter_queues_add(const struct rte_eventdev *event_dev,
 				const struct rte_eth_dev *eth_dev, int32_t rx_queue_id[],
@@ -738,10 +748,9 @@ cn10k_sso_rx_adapter_queues_add(const struct rte_eventdev *event_dev,
 {
 	struct cnxk_eth_dev *cnxk_eth_dev = eth_dev->data->dev_private;
 	struct cnxk_sso_evdev *dev = cnxk_sso_pmd_priv(event_dev);
-	struct roc_sso_hwgrp_stash stash;
 	struct cn10k_eth_rxq *rxq;
 	void *lookup_mem;
-	int rc;
+	int rc, i;
 
 	rc = strncmp(eth_dev->device->driver->name, "net_cn10k", 8);
 	if (rc)
@@ -760,15 +769,24 @@ cn10k_sso_rx_adapter_queues_add(const struct rte_eventdev *event_dev,
 	cn10k_sso_set_priv_mem(event_dev, lookup_mem);
 	cn10k_sso_fp_fns_set((struct rte_eventdev *)(uintptr_t)event_dev);
 	if (roc_feature_sso_has_stash() && dev->nb_event_ports > 1) {
-		stash.hwgrp = queue_conf[0].ev.queue_id;
-		stash.stash_offset = CN10K_SSO_DEFAULT_STASH_OFFSET;
-		stash.stash_count = CN10K_SSO_DEFAULT_STASH_LENGTH;
-		rc = roc_sso_hwgrp_stash_config(&dev->sso, &stash, 1);
-		if (rc < 0)
-			plt_warn("failed to configure HWGRP WQE stashing rc = %d", rc);
+		uint16_t hwgrp = dev->sso.max_hwgrp;
+
+		if (nb_rx_queues == 0)
+			rc = cn10k_sso_configure_queue_stash_default(dev,
+								     queue_conf[0].ev.queue_id);
+
+		for (i = 0; i < nb_rx_queues; i++) {
+			if (hwgrp == queue_conf[i].ev.queue_id)
+				continue;
+
+			hwgrp = queue_conf[i].ev.queue_id;
+			rc = cn10k_sso_configure_queue_stash_default(dev, hwgrp);
+			if (rc < 0)
+				break;
+		}
 	}
 
-	return 0;
+	return rc;
 }
 
 static int
@@ -1031,8 +1049,6 @@ cn10k_dma_adapter_vchan_del(const struct rte_eventdev *event_dev,
 
 	return cnxk_dma_adapter_vchan_del(dma_dev_id, vchan_id);
 }
-
-
 
 static struct eventdev_ops cn10k_sso_dev_ops = {
 	.dev_infos_get = cn10k_sso_info_get,

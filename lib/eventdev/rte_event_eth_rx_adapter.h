@@ -582,10 +582,9 @@ int rte_event_eth_rx_adapter_queue_add(uint8_t id,
  *  - <0: Error code on failure.
  */
 __rte_experimental
-int rte_event_eth_rx_adapter_queues_add(
-			uint8_t id, uint16_t eth_dev_id, int32_t rx_queue_id[],
-			const struct rte_event_eth_rx_adapter_queue_conf conf[],
-			uint16_t nb_rx_queues);
+int rte_event_eth_rx_adapter_queues_add(uint8_t id, uint16_t eth_dev_id, int32_t rx_queue_id[],
+					const struct rte_event_eth_rx_adapter_queue_conf conf[],
+					uint16_t nb_rx_queues);
 
 /**
  * Delete receive queue from an event adapter.

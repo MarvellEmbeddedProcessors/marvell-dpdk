@@ -115,8 +115,8 @@ rte_pmd_rvu_lf_bar_get(uint8_t dev_id, uint8_t bar_num, size_t *va, size_t *mask
 
 	roc_rvu_lf = (struct roc_rvu_lf *)rawdev->dev_private;
 
-	if (bar_num > PCI_MAX_RESOURCE ||
-			(roc_rvu_lf->pci_dev->mem_resource[bar_num].addr == NULL)) {
+	if (bar_num >= PCI_MAX_RESOURCE ||
+	    (roc_rvu_lf->pci_dev->mem_resource[bar_num].addr == NULL)) {
 		*va = 0;
 		*mask = 0;
 		return -ENOTSUP;

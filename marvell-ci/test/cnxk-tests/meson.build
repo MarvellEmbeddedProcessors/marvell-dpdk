@@ -21,7 +21,11 @@ cnxk_test_deps = [
 cnxk_test_dep_objs = []
 cnxk_def_lib = get_option('default_library')
 foreach d : cnxk_test_deps
-    cnxk_test_dep_objs += get_variable(cnxk_def_lib + '_rte_' + d)
+    var_name = cnxk_def_lib + '_rte_' + d
+    if not is_variable(var_name)
+        subdir_done()
+    endif
+    cnxk_test_dep_objs += get_variable(var_name)
 endforeach
 
 subdir('common')

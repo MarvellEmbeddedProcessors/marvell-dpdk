@@ -100,7 +100,7 @@ jobs:
           release_name: dpdk-cn9k-${{ steps.artifacts.outputs.PKG_VERSION_NAME }}_${{ steps.artifacts.outputs.MRVL_PKG_VERSION }}-${{ steps.artifacts.outputs.DISTRO }}-${{ steps.artifacts.outputs.TAG }}
           suppress_errors: true
       - name: Release DPDK cn9k package
-        uses: softprops/action-gh-release@v2.0.4
+        uses: softprops/action-gh-release@v2.2.2
         if: ${{ github.event_name == 'push' }}
         with:
           tag_name: dpdk-cn9k-${{ steps.artifacts.outputs.PKG_VERSION_NAME }}_${{ steps.artifacts.outputs.MRVL_PKG_VERSION }}-${{ steps.artifacts.outputs.DISTRO }}-${{ steps.artifacts.outputs.TAG }}

@@ -21,6 +21,7 @@ sources = files(
         'roc_dev.c',
         'roc_dpi.c',
         'roc_dpi_debug.c',
+        'roc_emdev.c',
         'roc_eswitch.c',
         'roc_hash.c',
         'roc_idev.c',

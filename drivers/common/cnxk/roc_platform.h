@@ -299,6 +299,8 @@ extern int cnxk_logtype_rep;
 #define RTE_LOGTYPE_rep cnxk_logtype_rep
 extern int cnxk_logtype_esw;
 #define RTE_LOGTYPE_esw cnxk_logtype_esw
+extern int cnxk_logtype_emdev;
+#define RTE_LOGTYPE_emdev cnxk_logtype_emdev
 
 #define RTE_LOGTYPE_CNXK cnxk_logtype_base
 
@@ -331,6 +333,7 @@ extern int cnxk_logtype_esw;
 #define plt_dpi_dbg(fmt, ...)	plt_dbg(dpi, fmt, ##__VA_ARGS__)
 #define plt_rep_dbg(fmt, ...)	plt_dbg(rep, fmt, ##__VA_ARGS__)
 #define plt_esw_dbg(fmt, ...)	plt_dbg(esw, fmt, ##__VA_ARGS__)
+#define plt_emdev_dbg(fmt, ...) plt_dbg(emdev, fmt, ##__VA_ARGS__)
 
 /* Datapath logs */
 #define plt_dp_err(...) \

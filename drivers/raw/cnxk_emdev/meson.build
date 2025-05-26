@@ -12,6 +12,6 @@ sources = files('cnxk_emdev.c')
 
 deps += ['rawdev', 'mbuf', 'mempool', 'pci', 'bus_pci']
 deps += ['common_cnxk', 'mempool_cnxk']
-headers = files('rte_pmd_cnxk_emdev.h')
+headers = files('rte_pmd_cnxk_emdev.h', 'spec/virtio.h', 'spec/virtio_net.h')
 
 require_iova_in_mbuf = false

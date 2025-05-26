@@ -1,0 +1,129 @@
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(C) 2025 Marvell.
+ */
+
+#ifndef _CNXK_EMDEV_H_
+#define _CNXK_EMDEV_H_
+
+#include "rte_pmd_cnxk_emdev.h"
+#include <roc_api.h>
+
+#define PCI_DEVID_CNXK_EMDEV_VIRTIO_NET	   0x1041
+#define PCI_DEVID_CNXK_EMDEV_VIRTIO_CRYPTO 0x1054
+
+#define CNXK_EMDEV_Q_MBUF_RING_SZ 4096u
+
+#define CNXK_EMDEV_DFLT_QID 1
+
+/* Transport specific device object */
+typedef void *cnxk_emdev_pfvf_obj_t;
+struct cnxk_emdev;
+
+/* PSW queue */
+struct cnxk_emdev_psw_q {
+	uint64_t *q_base;
+	uint32_t q_sz;
+	uintptr_t pi_dbl;
+	uintptr_t ci_dbl;
+	uint16_t ci;
+};
+
+/* DPI queue */
+struct cnxk_emdev_dpi_q {
+	uint64_t *inst_base;
+	uint64_t *compl_base;
+	uint64_t *ridx_r;
+	uint64_t *widx_r;
+	uint16_t avail;
+	uint16_t compl_idx;
+	uint8_t qid;
+	struct rte_mempool *mp;
+};
+
+/* Notify queue and ack queue */
+struct cnxk_emdev_queue {
+	/* Fast path */
+	struct cnxk_emdev_psw_q nq;
+	struct cnxk_emdev_psw_q aq;
+	struct cnxk_emdev_dpi_q dpi_q_inb;
+	struct cnxk_emdev_dpi_q dpi_q_outb;
+
+	/* VF bitmap */
+	uint64_t vf_bitmap[2];
+
+	/* Mbuf array */
+	struct rte_mbuf *mbuf_arr[CNXK_EMDEV_Q_MBUF_RING_SZ];
+	uint16_t mbuf_pi;
+	uint16_t mbuf_ci;
+
+	/* Slow path */
+	struct roc_emdev_psw_nq_qp *roc_nq_qp;
+	struct roc_dpi_lf_que *roc_dpi_q_inb;
+	struct roc_dpi_lf_que *roc_dpi_q_outb;
+	struct cnxk_emdev *dev;
+};
+
+struct cnxk_emdev {
+	/* Base ROC EM device */
+	struct roc_emdev roc_emdev;
+
+	/* EMDEV device type */
+	enum rte_pmd_emdev_type emdev_type;
+
+	/* PSW Notify Ack queue pairs */
+	struct roc_emdev_psw_nq_qp *notify_qs;
+	uint16_t nb_notify_qs;
+
+	/* DPI LF's */
+	struct roc_dpi_lf *dpi_lfs;
+	uint16_t nb_dpi_lfs;
+
+	/* EMDEV fast path queue objects */
+	struct cnxk_emdev_queue *emdev_qs;
+	uint16_t nb_emdev_qs;
+
+	cnxk_emdev_pfvf_obj_t pfvf;
+	uint16_t nb_epfvfs;
+	uint16_t func_q_map[ROC_PSW_VFS_MAX][ROC_PSW_OUTB_QUEUES_MAX];
+	struct rte_mempool *default_mp;
+	uint16_t dev_id;
+};
+
+static inline struct cnxk_emdev *
+cnxk_rawdev_priv(const struct rte_rawdev *rawdev)
+{
+	return rawdev->dev_private;
+}
+
+static inline uint16_t
+cnxk_emdev_qid_from_ctx(rte_rawdev_obj_t context)
+{
+	return (uintptr_t)context & 0xFF;
+}
+
+static inline uint16_t
+cnxk_emdev_vf_from_ctx(rte_rawdev_obj_t context)
+{
+	return ((uintptr_t)context >> 8) & 0xFF;
+}
+
+static inline uint16_t
+cnxk_emdev_rid_from_ctx(rte_rawdev_obj_t context)
+{
+	return ((uintptr_t)context >> 16) & 0xFF;
+}
+
+int cnxk_emdev_info_get(struct rte_rawdev *rawdev, rte_rawdev_obj_t dev_info, size_t dev_info_size);
+int cnxk_emdev_configure(const struct rte_rawdev *rawdev, rte_rawdev_obj_t config,
+			 size_t config_size);
+int cnxk_emdev_close(struct rte_rawdev *rawdev);
+int cnxk_emdev_start(struct rte_rawdev *rawdev);
+void cnxk_emdev_stop(struct rte_rawdev *rawdev);
+int cnxk_emdev_dump(struct rte_rawdev *rawdev, FILE *f);
+uint16_t cnxk_emdev_queue_count(struct rte_rawdev *rawdev);
+int cnxk_emdev_queue_setup(struct rte_rawdev *rawdev, uint16_t queue_id,
+			   rte_rawdev_obj_t queue_conf, size_t conf_size);
+int cnxk_emdev_queue_release(struct rte_rawdev *rawdev, uint16_t queue_id);
+int cnxk_emdev_attr_get(struct rte_rawdev *rawdev, const char *attr_name, uint64_t *attr_value);
+int cnxk_emdev_attr_set(struct rte_rawdev *rawdev, const char *attr_name, uint64_t attr_value);
+#endif /* _CNXK_EMDEV_H_ */

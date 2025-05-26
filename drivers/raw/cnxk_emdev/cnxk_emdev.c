@@ -20,9 +20,12 @@
 #include <rte_rawdev_pmd.h>
 
 #include "cnxk_emdev.h"
+#include "cnxk_emdev_vnet.h"
 #include "rte_pmd_cnxk_emdev.h"
 
 #define NB_DESC_MAX 4096
+
+extern struct rte_rawdev_ops cnxk_emdev_vnet_ops;
 
 static void
 cnxk_emdev_get_name(char *name, struct rte_pci_device *pci_dev)
@@ -45,13 +48,14 @@ cnxk_emdev_queue_setup(struct rte_rawdev *rawdev, uint16_t queue_id, rte_rawdev_
 {
 	struct cnxk_emdev *dev = cnxk_rawdev_priv(rawdev);
 	struct rte_pmd_cnxk_emdev_q_conf *conf = queue_conf;
+	struct cnxk_emdev_virtio_pfvf *pfvfs = dev->pfvf;
 	struct roc_emdev_psw_nq_qp *roc_nq_qp;
 	struct cnxk_emdev_queue *emdev_q;
 	struct roc_dpi_lf_que *roc_dpi_q;
 	struct cnxk_emdev_dpi_q *dpi_q;
 	struct roc_dpi_lf *dpi_lf;
 	uintptr_t rbase;
-	int rc;
+	int rc, i;
 
 	if (conf_size != sizeof(*conf))
 		return -EINVAL;
@@ -119,6 +123,12 @@ cnxk_emdev_queue_setup(struct rte_rawdev *rawdev, uint16_t queue_id, rte_rawdev_
 	if (!dpi_q->compl_base)
 		goto psw_nq_qp_fini;
 
+	/* Take references of vnet queues */
+	for (i = 0; i < dev->nb_epfvfs; i++) {
+		plt_emdev_dbg("VNET queue setup for PFVF %d %p ", i, pfvfs[i].vnet_qs);
+		dev->emdev_qs[queue_id].vnet_q_base[i] = pfvfs[i].vnet_qs;
+	}
+
 	return 0;
 psw_nq_qp_fini:
 	rte_free(emdev_q->dpi_q_inb.compl_base);
@@ -170,14 +180,16 @@ cnxk_emdev_class_init(const struct rte_rawdev *rawdev, struct rte_pmd_cnxk_emdev
 	struct cnxk_emdev *dev = cnxk_rawdev_priv(rawdev);
 	int rc = 0;
 
-	PLT_SET_USED(conf);
-
 	switch (dev->emdev_type) {
 	case EMDEV_TYPE_VIRTIO_NET:
+		rc = cnxk_emdev_virtio_setup(dev, conf);
+		if (rc)
+			goto exit;
 		break;
 	default:
 		break;
 	}
+exit:
 	return rc;
 }
 
@@ -186,6 +198,7 @@ cnxk_emdev_class_fini(struct cnxk_emdev *dev)
 {
 	switch (dev->emdev_type) {
 	case EMDEV_TYPE_VIRTIO_NET:
+		cnxk_emdev_virtio_close(dev);
 		break;
 	default:
 		break;
@@ -298,6 +311,58 @@ exit:
 }
 
 int
+cnxk_emdev_attr_get(struct rte_rawdev *rawdev, const char *attr_name, uint64_t *attr_value)
+{
+	struct cnxk_emdev *dev = cnxk_rawdev_priv(rawdev);
+
+	if (attr_name == NULL)
+		return -EINVAL;
+
+	if (!strncmp(attr_name, CNXK_EMDEV_ATTR_FUNC_Q_MAP, CNXK_EMDEV_ATTR_NAME_LEN)) {
+		struct rte_pmd_cnxk_func_q_map_attr *q_map =
+			(struct rte_pmd_cnxk_func_q_map_attr *)attr_value;
+
+		if (q_map == NULL) {
+			plt_err("Invalid func_q_map attribute value");
+			return -EINVAL;
+		}
+		if (q_map->func_id >= dev->nb_epfvfs) {
+			plt_err("Invalid func_id:%u for func_q_map", q_map->func_id);
+			return -EINVAL;
+		}
+		q_map->qid = dev->func_q_map[q_map->func_id][q_map->outb_qid];
+		return 0;
+	}
+	return -EINVAL;
+}
+
+int
+cnxk_emdev_attr_set(struct rte_rawdev *rawdev, const char *attr_name, uint64_t attr_value)
+{
+	struct cnxk_emdev *dev = cnxk_rawdev_priv(rawdev);
+
+	if (attr_name == NULL)
+		return -EINVAL;
+
+	if (!strncmp(attr_name, CNXK_EMDEV_ATTR_FUNC_Q_MAP, CNXK_EMDEV_ATTR_NAME_LEN)) {
+		struct rte_pmd_cnxk_func_q_map_attr *q_map =
+			(struct rte_pmd_cnxk_func_q_map_attr *)attr_value;
+
+		if (q_map == NULL) {
+			plt_err("Invalid func_q_map attribute value");
+			return -EINVAL;
+		}
+		if (q_map->func_id >= dev->nb_epfvfs) {
+			plt_err("Invalid func_id:%u for func_q_map", q_map->func_id);
+			return -EINVAL;
+		}
+		dev->func_q_map[q_map->func_id][q_map->outb_qid] = q_map->qid;
+		return 0;
+	}
+	return -EINVAL;
+}
+
+int
 cnxk_emdev_close(struct rte_rawdev *rawdev)
 {
 	struct cnxk_emdev *dev = cnxk_rawdev_priv(rawdev);
@@ -322,6 +387,11 @@ cnxk_emdev_start(struct rte_rawdev *rawdev)
 	struct roc_emdev *roc_emdev = &dev->roc_emdev;
 	uint16_t notify_qoff;
 	int i, rc;
+
+	if (dev->emdev_type == EMDEV_TYPE_VIRTIO_NET) {
+		/* Update devops to point to vnet_ops */
+		rawdev->dev_ops = &cnxk_emdev_vnet_ops;
+	}
 
 	for (i = 0; i < dev->nb_epfvfs; i++) {
 		notify_qoff = dev->func_q_map[i][0];
@@ -361,6 +431,50 @@ cnxk_emdev_stop(struct rte_rawdev *rawdev)
 	rawdev->started = 0;
 }
 
+int
+cnxk_emdev_dump(struct rte_rawdev *rawdev, FILE *file)
+{
+	struct cnxk_emdev *dev = cnxk_rawdev_priv(rawdev);
+	struct cnxk_emdev_virtio_pfvf *pfvf = dev->pfvf;
+	struct cnxk_emdev_virtio_queue_conf *conf;
+	struct cnxk_emdev_queue *emdev_q;
+	struct roc_dpi_lf *dpi_lf;
+	uint16_t qid;
+	int i;
+
+	/* Dump all the notify/ack queues a.k.a emdev queues and associated DPI LFs */
+	for (i = 0; i < dev->nb_emdev_qs; i++) {
+
+		emdev_q = &dev->emdev_qs[i];
+		/* Skip dumping queue if not enabled */
+		if (!emdev_q->roc_nq_qp)
+			continue;
+
+		plt_info("Dumping emdev queue %d", i);
+		roc_emdev_psw_nq_qp_dump(emdev_q->roc_nq_qp, file);
+
+		dpi_lf = &dev->dpi_lfs[i];
+		roc_dpi_lf_dump(dpi_lf, file);
+	}
+
+	/* Dump all the inbound/outbound queues for all VF's */
+	for (i = 0; i < dev->nb_epfvfs; i++) {
+		plt_info("Dumping inb/outb queues for epf_func 0x%x", pfvf[i].epf_func);
+
+		for (qid = 0; qid < pfvf[i].max_queues; qid++) {
+			conf = &pfvf[i].queue_conf[qid];
+			/* Skip dumping queue if not enabled */
+
+			if (!conf->queue_enable)
+				continue;
+			roc_emdev_psw_inb_q_dump(&conf->inbq, file);
+			roc_emdev_psw_outb_q_dump(&conf->outbq, file);
+		}
+	}
+
+	return 0;
+}
+
 static const struct rte_rawdev_ops cnxk_emdev_ops = {
 	.dev_info_get = cnxk_emdev_info_get,
 	.dev_configure = cnxk_emdev_configure,
@@ -371,6 +485,11 @@ static const struct rte_rawdev_ops cnxk_emdev_ops = {
 	.queue_count = cnxk_emdev_queue_count,
 	.queue_setup = cnxk_emdev_queue_setup,
 	.queue_release = cnxk_emdev_queue_release,
+
+	.attr_set = cnxk_emdev_attr_set,
+	.attr_get = cnxk_emdev_attr_get,
+
+	.dump = cnxk_emdev_dump,
 };
 
 static int

@@ -1,0 +1,135 @@
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(C) 2025 Marvell.
+ */
+#include <bus_pci_driver.h>
+#include <dev_driver.h>
+#include <rte_common.h>
+#include <rte_eal.h>
+#include <rte_lcore.h>
+#include <rte_pci.h>
+#include <rte_rawdev.h>
+#include <rte_rawdev_pmd.h>
+
+#include <roc_api.h>
+
+#include "cnxk_emdev_vnet.h"
+
+static uint16_t
+vnet_cq_id_get(struct cnxk_emdev_virtio_pfvf *pfvf, uint64_t feature_bits)
+{
+	RTE_SET_USED(pfvf);
+
+	if (feature_bits & (1ULL << VIRTIO_NET_F_MQ))
+		return pfvf->max_queues - 1;
+	else
+		return 2;
+}
+
+static int
+vnet_link_sts_update(struct cnxk_emdev_virtio_pfvf *pfvf,
+		     struct rte_pmd_cnxk_vnet_link_info *link_info)
+{
+	struct virtio_net_config *dev_cfg = &pfvf->net_conf.dev_cfg;
+
+	dev_cfg->status = link_info->status;
+	dev_cfg->duplex = link_info->duplex;
+	dev_cfg->speed = link_info->speed;
+
+	return 0;
+}
+
+int
+cnxk_emdev_vnet_init(struct cnxk_emdev_virtio_pfvf *pfvf, struct rte_pmd_cnxk_vnet_conf *conf)
+{
+	struct virtio_net_config *dev_cfg = &pfvf->net_conf.dev_cfg;
+	uint64_t feature_bits = 0x0ULL;
+
+	feature_bits |= RTE_BIT64(VIRTIO_NET_F_CTRL_VQ) | RTE_BIT64(VIRTIO_NET_F_MQ) |
+			RTE_BIT64(VIRTIO_NET_F_CTRL_RX) | RTE_BIT64(VIRTIO_NET_F_STATUS) |
+			RTE_BIT64(VIRTIO_NET_F_MAC) | RTE_BIT64(VIRTIO_NET_F_MRG_RXBUF) |
+			RTE_BIT64(VIRTIO_NET_F_SPEED_DUPLEX);
+
+	if (conf->reta_size)
+		feature_bits |= RTE_BIT64(VIRTIO_NET_F_RSS);
+
+	if (conf->mtu) {
+		feature_bits |= RTE_BIT64(VIRTIO_NET_F_MTU);
+		dev_cfg->mtu = conf->mtu;
+	}
+
+	/* Populate default netdev config */
+	dev_cfg->status = conf->link_info.status;
+	dev_cfg->duplex = conf->link_info.duplex;
+	dev_cfg->speed = conf->link_info.speed;
+	memcpy(dev_cfg->mac, conf->mac, sizeof(dev_cfg->mac));
+	dev_cfg->max_virtqueue_pairs = pfvf->max_queues / 2;
+	dev_cfg->rss_max_key_size = conf->hash_key_size;
+	dev_cfg->rss_max_indirection_table_length = conf->reta_size;
+	dev_cfg->supported_hash_types = VIRTIO_NET_HASH_TYPE_MASK;
+
+	/* One time setup */
+	emdev_virtio_cbs[EMDEV_TYPE_VIRTIO_NET].cq_id_get = vnet_cq_id_get;
+
+	pfvf->dev_feature_bits |= feature_bits;
+
+	return 0;
+}
+
+static int
+cnxk_emdev_vnet_attr_set(struct rte_rawdev *rawdev, const char *attr_name, uint64_t attr_value)
+{
+	struct cnxk_emdev *dev = cnxk_rawdev_priv(rawdev);
+
+	if (attr_name == NULL)
+		return -EINVAL;
+
+	if (!strncmp(attr_name, CNXK_EMDEV_ATTR_FUNC_Q_MAP, CNXK_EMDEV_ATTR_NAME_LEN)) {
+		struct rte_pmd_cnxk_func_q_map_attr *q_map =
+			(struct rte_pmd_cnxk_func_q_map_attr *)attr_value;
+
+		if (q_map == NULL) {
+			plt_err("Invalid func_q_map attribute value");
+			return -EINVAL;
+		}
+		if (q_map->func_id >= dev->roc_emdev.nb_epfvfs) {
+			plt_err("Invalid func_id:%u for func_q_map", q_map->func_id);
+			return -EINVAL;
+		}
+		dev->func_q_map[q_map->func_id][q_map->outb_qid] = q_map->qid;
+		return 0;
+	} else if (!strncmp(attr_name, CNXK_EMDEV_ATTR_LINK_STATUS, CNXK_EMDEV_ATTR_NAME_LEN)) {
+		struct rte_pmd_cnxk_vnet_link_info *link =
+			(struct rte_pmd_cnxk_vnet_link_info *)attr_value;
+		struct cnxk_emdev_virtio_pfvf *pfvfs = dev->pfvf;
+		struct cnxk_emdev_virtio_pfvf *pfvf;
+
+		if (link == NULL) {
+			plt_err("Invalid vnet link attribute value");
+			return -EINVAL;
+		}
+		if (link->func_id >= dev->roc_emdev.nb_epfvfs) {
+			plt_err("Invalid func_id:%u for link status update", link->func_id);
+			return -EINVAL;
+		}
+		pfvf = &pfvfs[link->func_id];
+
+		return vnet_link_sts_update(pfvf, link);
+	}
+	return -EINVAL;
+}
+
+const struct rte_rawdev_ops cnxk_emdev_vnet_ops = {
+	.dev_info_get = cnxk_emdev_info_get,
+	.dev_configure = cnxk_emdev_configure,
+	.dev_close = cnxk_emdev_close,
+	.dev_start = cnxk_emdev_start,
+	.dev_stop = cnxk_emdev_stop,
+
+	.queue_count = cnxk_emdev_queue_count,
+	.queue_setup = cnxk_emdev_queue_setup,
+	.queue_release = cnxk_emdev_queue_release,
+
+	.attr_set = cnxk_emdev_vnet_attr_set,
+
+	.dump = cnxk_emdev_dump,
+};

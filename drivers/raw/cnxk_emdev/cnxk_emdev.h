@@ -40,6 +40,28 @@ struct cnxk_emdev_dpi_q {
 	struct rte_mempool *mp;
 };
 
+struct cnxk_emdev_vnet_queue {
+	uint16_t epf_func;
+	uint16_t qid;
+	uint16_t dbl_fn_id;
+	uint16_t dpi_compl_fn_id;
+	uint16_t enq_fn_id;
+	uint16_t q_sz;
+	uint8_t virtio_hdr_sz;
+	uintptr_t sd_base;
+	uint16_t pi_desc;
+	uint16_t ci_desc;
+	uint16_t ci;
+	uint16_t buf_len;
+	uint16_t data_off;
+	uint16_t chan_flags;
+	uint64_t aura_handle;
+	struct rte_mempool *mp;
+
+	/* Slow path */
+	struct cnxk_emdev_virtio_pfvf *pfvf;
+};
+
 /* Notify queue and ack queue */
 struct cnxk_emdev_queue {
 	/* Fast path */
@@ -50,6 +72,9 @@ struct cnxk_emdev_queue {
 
 	/* VF bitmap */
 	uint64_t vf_bitmap[2];
+
+	/* Array of vnet queues per VF */
+	struct cnxk_emdev_vnet_queue *vnet_q_base[ROC_PSW_VFS_MAX];
 
 	/* Mbuf array */
 	struct rte_mbuf *mbuf_arr[CNXK_EMDEV_Q_MBUF_RING_SZ];
@@ -112,6 +137,11 @@ cnxk_emdev_rid_from_ctx(rte_rawdev_obj_t context)
 {
 	return ((uintptr_t)context >> 16) & 0xFF;
 }
+
+int cnxk_emdev_virtio_setup(struct cnxk_emdev *dev, struct rte_pmd_cnxk_emdev_conf *conf);
+void cnxk_emdev_virtio_close(struct cnxk_emdev *dev);
+int cnxk_emdev_virtio_queue_init(struct cnxk_emdev *dev, uint16_t func_id, uint16_t outb_qid);
+void cnxk_emdev_virtio_queue_fini(struct cnxk_emdev *dev, uint16_t func_id, uint16_t outb_qid);
 
 int cnxk_emdev_info_get(struct rte_rawdev *rawdev, rte_rawdev_obj_t dev_info, size_t dev_info_size);
 int cnxk_emdev_configure(const struct rte_rawdev *rawdev, rte_rawdev_obj_t config,

@@ -8,7 +8,9 @@ if not dpdk_conf.get('RTE_ARCH_64')
     subdir_done()
 endif
 
-sources = files('cnxk_emdev.c')
+sources = files('cnxk_emdev.c',
+                'cnxk_emdev_virtio.c',
+                'cnxk_emdev_vnet.c')
 
 deps += ['rawdev', 'mbuf', 'mempool', 'pci', 'bus_pci']
 deps += ['common_cnxk', 'mempool_cnxk']

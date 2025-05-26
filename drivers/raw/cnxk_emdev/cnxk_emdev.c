@@ -356,8 +356,17 @@ cnxk_emdev_attr_set(struct rte_rawdev *rawdev, const char *attr_name, uint64_t a
 			plt_err("Invalid func_id:%u for func_q_map", q_map->func_id);
 			return -EINVAL;
 		}
+
+		if (q_map->qid >= dev->nb_emdev_qs) {
+			plt_err("Invalid qid:%u for func_q_map", q_map->qid);
+			return -EINVAL;
+		}
 		dev->func_q_map[q_map->func_id][q_map->outb_qid] = q_map->qid;
-		return 0;
+		/* Reinitialize the queues since notification queue to be mapped might be
+		 * different
+		 */
+		cnxk_emdev_virtio_queue_fini(dev, q_map->func_id, q_map->outb_qid);
+		return cnxk_emdev_virtio_queue_init(dev, q_map->func_id, q_map->outb_qid);
 	}
 	return -EINVAL;
 }

@@ -62,6 +62,7 @@ struct cnxk_emdev_virtio_pfvf {
 	/* Virtio per-queue fast path data */
 	struct cnxk_emdev_vnet_queue *vnet_qs;
 	uint16_t max_queues;
+	uint16_t config_msix_vector;
 
 	/* Status callback */
 	rte_pmd_cnxk_emdev_status_cb_t status_cb;

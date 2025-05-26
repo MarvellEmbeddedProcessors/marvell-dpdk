@@ -14,6 +14,7 @@
 #define CNXK_EMDEV_Q_MBUF_RING_SZ 4096u
 
 #define CNXK_EMDEV_DFLT_QID 1
+#define CNXK_EMDEV_MSIX_VECTOR_INVALID 0xFFFF
 
 /* Transport specific device object */
 typedef void *cnxk_emdev_pfvf_obj_t;

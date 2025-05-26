@@ -95,5 +95,7 @@ EMDEV_VNET_ENQ_FASTPATH_MODES
 #undef E
 
 int cnxk_emdev_vnet_init(struct cnxk_emdev_virtio_pfvf *pfvf, struct rte_pmd_cnxk_vnet_conf *conf);
+int cnxk_emdev_vnet_cfg_read(struct cnxk_emdev_virtio_pfvf *pfvf, uint32_t offset, void *data,
+			     uint8_t len);
 
 #endif /* _CNXK_EMDEV_VIRTIO_NET_H_ */

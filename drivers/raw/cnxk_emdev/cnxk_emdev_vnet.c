@@ -39,6 +39,22 @@ vnet_link_sts_update(struct cnxk_emdev_virtio_pfvf *pfvf,
 }
 
 int
+cnxk_emdev_vnet_cfg_read(struct cnxk_emdev_virtio_pfvf *pfvf, uint32_t offset, void *data,
+			 uint8_t len)
+{
+	struct virtio_net_config *dev_cfg = &pfvf->net_conf.dev_cfg;
+	uint32_t cfg_offset;
+
+	cfg_offset = offset - ROC_EMDEV_VIRTIO_PCI_COMMON_CFG_LEN;
+	if (cfg_offset >= 64)
+		return -EINVAL;
+
+	memcpy(data, (uint8_t *)dev_cfg + cfg_offset, len);
+
+	return 0;
+}
+
+int
 cnxk_emdev_vnet_init(struct cnxk_emdev_virtio_pfvf *pfvf, struct rte_pmd_cnxk_vnet_conf *conf)
 {
 	struct virtio_net_config *dev_cfg = &pfvf->net_conf.dev_cfg;
@@ -96,7 +112,12 @@ cnxk_emdev_vnet_attr_set(struct rte_rawdev *rawdev, const char *attr_name, uint6
 			return -EINVAL;
 		}
 		dev->func_q_map[q_map->func_id][q_map->outb_qid] = q_map->qid;
-		return 0;
+		/* Reinitialize the queues since notification queue to be mapped might be
+		 * different
+		 */
+		cnxk_emdev_virtio_queue_fini(dev, q_map->func_id, q_map->outb_qid);
+		return cnxk_emdev_virtio_queue_init(dev, q_map->func_id, q_map->outb_qid);
+
 	} else if (!strncmp(attr_name, CNXK_EMDEV_ATTR_LINK_STATUS, CNXK_EMDEV_ATTR_NAME_LEN)) {
 		struct rte_pmd_cnxk_vnet_link_info *link =
 			(struct rte_pmd_cnxk_vnet_link_info *)attr_value;

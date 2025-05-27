@@ -149,6 +149,7 @@ const struct rte_rawdev_ops cnxk_emdev_vnet_ops = {
 	.queue_count = cnxk_emdev_queue_count,
 	.queue_setup = cnxk_emdev_queue_setup,
 	.queue_release = cnxk_emdev_queue_release,
+	.enqueue_bufs = cnxk_emdev_vnet_enqueue,
 	.dequeue_bufs = cnxk_emdev_vnet_dequeue,
 
 	.attr_set = cnxk_emdev_vnet_attr_set,
@@ -173,6 +174,9 @@ static __rte_always_inline int
 emdev_vnet_dpi_compl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue *vnet_q,
 		     uint16_t index, const uint16_t flags)
 {
+	if (flags & DPI_ENQ_F)
+		return cnxk_emdev_vnet_enq_dpi_compl(queue, vnet_q, index, flags);
+
 	if (flags & DPI_DEQ_F)
 		return cnxk_emdev_vnet_deq_dpi_compl(queue, vnet_q, index, flags);
 
@@ -183,6 +187,9 @@ static __rte_always_inline int
 emdev_vnet_psw_dbl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue *vnet_q,
 		   uint16_t index, const uint16_t flags)
 {
+	if (flags & DBL_ENQ_F)
+		return cnxk_emdev_vnet_enq_psw_dbl(queue, vnet_q, index, flags);
+
 	if (flags & DBL_CTRL_F)
 		return cnxk_emdev_vnet_ctrl_deq_psw_dbl(queue, vnet_q, index, flags);
 

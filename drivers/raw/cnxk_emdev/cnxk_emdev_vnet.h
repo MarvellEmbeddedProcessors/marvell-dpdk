@@ -106,6 +106,10 @@ cnxk_emdev_vnet_update_fn_ptrs(void)
 	for (i = 0; i < (EMDEV_VNET_DPI_COMPL_OFFLOAD_LAST << 1); i++)
 		if (cnxk_emdev_vnet_dpi_compl_fn[i] == NULL)
 			cnxk_emdev_vnet_dpi_compl_fn[i] = cnxk_emdev_vnet_dpi_compl_fn[0];
+
+	for (i = 0; i < (EMDEV_VNET_ENQ_OFFLOAD_LAST << 1); i++)
+		if (cnxk_emdev_vnet_enq_fn[i] == NULL)
+			cnxk_emdev_vnet_enq_fn[i] = cnxk_emdev_vnet_enq_fn[0];
 }
 
 static __rte_always_inline uint16_t
@@ -206,10 +210,21 @@ emdev_dpi_compl_process(struct cnxk_emdev_queue *queue, struct cnxk_emdev_dpi_q 
 int cnxk_emdev_vnet_init(struct cnxk_emdev_virtio_pfvf *pfvf, struct rte_pmd_cnxk_vnet_conf *conf);
 int cnxk_emdev_vnet_cfg_read(struct cnxk_emdev_virtio_pfvf *pfvf, uint32_t offset, void *data,
 			     uint8_t len);
+int cnxk_emdev_vnet_enqueue(struct rte_rawdev *rawdev, struct rte_rawdev_buf **bufs, uint32_t count,
+			    rte_rawdev_obj_t ctx);
 int cnxk_emdev_vnet_dequeue(struct rte_rawdev *rawdev, struct rte_rawdev_buf **bufs, uint32_t count,
 			    rte_rawdev_obj_t ctx);
 
 /* Process functions */
+int cnxk_emdev_vnet_enq_psw_dbl(struct cnxk_emdev_queue *queue,
+				struct cnxk_emdev_vnet_queue *vnet_q, uint16_t index,
+				const uint16_t flags);
+int cnxk_emdev_vnet_enq_dpi_compl(struct cnxk_emdev_queue *queue,
+				  struct cnxk_emdev_vnet_queue *vnet_q, uint16_t index,
+				  const uint16_t flags);
+int cnxk_emdev_vnet_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue *vnet_q,
+			struct rte_mbuf **mbufs, uint16_t count);
+
 int cnxk_emdev_vnet_deq_psw_dbl(struct cnxk_emdev_queue *queue,
 				struct cnxk_emdev_vnet_queue *vnet_q, uint16_t index,
 				const uint16_t flags);
@@ -220,5 +235,7 @@ int cnxk_emdev_vnet_deq_dpi_compl(struct cnxk_emdev_queue *queue,
 int cnxk_emdev_vnet_ctrl_deq_psw_dbl(struct cnxk_emdev_queue *queue,
 				     struct cnxk_emdev_vnet_queue *vnet_q, uint16_t index,
 				     const uint16_t flags);
+int cnxk_emdev_vnet_ctrl_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue *vnet_q,
+			     struct rte_mbuf **mbufs, uint16_t count);
 
 #endif /* _CNXK_EMDEV_VIRTIO_NET_H_ */

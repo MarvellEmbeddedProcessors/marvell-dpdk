@@ -10,7 +10,8 @@ endif
 
 sources = files('cnxk_emdev.c',
                 'cnxk_emdev_virtio.c',
-                'cnxk_emdev_vnet.c')
+                'cnxk_emdev_vnet.c',
+                'cnxk_emdev_vnet_deq.c')
 
 deps += ['rawdev', 'mbuf', 'mempool', 'pci', 'bus_pci']
 deps += ['common_cnxk', 'mempool_cnxk']

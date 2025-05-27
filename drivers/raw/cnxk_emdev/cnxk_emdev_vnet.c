@@ -149,8 +149,63 @@ const struct rte_rawdev_ops cnxk_emdev_vnet_ops = {
 	.queue_count = cnxk_emdev_queue_count,
 	.queue_setup = cnxk_emdev_queue_setup,
 	.queue_release = cnxk_emdev_queue_release,
+	.dequeue_bufs = cnxk_emdev_vnet_dequeue,
 
 	.attr_set = cnxk_emdev_vnet_attr_set,
 
 	.dump = cnxk_emdev_dump,
 };
+
+cnxk_emdev_vnet_psw_dbl_fn_t cnxk_emdev_vnet_psw_dbl_fn[EMDEV_VNET_PSW_DBL_OFFLOAD_LAST << 1] = {
+#define D(name, flags) [flags] = cnxk_emdev_vnet_psw_dbl_##name,
+	EMDEV_VNET_PSW_DBL_FASTPATH_MODES
+#undef D
+};
+
+cnxk_emdev_vnet_dpi_compl_fn_t
+	cnxk_emdev_vnet_dpi_compl_fn[EMDEV_VNET_DPI_COMPL_OFFLOAD_LAST << 1] = {
+#define C(name, flags) [flags] = cnxk_emdev_vnet_dpi_compl_##name,
+		EMDEV_VNET_DPI_COMPL_FASTPATH_MODES
+#undef C
+};
+
+static __rte_always_inline int
+emdev_vnet_dpi_compl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue *vnet_q,
+		     uint16_t index, const uint16_t flags)
+{
+	if (flags & DPI_DEQ_F)
+		return cnxk_emdev_vnet_deq_dpi_compl(queue, vnet_q, index, flags);
+
+	return 0;
+}
+
+static __rte_always_inline int
+emdev_vnet_psw_dbl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue *vnet_q,
+		   uint16_t index, const uint16_t flags)
+{
+	if (flags & DBL_CTRL_F)
+		return cnxk_emdev_vnet_ctrl_deq_psw_dbl(queue, vnet_q, index, flags);
+
+	if (flags & DBL_DEQ_F)
+		return cnxk_emdev_vnet_deq_psw_dbl(queue, vnet_q, index, flags);
+
+	return 0;
+}
+
+#define C(name, flags)                                                                             \
+	int cnxk_emdev_vnet_dpi_compl_##name(void *q, void *vnet_q, uint16_t idx)                  \
+	{                                                                                          \
+		return emdev_vnet_dpi_compl(q, vnet_q, idx, flags);                                \
+	}
+
+EMDEV_VNET_DPI_COMPL_FASTPATH_MODES
+#undef C
+
+#define D(name, flags)                                                                             \
+	int cnxk_emdev_vnet_psw_dbl_##name(void *q, void *vnet_q, uint16_t idx)                    \
+	{                                                                                          \
+		return emdev_vnet_psw_dbl(q, vnet_q, idx, flags);                                  \
+	}
+
+EMDEV_VNET_PSW_DBL_FASTPATH_MODES
+#undef D

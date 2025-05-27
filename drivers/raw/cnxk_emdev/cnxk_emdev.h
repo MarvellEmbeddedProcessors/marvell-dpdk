@@ -115,6 +115,51 @@ struct cnxk_emdev {
 	uint16_t dev_id;
 };
 
+#define WRAP_OFF(i) ((uint16_t)(i) & ~RTE_BIT64(15))
+
+#define NQ_DESC_SZ(x)		 (WRAP_OFF(x) * PSW_NQ_DESC_SZ)
+#define NQ_DESC_PTR_OFF(b, i, o) (uint64_t *)(((uintptr_t)b) + NQ_DESC_SZ(i) + (o))
+
+#define AQ_DESC_SZ(x)		 (WRAP_OFF(x) * PSW_AQ_DESC_SZ)
+#define AQ_DESC_PTR_OFF(b, i, o) (uint64_t *)(((uintptr_t)b) + AQ_DESC_SZ(i) + (o))
+
+static __rte_always_inline uint16_t
+wrap_off_add(uint16_t a, uint16_t b, uint16_t q_sz)
+{
+	uint16_t sum = a + b;
+	uint16_t mask = (~(q_sz - 1) & ~RTE_BIT64(15));
+
+	sum += mask;
+	sum = sum & ~mask;
+
+	return sum;
+}
+
+static __rte_always_inline uint16_t
+wrap_off_m1(uint16_t a, uint16_t q_sz)
+{
+	uint16_t sum = a - 1;
+	uint16_t mask = (~(q_sz - 1) & ~RTE_BIT64(15));
+
+	sum = sum & ~mask;
+	return sum;
+}
+
+static __rte_always_inline uint16_t
+wrap_off_diff(uint16_t a, uint16_t b, uint16_t q_sz)
+{
+	return (a & RTE_BIT64(15)) == (b & RTE_BIT64(15)) ?
+		       ((uint16_t)(WRAP_OFF(a) - WRAP_OFF(b))) :
+		       (q_sz - (b & (RTE_BIT64(15) - 1)) + WRAP_OFF(a));
+}
+
+static __rte_always_inline uint16_t
+wrap_off_diff_no_wrap(uint16_t a, uint16_t b, uint16_t q_sz)
+{
+	return (a & RTE_BIT64(15)) == (b & RTE_BIT64(15)) ? (uint16_t)(a - b) :
+							    (q_sz - (b & (RTE_BIT64(15) - 1)));
+}
+
 static inline struct cnxk_emdev *
 cnxk_rawdev_priv(const struct rte_rawdev *rawdev)
 {

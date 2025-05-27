@@ -537,6 +537,9 @@ cnxk_emdev_probe(struct rte_pci_driver *pci_drv, struct rte_pci_device *pci_dev)
 	dev = cnxk_rawdev_priv(rawdev);
 	dev->roc_emdev.pci_dev = pci_dev;
 
+	/* Updates null function pointers */
+	cnxk_emdev_vnet_update_fn_ptrs();
+
 	return roc_emdev_init(&dev->roc_emdev);
 }
 

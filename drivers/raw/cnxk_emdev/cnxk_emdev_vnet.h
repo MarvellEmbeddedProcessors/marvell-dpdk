@@ -6,6 +6,7 @@
 #define _CNXK_EMDEV_VIRTIO_NET_H_
 
 #include "cnxk_emdev.h"
+#include "cnxk_emdev_dma.h"
 #include "cnxk_emdev_virtio.h"
 #include "roc_api.h"
 #include "rte_pmd_cnxk_emdev.h"
@@ -94,8 +95,130 @@ EMDEV_VNET_DPI_COMPL_FASTPATH_MODES
 EMDEV_VNET_ENQ_FASTPATH_MODES
 #undef E
 
+static __rte_always_inline void
+cnxk_emdev_vnet_update_fn_ptrs(void)
+{
+	uint64_t i = 0;
+	for (; i < (EMDEV_VNET_PSW_DBL_OFFLOAD_LAST << 1); i++)
+		if (cnxk_emdev_vnet_psw_dbl_fn[i] == NULL)
+			cnxk_emdev_vnet_psw_dbl_fn[i] = cnxk_emdev_vnet_psw_dbl_fn[0];
+
+	for (i = 0; i < (EMDEV_VNET_DPI_COMPL_OFFLOAD_LAST << 1); i++)
+		if (cnxk_emdev_vnet_dpi_compl_fn[i] == NULL)
+			cnxk_emdev_vnet_dpi_compl_fn[i] = cnxk_emdev_vnet_dpi_compl_fn[0];
+}
+
+static __rte_always_inline uint16_t
+emdev_dbl_desc_process(struct cnxk_emdev_queue *queue)
+{
+	struct cnxk_emdev_psw_q *nq = &queue->nq;
+	struct cnxk_emdev_virtio_pfvf *pfvfs;
+	struct cnxk_emdev_vnet_queue *vnet_q;
+	void *q_base = nq->q_base;
+	uintptr_t ci_dbl = nq->ci_dbl;
+	uintptr_t pi_dbl = nq->pi_dbl;
+	uint64_t desc_data, index;
+	uint16_t q_sz = nq->q_sz;
+	uint16_t pi, ci, rid;
+	uint64_t pi_val;
+	uint8_t vf;
+
+	pi_val = plt_read64(pi_dbl);
+	pi = (pi_val & 0xFFFF) | (~((pi_val >> 16) & 1) << 15);
+	ci = nq->ci;
+
+	if (wrap_off_diff(pi, ci, q_sz) == 0)
+		return 0;
+
+	while (ci != pi) {
+#ifdef CNXK_EMDEV_DEBUG
+		roc_emdev_psw_nq_desc_dump(NULL, NQ_DESC_PTR_OFF(q_base, ci, 0));
+		uint8_t dtype;
+		desc_data = *NQ_DESC_PTR_OFF(q_base, ci, 0);
+		dtype = (desc_data >> 1) & 0x7;
+		if (dtype != PSW_NOTIF_DESC_TYPE_PI_DBL) {
+			plt_err("Invalid Descriptor found");
+			return 0;
+		}
+#endif
+		desc_data = *NQ_DESC_PTR_OFF(q_base, ci, 0);
+		vf = (desc_data >> 16) & 0xff;
+		rid = (desc_data >> 8) & 0xff;
+		/* Include phase bit as BIT 15 in index */
+		index = ((desc_data >> 32) & 0xffff);
+		pfvfs = queue->dev->pfvf;
+		vnet_q = &pfvfs[vf].vnet_qs[rid];
+		/* Jump to queue specific callback for processing dbell.
+		 * Stall processing if the descriptor is not consumed
+		 */
+#ifdef CNXK_EMDEV_DEBUG
+		plt_info("Processing VNET DBL VF %d RID %d to dbl %u", vf, rid, vnet_q->dbl_fn_id);
+#endif
+		if ((*cnxk_emdev_vnet_psw_dbl_fn[vnet_q->dbl_fn_id])(queue, vnet_q, index))
+			break;
+
+		ci = wrap_off_add(ci, 1, q_sz);
+	}
+
+	nq->ci = ci;
+
+	/* update CI doorbell */
+	ci &= (q_sz - 1);
+	plt_write64(ci, ci_dbl);
+	return 0;
+}
+
+static __rte_always_inline uint16_t
+emdev_dpi_compl_process(struct cnxk_emdev_queue *queue, struct cnxk_emdev_dpi_q *dpi_q)
+{
+	uint64_t *compl_base = dpi_q->compl_base;
+	uint64_t *widx_r = dpi_q->widx_r;
+	struct cnxk_emdev_vnet_queue *vnet_q;
+	uint16_t widx, compl_idx;
+	uint64_t *compl_ptr;
+	uint8_t cs, fn_id;
+
+	widx = plt_read64(widx_r) & 0xFFF;
+	compl_idx = dpi_q->compl_idx;
+	while (compl_idx != widx) {
+		/* Process the completion */
+		compl_ptr = cnxk_emdev_dma_compl_addr(compl_base, compl_idx);
+
+		cs = __atomic_load_n((uint8_t *)compl_ptr, __ATOMIC_ACQUIRE);
+		if (cs == 0xFF)
+			break;
+
+		vnet_q = (struct cnxk_emdev_vnet_queue *)compl_ptr[1];
+		if (vnet_q) {
+			fn_id = vnet_q->dpi_compl_fn_id;
+			/* Jump to queue specific callback for processing completion
+			 * Donot continue if the completion is not consumed.
+			 */
+			if ((*cnxk_emdev_vnet_dpi_compl_fn[fn_id])(queue, vnet_q, compl_idx))
+				break;
+		}
+		compl_idx = cnxk_emdev_dma_next_idx(compl_idx);
+	}
+	dpi_q->compl_idx = compl_idx;
+	return 0;
+}
+
 int cnxk_emdev_vnet_init(struct cnxk_emdev_virtio_pfvf *pfvf, struct rte_pmd_cnxk_vnet_conf *conf);
 int cnxk_emdev_vnet_cfg_read(struct cnxk_emdev_virtio_pfvf *pfvf, uint32_t offset, void *data,
 			     uint8_t len);
+int cnxk_emdev_vnet_dequeue(struct rte_rawdev *rawdev, struct rte_rawdev_buf **bufs, uint32_t count,
+			    rte_rawdev_obj_t ctx);
+
+/* Process functions */
+int cnxk_emdev_vnet_deq_psw_dbl(struct cnxk_emdev_queue *queue,
+				struct cnxk_emdev_vnet_queue *vnet_q, uint16_t index,
+				const uint16_t flags);
+int cnxk_emdev_vnet_deq_dpi_compl(struct cnxk_emdev_queue *queue,
+				  struct cnxk_emdev_vnet_queue *vnet_q, uint16_t index,
+				  const uint16_t flags);
+
+int cnxk_emdev_vnet_ctrl_deq_psw_dbl(struct cnxk_emdev_queue *queue,
+				     struct cnxk_emdev_vnet_queue *vnet_q, uint16_t index,
+				     const uint16_t flags);
 
 #endif /* _CNXK_EMDEV_VIRTIO_NET_H_ */

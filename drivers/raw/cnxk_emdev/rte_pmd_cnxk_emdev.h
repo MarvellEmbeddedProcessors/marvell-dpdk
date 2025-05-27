@@ -89,4 +89,19 @@ struct rte_pmd_cnxk_emdev_q_conf {
 	uint16_t nb_desc;
 };
 
+struct rte_pmd_cnxk_emdev_event {
+	/* Dequeued hoqid and index to be shared between dequeue and
+	 * enqueue operations.
+	 */
+	uint16_t qid;
+	uint16_t ci_start;
+	uint16_t ci_end;
+	uint16_t status;
+	uint8_t func_id;
+#define RTE_PMD_CNXK_EMDEV_EVENT_TYPE_CTRL 0x1
+	uint8_t type;
+	uint16_t data_len;
+	uint8_t data[];
+};
+
 #endif /* _RTE_PMD_CNXK_EMDEV_H_ */

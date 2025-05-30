@@ -247,6 +247,24 @@ check_lcore_params(void)
 }
 
 static int
+check_port_config(void)
+{
+	uint16_t portid;
+
+	for (portid = 0; portid < RTE_MAX_ETHPORTS; ++portid) {
+		if (!is_ethdev_enabled(portid))
+			continue;
+
+		if (!rte_eth_dev_is_valid_port(portid)) {
+			APP_INFO("Port %u is not present on the board\n", portid);
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+static int
 init_lcore_ethdev_rx(void)
 {
 	uint16_t portid, nb_ethdev_rx;
@@ -892,12 +910,373 @@ parse_args(int argc, char **argv)
 }
 
 static void
+print_ethaddr(const char *name, const struct rte_ether_addr *eth_addr)
+{
+	char buf[RTE_ETHER_ADDR_FMT_SIZE];
+
+	rte_ether_format_addr(buf, RTE_ETHER_ADDR_FMT_SIZE, eth_addr);
+	APP_INFO_NH("%s%s", name, buf);
+}
+
+static int
+init_eth_mempool(uint16_t portid, uint32_t nb_mbuf)
+{
+	char s[64];
+
+	if (e_pktmbuf_pool[portid] == NULL) {
+		snprintf(s, sizeof(s), "mbuf_pool_e%d", portid);
+		/* Create a pool with priv size of a cacheline */
+		e_pktmbuf_pool[portid] =
+			rte_pktmbuf_pool_create(s, nb_mbuf, MEMPOOL_CACHE_SIZE,
+						RTE_CACHE_LINE_SIZE, pool_buf_len, 0);
+		if (e_pktmbuf_pool[portid] == NULL)
+			rte_exit(EXIT_FAILURE, "Cannot init mbuf pool\n");
+		else
+			APP_INFO("Allocated ethdev mbuf pool for portid=%d\n", portid);
+	}
+
+	return 0;
+}
+
+static int
+init_emdev_mempool(uint16_t devid, uint32_t nb_mbuf)
+{
+	char s[64];
+
+	if (v_pktmbuf_pool[devid] == NULL) {
+		snprintf(s, sizeof(s), "mbuf_pool_v%d", devid);
+		/* Create a pool with priv size of a cacheline */
+		v_pktmbuf_pool[devid] =
+			rte_pktmbuf_pool_create(s, nb_mbuf, MEMPOOL_CACHE_SIZE,
+						RTE_CACHE_LINE_SIZE, pool_buf_len, 0);
+		if (v_pktmbuf_pool[devid] == NULL)
+			rte_exit(EXIT_FAILURE, "Cannot init mbuf pool\n");
+		else
+			APP_INFO("Allocated virtio_dev mbuf pool for devid=%d\n", devid);
+	}
+	return 0;
+}
+
+/* Check the link status of all ports in up to 9s, and print them finally */
+static void
+check_all_ports_link_status(void)
+{
+#define CHECK_INTERVAL 100 /* 100ms */
+#define MAX_CHECK_TIME 90  /* 9s (90 * 100ms) in total */
+	char link_status_text[RTE_ETH_LINK_MAX_STR_LEN];
+	uint8_t count, all_ports_up, print_flag = 0;
+	struct rte_eth_link link;
+	uint16_t portid;
+	int rc;
+
+	APP_INFO("\n");
+	APP_INFO("Checking link status\n");
+	fflush(stdout);
+	for (count = 0; count <= MAX_CHECK_TIME; count++) {
+		if (force_quit)
+			return;
+		all_ports_up = 1;
+		RTE_ETH_FOREACH_DEV(portid) {
+			if (force_quit)
+				return;
+			if (!is_ethdev_enabled(portid))
+				continue;
+			memset(&link, 0, sizeof(link));
+			rc = rte_eth_link_get_nowait(portid, &link);
+			if (rc < 0) {
+				all_ports_up = 0;
+				if (print_flag == 1)
+					APP_ERR("Port %u link get failed: %s\n", portid,
+						rte_strerror(-rc));
+				continue;
+			}
+			/* Print link status if flag set */
+			if (print_flag == 1) {
+				rte_eth_link_to_str(link_status_text, sizeof(link_status_text),
+						    &link);
+				APP_INFO("Port %d %s\n", portid, link_status_text);
+				continue;
+			}
+			/* Clear all_ports_up flag if any link down */
+			if (link.link_status == RTE_ETH_LINK_DOWN) {
+				all_ports_up = 0;
+				break;
+			}
+		}
+		/* After finally printing all link status, get out */
+		if (print_flag == 1)
+			break;
+
+		if (all_ports_up == 0) {
+			printf(".");
+			fflush(stdout);
+			rte_delay_ms(CHECK_INTERVAL);
+		}
+
+		/* Set the print_flag if all ports up or timeout */
+		if (all_ports_up == 1 || count == (MAX_CHECK_TIME - 1)) {
+			print_flag = 1;
+			APP_INFO("Done\n");
+		}
+	}
+}
+
+static void
 signal_handler(int signum)
 {
 	APP_INFO("\n");
 	if (signum == SIGINT || signum == SIGTERM) {
 		APP_INFO("Signal %d received, preparing to exit...\n", signum);
 		force_quit = true;
+	}
+}
+
+
+static uint32_t
+eth_dev_get_overhead_len(uint32_t max_rx_pktlen, uint16_t max_mtu)
+{
+	uint32_t overhead_len;
+
+	if (max_mtu != UINT16_MAX && max_rx_pktlen > max_mtu)
+		overhead_len = max_rx_pktlen - max_mtu;
+	else
+		overhead_len = RTE_ETHER_HDR_LEN + RTE_ETHER_CRC_LEN;
+
+	return overhead_len;
+}
+
+static int
+config_port_max_pkt_len(struct rte_eth_conf *conf, struct rte_eth_dev_info *dev_info)
+{
+	uint32_t overhead_len;
+
+	if (max_pkt_len == 0)
+		return 0;
+
+	if (max_pkt_len < RTE_ETHER_MIN_LEN || max_pkt_len > MAX_JUMBO_PKT_LEN)
+		return -1;
+
+	overhead_len = eth_dev_get_overhead_len(dev_info->max_rx_pktlen, dev_info->max_mtu);
+	conf->rxmode.mtu = max_pkt_len - overhead_len;
+
+	if (conf->rxmode.mtu > RTE_ETHER_MTU)
+		conf->txmode.offloads |= RTE_ETH_TX_OFFLOAD_MULTI_SEGS;
+
+	return 0;
+}
+
+
+static void
+setup_mempools(void)
+{
+	uint32_t emdev_id;
+	uint16_t portid;
+	int rc;
+
+	/* Initialize all ports. 8< */
+	RTE_ETH_FOREACH_DEV(portid) {
+		/* Skip ports that are not enabled */
+		if (!is_ethdev_enabled(portid))
+			continue;
+
+		/* Init memory */
+		if (!per_port_pool) {
+			/* portid = 0; this is *not* signifying the first port,
+			 * rather, it signifies that portid is ignored.
+			 */
+			rc = init_eth_mempool(0, pktmbuf_count);
+		} else {
+			rc = init_eth_mempool(portid, pktmbuf_count);
+		}
+		if (rc < 0)
+			rte_exit(EXIT_FAILURE, "init_eth_mempool() failed\n");
+	}
+
+	for (emdev_id = 0; emdev_id < RTE_RAWDEV_MAX_DEVS; emdev_id++) {
+		if (!is_emdev_enabled(emdev_id))
+			continue;
+
+		if (!per_port_pool) {
+			/* portid = 0; this is *not* signifying the first port,
+			 * rather, it signifies that portid is ignored.
+			 */
+			rc = init_emdev_mempool(0, pktmbuf_count);
+		} else {
+			rc = init_emdev_mempool(emdev_id, pktmbuf_count);
+		}
+		if (rc < 0)
+			rte_exit(EXIT_FAILURE, "init_virtio_mempool() failed\n");
+	}
+}
+
+static void
+setup_eth_devices(void)
+{
+	struct rte_eth_rss_reta_entry64 reta_conf[4];
+	struct rte_eth_conf local_port_conf;
+	struct rte_eth_dev_info dev_info;
+	struct rte_eth_txconf *txconf;
+	uint16_t queueid, i, portid;
+	uint16_t nb_rx_queue;
+	uint32_t nb_tx_queue;
+	int rc;
+
+	APP_INFO("\n");
+
+	RTE_ETH_FOREACH_DEV(portid) {
+		local_port_conf = port_conf;
+
+		/* Skip ports that are not enabled */
+		if (!is_ethdev_enabled(portid)) {
+			APP_INFO("Skipping disabled port %d\n", portid);
+			continue;
+		}
+
+		/* Init port */
+		APP_INFO("Initializing port %d ...", portid);
+		fflush(stdout);
+
+		if (rte_eth_dev_info_get(portid, &dev_info))
+			rte_exit(EXIT_FAILURE, "rte_eth_dev_info_get() failed for port %d\n",
+				 portid);
+		eth_dev_info[portid] = dev_info;
+
+		/* Setup ethdev with max Rx, Tx queues */
+		if (eth_map[portid].type == VIRTIO_NEXT)
+			nb_rx_queue = DEFAULT_QUEUES_PER_PORT;
+		else
+			nb_rx_queue = num_outb_queues / 2;
+
+		nb_tx_queue = nb_rx_queue;
+		eth_dev_q_count[portid] = nb_rx_queue;
+
+		APP_INFO_NH("Creating queues: nb_rxq=%d nb_txq=%u... ", nb_rx_queue, nb_tx_queue);
+
+		rc = config_port_max_pkt_len(&local_port_conf, &dev_info);
+		if (rc != 0)
+			rte_exit(EXIT_FAILURE, "Invalid max packet length: %u (port %u)\n",
+				 max_pkt_len, portid);
+
+		if (dev_info.tx_offload_capa & RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE)
+			local_port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE;
+
+		if (disable_tx_mseg)
+			local_port_conf.txmode.offloads &= ~RTE_ETH_TX_OFFLOAD_MULTI_SEGS;
+
+		local_port_conf.rx_adv_conf.rss_conf.rss_hf &= dev_info.flow_type_rss_offloads;
+		if (local_port_conf.rx_adv_conf.rss_conf.rss_hf !=
+		    port_conf.rx_adv_conf.rss_conf.rss_hf) {
+			APP_INFO("Port %u modified RSS hash function based on "
+				 "hardware support,"
+				 "requested:%#" PRIx64 " configured:%#" PRIx64 "\n",
+				 portid, port_conf.rx_adv_conf.rss_conf.rss_hf,
+				 local_port_conf.rx_adv_conf.rss_conf.rss_hf);
+		}
+
+		/* Enable CGX loopback mode if needed */
+		local_port_conf.lpbk_mode = !!ethdev_cgx_loopback;
+
+		rc = rte_eth_dev_configure(portid, nb_rx_queue, nb_tx_queue, &local_port_conf);
+		if (rc < 0)
+			rte_exit(EXIT_FAILURE, "Cannot configure device: err=%d, port=%d\n", rc,
+				 portid);
+		eth_dev_conf[portid] = local_port_conf;
+
+		rc = rte_eth_dev_adjust_nb_rx_tx_desc(portid, &nb_rxd, &nb_txd);
+		if (rc < 0)
+			rte_exit(EXIT_FAILURE,
+				 "Cannot adjust number of descriptors: err=%d, "
+				 "port=%d\n",
+				 rc, portid);
+
+		rte_eth_macaddr_get(portid, &ports_eth_addr[portid]);
+		print_ethaddr(" Address:", &ports_eth_addr[portid]);
+		APP_INFO_NH("\n");
+
+		/* Setup Tx queues */
+		for (queueid = 0; queueid < nb_tx_queue; queueid++) {
+			txconf = &dev_info.default_txconf;
+			txconf->offloads = local_port_conf.txmode.offloads;
+
+			rc = rte_eth_tx_queue_setup(portid, queueid, nb_txd, 0, txconf);
+			if (rc < 0)
+				rte_exit(EXIT_FAILURE,
+					 "rte_eth_tx_queue_setup: err=%d, "
+					 "port=%d\n",
+					 rc, portid);
+		}
+
+		/* Setup RX queues */
+		for (queueid = 0; queueid < nb_rx_queue; queueid++) {
+			struct rte_eth_rxconf rxq_conf;
+
+			rxq_conf = dev_info.default_rxconf;
+			rxq_conf.offloads = port_conf.rxmode.offloads;
+			if (!per_port_pool)
+				rc = rte_eth_rx_queue_setup(portid, queueid, nb_rxd, 0, &rxq_conf,
+							    e_pktmbuf_pool[0]);
+			else
+				rc = rte_eth_rx_queue_setup(portid, queueid, nb_rxd, 0, &rxq_conf,
+							    e_pktmbuf_pool[portid]);
+			if (rc < 0)
+				rte_exit(EXIT_FAILURE,
+					 "rte_eth_rx_queue_setup: err=%d, "
+					 "port=%d\n",
+					 rc, portid);
+		}
+
+		/* Setup all entries in RETA table to point to RQ 0.
+		 * RETA table will get updated when number of queue count
+		 * is available.
+		 */
+		if (dev_info.reta_size) {
+			memset(reta_conf, 0, sizeof(reta_conf));
+			for (i = 0; i < 4; i++)
+				reta_conf[i].mask = UINT64_MAX;
+
+			rc = rte_eth_dev_rss_reta_update(portid, reta_conf, dev_info.reta_size);
+			if (rc < 0)
+				rte_exit(EXIT_FAILURE,
+					 "Failed to update reta table to RQ 0, rc=%d\n", rc);
+		}
+
+		/* Disable ptype extraction */
+		rc = rte_eth_dev_set_ptypes(portid, RTE_PTYPE_UNKNOWN, NULL, 0);
+		if (rc < 0)
+			rte_exit(EXIT_FAILURE, "Failed to disable ptype parsing\n");
+	}
+
+	APP_INFO("\n");
+	/* Dump L2FWD map */
+	RTE_ETH_FOREACH_DEV(portid) {
+		if (!is_ethdev_enabled(portid))
+			continue;
+		if (eth_map[portid].type == ETHDEV_NEXT)
+			APP_INFO("L2FWD_MAP: ethdev_rx[%u] =====> ethdev_tx[%u] (lcores 0x%lX)\n",
+				 portid, eth_map[portid].id, lcore_eth_mask[portid]);
+		else
+			APP_INFO(
+				"L2FWD_MAP: ethdev_rx[%u] ======> virtiodev_tx[%u] (lcores 0x%lX)\n",
+				portid, eth_map[portid].id, lcore_eth_mask[portid]);
+	}
+}
+
+static void
+release_eth_devices(void)
+{
+	uint16_t portid;
+	int rc;
+
+	/* Stop ports */
+	RTE_ETH_FOREACH_DEV(portid) {
+		if (!is_ethdev_enabled(portid))
+			continue;
+		APP_INFO("Closing port %d...", portid);
+		rc = rte_eth_dev_stop(portid);
+		if (rc != 0)
+			APP_ERR("Failed to stop port %u: %s\n", portid, rte_strerror(-rc));
+		rte_eth_dev_close(portid);
+		APP_INFO_NH(" Done\n");
 	}
 }
 
@@ -933,6 +1312,47 @@ main(int argc, char **argv)
 	rc = init_lcore_emdev_deq();
 	if (rc < 0)
 		rte_exit(EXIT_FAILURE, "init_lcore_virtio_dev() failed\n");
+
+	if (check_port_config() < 0)
+		APP_ERR("check_port_config() failed\n");
+
+	/* Alloc mempools */
+	setup_mempools();
+
+	/* Initialize all ethdev ports. 8< */
+	setup_eth_devices();
+
+	/* Start ports */
+	RTE_ETH_FOREACH_DEV(portid) {
+		if (!is_ethdev_enabled(portid))
+			continue;
+
+		/* Start device */
+		rc = rte_eth_dev_start(portid);
+		if (rc < 0)
+			rte_exit(EXIT_FAILURE, "rte_eth_dev_start: err=%d, port=%d\n", rc, portid);
+
+		if (promiscuous_on)
+			rte_eth_promiscuous_enable(portid);
+	}
+
+	check_all_ports_link_status();
+
+	if (per_port_pool) {
+		RTE_ETH_FOREACH_DEV(portid) {
+			if (!is_ethdev_enabled(portid))
+				continue;
+
+			APP_ERR("Initial Packet pool avail buff_cnt=%d\n",
+				rte_mempool_avail_count(e_pktmbuf_pool[portid]));
+		}
+	} else {
+		APP_ERR("Initial Packet pool avail buff_cnt=%d\n",
+			rte_mempool_avail_count(e_pktmbuf_pool[0]));
+	}
+
+	/* Close eth devices */
+	release_eth_devices();
 
 	/* clean up the EAL */
 	rte_eal_cleanup();

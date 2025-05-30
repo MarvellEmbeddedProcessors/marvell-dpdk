@@ -141,7 +141,11 @@ static uint64_t port_mask_ena;
 static uint16_t nb_ethdevs;
 static uint64_t emdev_mask_ena = 0x1; /**< Mask of enabled emdevs */
 static uint16_t nb_emdevs = 1;
+static uint16_t nb_epfvfs = 1;
 static uint16_t num_outb_queues = 17;
+static uint16_t emdev_q_count[RTE_RAWDEV_MAX_DEVS];
+static uint16_t nb_desc = 4096;
+static uint16_t virtio_q_count[RTE_RAWDEV_MAX_DEVS][RTE_PMD_EMDEV_FUNCS_MAX];
 
 /* Pcap trace */
 static char pcap_filename[RTE_GRAPH_PCAP_FILE_SZ];
@@ -184,6 +188,8 @@ static int pool_buf_len = RTE_MBUF_DEFAULT_BUF_SIZE;
 static struct rte_mempool *e_pktmbuf_pool[RTE_MAX_ETHPORTS];
 static struct rte_mempool *v_pktmbuf_pool[RTE_RAWDEV_MAX_DEVS];
 
+static uint16_t vnet_reta_sz[RTE_RAWDEV_MAX_DEVS][RTE_PMD_EMDEV_FUNCS_MAX];
+
 static bool ethdev_cgx_loopback;
 
 static bool
@@ -196,6 +202,23 @@ static bool
 is_emdev_enabled(uint16_t devid)
 {
 	return emdev_mask_ena & RTE_BIT64(devid);
+}
+
+static bool
+is_rawdev_emdev(uint16_t devid)
+{
+	struct rte_rawdev_info devinfo;
+	uint8_t priv_info[512];
+
+	memset(&devinfo, 0, sizeof(devinfo));
+	devinfo.dev_private = priv_info;
+	if (rte_rawdev_info_get(devid, &devinfo, sizeof(priv_info)) < 0)
+		return false;
+
+	if (strcmp(devinfo.driver_name, "raw_cnxk_emdev"))
+		return false;
+
+	return true;
 }
 
 static int
@@ -262,6 +285,56 @@ check_port_config(void)
 	}
 
 	return 0;
+}
+
+static int
+check_emdev_config(void)
+{
+	struct rte_rawdev_info devinfo;
+	uint8_t priv_info[512];
+	uint16_t devid;
+
+	for (devid = 0; devid < RTE_RAWDEV_MAX_DEVS; ++devid) {
+		if (!is_emdev_enabled(devid))
+			continue;
+
+		memset(&devinfo, 0, sizeof(devinfo));
+		devinfo.dev_private = priv_info;
+		if (rte_rawdev_info_get(devid, &devinfo, sizeof(priv_info)) < 0) {
+			APP_INFO("rawdev %u is not present on the board\n", devid);
+			return -1;
+		}
+
+		if (strcmp(devinfo.driver_name, "raw_cnxk_emdev")) {
+			APP_INFO("rawdev %u is not a valid emdev\n", devid);
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static const char *
+virtio_dev_status_to_str(uint8_t status)
+{
+	switch (status) {
+	case VIRTIO_DEV_RESET:
+		return "VIRTIO_DEV_RESET";
+	case VIRTIO_DEV_ACKNOWLEDGE:
+		return "VIRTIO_DEV_ACKNOWLEDGE";
+	case VIRTIO_DEV_DRIVER:
+		return "VIRTIO_DEV_DRIVER";
+	case VIRTIO_DEV_DRIVER_OK:
+		return "VIRTIO_DEV_DRIVER_OK";
+	case VIRTIO_DEV_FEATURES_OK:
+		return "VIRTIO_DEV_FEATURES_OK";
+	case VIRTIO_DEV_NEEDS_RESET:
+		return "VIRTIO_DEV_NEEDS_RESET";
+	case VIRTIO_DEV_FAILED:
+		return "VIRTIO_DEV_FAILED";
+	default:
+		return "UNKNOWN_STATUS";
+	};
+	return NULL;
 }
 
 static int
@@ -357,6 +430,52 @@ init_lcore_emdev_deq(void)
 			return -1;
 		}
 
+	}
+
+	return 0;
+}
+
+static int
+assign_lcore_emdev_queues(void)
+{
+	uint16_t emdev_id, i, lcore;
+	struct lcore_conf *qconf;
+	bool need_emdev_q;
+
+	for (emdev_id = 0; emdev_id < RTE_RAWDEV_MAX_DEVS; emdev_id++) {
+		if (!is_emdev_enabled(emdev_id))
+			continue;
+
+		/* Assign emdev queue id to each lcore with first one for control core */
+		emdev_q_count[emdev_id] = 1;
+		for (lcore = 0; lcore < RTE_MAX_LCORE; lcore++) {
+			if (!(RTE_BIT64(lcore) & lcore_emdev_mask[emdev_id]))
+				continue;
+			qconf = &lcore_conf[lcore];
+			need_emdev_q = false;
+
+			for (i = 0; i < qconf->nb_emdev_deq; i++) {
+				if (qconf->emdev_deq[i].emdev_id != emdev_id)
+					continue;
+				qconf->emdev_deq[i].emdev_qid = emdev_q_count[emdev_id];
+				need_emdev_q = true;
+			}
+			for (i = 0; i < qconf->nb_ethdev_rx; i++) {
+				if (eth_map[qconf->ethdev_rx[i].portid].type != VIRTIO_NEXT)
+					continue;
+				if (eth_map[qconf->ethdev_rx[i].portid].emdev_id != emdev_id)
+					continue;
+				qconf->ethdev_rx[i].emdev_qid = emdev_q_count[emdev_id];
+				need_emdev_q = true;
+			}
+			if (need_emdev_q)
+				emdev_q_count[emdev_id]++;
+		}
+		if (emdev_q_count[emdev_id] > 8) {
+			APP_ERR("Error: too many emdev queues (%u) for emdev: %u\n",
+				(unsigned int)emdev_q_count[emdev_id], (unsigned int)emdev_id);
+			return -1;
+		}
 	}
 
 	return 0;
@@ -1031,6 +1150,304 @@ signal_handler(int signum)
 	}
 }
 
+static void
+sig_user1_handler(int signum)
+{
+	int i;
+
+	APP_INFO("\n");
+	if (signum == SIGUSR1) {
+		APP_INFO("Signal %d received, dumping debug data...\n", signum);
+
+		for (i = 0; i < RTE_RAWDEV_MAX_DEVS; i++) {
+			if (!is_emdev_enabled(i))
+				continue;
+			rte_rawdev_dump(i, NULL);
+		}
+
+	}
+}
+
+static int
+dump_emdev_queue_mapping(uint16_t emdev_id, uint16_t emdev_qid)
+{
+	struct rte_pmd_cnxk_func_q_map_attr q_map;
+	uint16_t func_id, qid;
+
+	for (func_id = 0; func_id < nb_epfvfs; func_id++) {
+		for (qid = 0; qid < virtio_q_count[emdev_id][func_id]; qid++) {
+			q_map.func_id = func_id;
+			q_map.outb_qid = qid;
+			if (rte_rawdev_get_attr(emdev_id, CNXK_EMDEV_ATTR_FUNC_Q_MAP,
+						(uint64_t *)&q_map) < 0)
+				return -1;
+			if (emdev_qid != q_map.qid)
+				continue;
+			APP_INFO_NH("PFVF=%d VQ=%d ", func_id, qid);
+		}
+	}
+
+	return 0;
+}
+
+static void
+dump_lcore_info(void)
+{
+	struct l2_emdev_deq_node_ctx *emdev_deq;
+	struct l2_ethdev_rx_node_ctx *ethdev_rx;
+	struct lcore_conf *qconf;
+	uint32_t lcore_id;
+	uint16_t i, q_id;
+	uint64_t map;
+
+	APP_INFO("\n");
+	APP_INFO("Lcore info...\n");
+	for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
+		if (rte_lcore_is_enabled(lcore_id) == 0 || lcore_id == rte_get_main_lcore())
+			continue;
+
+		qconf = &lcore_conf[lcore_id];
+		if (!qconf->nb_ethdev_rx && !qconf->nb_emdev_deq)
+			continue;
+
+		APP_INFO("\tVirtio queues on lcore %u ... ", lcore_id);
+		for (i = 0; i < qconf->nb_emdev_deq; i++) {
+			emdev_deq = qconf->emdev_deq[i].emdev_deq;
+			APP_INFO_NH("emdev(%u, %u): ", emdev_deq->emdev_id, emdev_deq->emdev_qid);
+			dump_emdev_queue_mapping(emdev_deq->emdev_id, emdev_deq->emdev_qid);
+		}
+
+		APP_INFO_NH("\n");
+		APP_INFO("\tRx queues on lcore %u ... ", lcore_id);
+		fflush(stdout);
+
+		fflush(stdout);
+
+		map = 0;
+		for (i = 0; i < qconf->nb_ethdev_rx; i++) {
+			ethdev_rx = qconf->ethdev_rx[i].ethdev_rx;
+			map = ethdev_rx->rx_q_map;
+			q_id = 0;
+			while (map) {
+				if (map & 0x1)
+					APP_INFO_NH("eth_rxq=%d,%d ", ethdev_rx->eth_port, q_id);
+				q_id++;
+				map = map >> 1;
+			}
+		}
+		APP_INFO_NH("\n");
+	}
+	APP_INFO("\n");
+}
+
+static int
+lcore_wt_cmp(const void *a, const void *b)
+{
+	uint16_t lcore_a = *(const uint16_t *)a;
+	uint16_t lcore_b = *(const uint16_t *)b;
+
+	if (lcore_conf[lcore_a].weight < lcore_conf[lcore_b].weight)
+		return -1;
+
+	if (lcore_conf[lcore_a].weight == lcore_conf[lcore_b].weight)
+		return 0;
+
+	return 1;
+}
+
+static int
+setup_lcore_queue_mapping(uint16_t emdev_id, uint16_t func_id, uint16_t virt_q_count)
+{
+	struct rte_pmd_cnxk_func_q_map_attr q_map;
+	struct l2_ethdev_rx_node_ctx *ethdev_rx;
+	uint16_t i, outb_qid, emdev_qid, q_id;
+	uint16_t nb_virtqs_per_notify_q;
+	uint16_t virt_rx_q, eth_rx_q;
+	struct lcore_conf *qconf;
+	uint32_t lcore_id, idx;
+	uint16_t nb_qs;
+
+	virtio_q_count[emdev_id][func_id] = virt_q_count;
+	/* One emdev queue is dedicated for Control queue */
+	nb_qs = emdev_q_count[emdev_id] - 1;
+	nb_virtqs_per_notify_q = (virt_q_count > nb_qs) ? virt_q_count / nb_qs : 1;
+	outb_qid = 0;
+	emdev_qid = 1;
+	while (outb_qid < virt_q_count) {
+		q_map.func_id = func_id;
+		q_map.qid = emdev_qid;
+		q_map.outb_qid = outb_qid;
+		rte_rawdev_set_attr(emdev_id, CNXK_EMDEV_ATTR_FUNC_Q_MAP, (uint64_t)&q_map);
+		outb_qid++;
+		if (!(outb_qid % nb_virtqs_per_notify_q))
+			emdev_qid++;
+		if (emdev_qid > nb_qs)
+			emdev_qid = 1;
+	}
+
+	virt_rx_q = virt_q_count / 2;
+	eth_rx_q = (virtio_map[emdev_id][func_id].type == ETHDEV_NEXT) ? virt_rx_q : 0;
+
+	/* Create a sorted lcore list based on its weight */
+	qsort(lcore_list_wt_sorted, RTE_MAX_LCORE, sizeof(lcore_list_wt_sorted[0]), lcore_wt_cmp);
+	/* Equally distribute ethdev rx queues among all the subscribed lcores */
+	q_id = 0;
+	while (q_id < eth_rx_q) {
+		for (idx = 0; idx < RTE_MAX_LCORE && q_id < eth_rx_q; idx++) {
+			lcore_id = lcore_list_wt_sorted[idx];
+			if (rte_lcore_is_enabled(lcore_id) == 0)
+				continue;
+
+			qconf = &lcore_conf[lcore_id];
+
+			/* Skip Lcore if not needed */
+			if (!qconf->nb_ethdev_rx)
+				continue;
+
+			for (i = 0; i < qconf->nb_ethdev_rx; i++) {
+				/* Check for matching virtio devid */
+				if (!qconf->ethdev_rx[i].emdev_enq)
+					continue;
+
+				/* Add queue to valid ethdev queue map */
+				ethdev_rx = qconf->ethdev_rx[i].ethdev_rx;
+				ethdev_rx->rx_q_map |= RTE_BIT64(q_id);
+				ethdev_rx->rx_q_count++;
+				/* Update lcore weight */
+				qconf->weight++;
+				q_id++;
+				break;
+			}
+		}
+		if (!q_id) {
+			APP_INFO("Skipping ethdev rx for virtio (%u,%u), no lcore mapping found\n",
+				 emdev_id, func_id);
+			break;
+		}
+	}
+
+	dump_lcore_info();
+	return 0;
+}
+
+static void
+clear_lcore_queue_mapping(uint16_t emdev_id, uint16_t func_id)
+{
+	struct l2_ethdev_rx_node_ctx *ethdev_rx;
+	struct lcore_conf *qconf;
+	uint32_t lcore_id;
+	uint16_t i;
+
+	RTE_SET_USED(emdev_id);
+	RTE_SET_USED(func_id);
+
+	virtio_q_count[emdev_id][func_id] = 0;
+	for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
+		if (rte_lcore_is_enabled(lcore_id) == 0)
+			continue;
+		qconf = &lcore_conf[lcore_id];
+
+		/* Skip Lcore if not needed */
+		if (!qconf->nb_ethdev_rx)
+			continue;
+
+		for (i = 0; i < qconf->nb_ethdev_rx; i++) {
+			/* Check for matching virtio devid */
+			if (!qconf->ethdev_rx[i].emdev_enq)
+				continue;
+
+			/* Clear valid ethdev queue map */
+			ethdev_rx = qconf->ethdev_rx[i].ethdev_rx;
+			/* Update lcore weight */
+			qconf->weight -= ethdev_rx->rx_q_count;
+			ethdev_rx->rx_q_map = 0;
+			ethdev_rx->rx_q_count = 0;
+		}
+	}
+	rte_io_wmb();
+	dump_lcore_info();
+}
+
+static int
+reconfig_ethdev(uint16_t portid, uint16_t q_count)
+{
+	struct rte_eth_conf *local_port_conf;
+	struct rte_eth_dev_info dev_info;
+	struct rte_eth_txconf *txconf;
+	uint16_t nb_rx_queue;
+	uint32_t nb_tx_queue;
+	uint16_t queueid;
+	int rc;
+
+	APP_INFO("Reconfiguring ethdev portid=%d with q_count=%u\n", portid, q_count);
+
+	local_port_conf = &eth_dev_conf[portid];
+	nb_rx_queue = q_count;
+	nb_tx_queue = nb_rx_queue;
+	rc = rte_eth_dev_stop(portid);
+	if (rc != 0) {
+		APP_ERR("Failed to stop port %u: %s\n", portid, rte_strerror(-rc));
+		return rc;
+	}
+
+	/* FIXME: Reset ethdev on every reconfigure to avoid corrupt rule */
+	rc = rte_eth_dev_reset(portid);
+	if (rc != 0) {
+		APP_ERR("Failed to reset port %u: %s\n", portid, rte_strerror(-rc));
+		return rc;
+	}
+
+	rc = rte_eth_dev_configure(portid, nb_rx_queue, nb_tx_queue, local_port_conf);
+	if (rc < 0) {
+		APP_ERR("Cannot configure device: err=%d, port=%d\n", rc, portid);
+		return rc;
+	}
+
+	rc = rte_eth_dev_info_get(portid, &dev_info);
+	if (rc) {
+		APP_ERR("Cannot get device info: port=%d\n", portid);
+		return rc;
+	}
+
+	/* Setup Tx queues */
+	for (queueid = 0; queueid < nb_tx_queue; queueid++) {
+		txconf = &dev_info.default_txconf;
+		txconf->offloads = local_port_conf->txmode.offloads;
+
+		rc = rte_eth_tx_queue_setup(portid, queueid, nb_txd, 0, txconf);
+		if (rc < 0) {
+			APP_ERR("rte_eth_tx_queue_setup: err=%d, port=%d\n", rc, portid);
+			return rc;
+		}
+	}
+
+	/* Setup RX queues */
+	for (queueid = 0; queueid < nb_rx_queue; queueid++) {
+		struct rte_eth_rxconf rxq_conf;
+
+		rxq_conf = dev_info.default_rxconf;
+		rxq_conf.offloads = port_conf.rxmode.offloads;
+		if (!per_port_pool)
+			rc = rte_eth_rx_queue_setup(portid, queueid, nb_rxd, 0, &rxq_conf,
+						    e_pktmbuf_pool[0]);
+		else
+			rc = rte_eth_rx_queue_setup(portid, queueid, nb_rxd, 0, &rxq_conf,
+						    e_pktmbuf_pool[portid]);
+		if (rc < 0) {
+			APP_ERR("rte_eth_rx_queue_setup: err=%d, port=%d\n", rc, portid);
+			return rc;
+		}
+	}
+
+	eth_dev_q_count[portid] = q_count;
+
+	rc = rte_eth_dev_start(portid);
+	if (rc < 0) {
+		APP_ERR("rte_eth_dev_start: err=%d, port=%d\n", rc, portid);
+		return rc;
+	}
+	return 0;
+}
 
 static uint32_t
 eth_dev_get_overhead_len(uint32_t max_rx_pktlen, uint16_t max_mtu)
@@ -1065,6 +1482,92 @@ config_port_max_pkt_len(struct rte_eth_conf *conf, struct rte_eth_dev_info *dev_
 	return 0;
 }
 
+static int
+ethdev_reset(uint16_t portid)
+{
+	int rc = 0;
+
+	rc = rte_eth_dev_stop(portid);
+	if (rc != 0) {
+		APP_ERR("Failed to stop port %u: %s\n", portid, rte_strerror(-rc));
+		return rc;
+	}
+
+	rc = rte_eth_dev_reset(portid);
+	if (rc != 0)
+		APP_ERR("Failed to reset port %u: %s\n", portid, rte_strerror(-rc));
+
+	eth_dev_q_count[portid] = 0;
+
+	return rc;
+}
+
+static int
+virtio_dev_status_cb(uint16_t emdev_id, uint16_t func_id, uint8_t status)
+{
+	bool reset_ethdev = false;
+	uint16_t virt_q_count = 2;
+	int rc;
+
+	APP_INFO("virtio_dev(%u,%u): status=%s\n", emdev_id, func_id,
+		 virtio_dev_status_to_str(status));
+
+	switch (status) {
+	case VIRTIO_DEV_RESET:
+	case VIRTIO_DEV_NEEDS_RESET:
+		clear_lcore_queue_mapping(emdev_id, func_id);
+		reset_ethdev = true;
+		break;
+	case VIRTIO_DEV_DRIVER_OK:
+
+		rc = setup_lcore_queue_mapping(emdev_id, func_id, virt_q_count);
+		if (rc)
+			APP_ERR("virtio(%u,%u): failed to setup lcore queue mapping, rc=%d\n",
+				emdev_id, func_id, rc);
+		break;
+	default:
+		break;
+	};
+
+	/* After this point, all the core's see updated queue mapping */
+
+	if (reset_ethdev && virtio_map[emdev_id][func_id].type == ETHDEV_NEXT) {
+		/* First reset device */
+		ethdev_reset(virtio_map[emdev_id][func_id].id);
+		/* dump packet pool available count */
+		if (per_port_pool)
+			APP_ERR("Packet pool avial buff_cnt=%d\n",
+				rte_mempool_avail_count(
+					e_pktmbuf_pool[virtio_map[emdev_id][func_id].id]));
+		else
+			APP_ERR("Packet pool avial buff_cnt=%d\n",
+				rte_mempool_avail_count(e_pktmbuf_pool[0]));
+		/* Reconfigure ethdev with 1 queue */
+		reconfig_ethdev(virtio_map[emdev_id][func_id].id, 1);
+	}
+	return 0;
+}
+
+static int
+lsc_event_callback(uint16_t port_id, enum rte_eth_event_type type __rte_unused, void *param,
+		   void *ret_param __rte_unused)
+{
+	struct rte_pmd_cnxk_vnet_link_info link_info;
+	uint16_t emdev_id = (uint64_t)param >> 16;
+	uint16_t func_id = (uint64_t)param & 0xFFFF;
+	struct rte_eth_link eth_link;
+
+	if (rte_eth_link_get(port_id, &eth_link))
+		return -1;
+	link_info.status = eth_link.link_status;
+	link_info.speed = eth_link.link_speed;
+	link_info.duplex = eth_link.link_duplex;
+	link_info.func_id = func_id;
+
+	rte_rawdev_set_attr(emdev_id, CNXK_EMDEV_ATTR_LINK_STATUS, (uint64_t)&link_info);
+
+	return 0;
+}
 
 static void
 setup_mempools(void)
@@ -1261,6 +1764,126 @@ setup_eth_devices(void)
 	}
 }
 
+static int
+setup_em_devices(void)
+{
+	struct rte_pmd_cnxk_func_q_map_attr q_map;
+	struct rte_pmd_cnxk_vnet_conf *vnet_conf;
+	struct rte_pmd_cnxk_emdev_q_conf q_conf;
+	struct rte_pmd_cnxk_emdev_conf conf;
+	struct rte_rawdev_info rawdev_conf;
+	uint16_t portid;
+	uint64_t data;
+	int rc, i, j, func_id;
+	int emdev_id = 0;
+
+	for (emdev_id = 0; emdev_id < rte_rawdev_count(); emdev_id++) {
+		if (is_rawdev_emdev(emdev_id) == false)
+			continue;
+
+		/* Skip emdevs that are not enabled */
+		if (!is_emdev_enabled(emdev_id)) {
+			APP_INFO("Skipping disabled emdev %d\n", emdev_id);
+			continue;
+		}
+
+		APP_INFO("Initializing emdev %d ... qs=%u", emdev_id, emdev_q_count[emdev_id]);
+
+		memset(&conf, 0, sizeof(struct rte_pmd_cnxk_emdev_conf));
+		conf.num_emdev_queues = emdev_q_count[emdev_id];
+		conf.max_outb_queues = num_outb_queues;
+		conf.num_funcs = nb_epfvfs;
+		conf.emdev_type = EMDEV_TYPE_VIRTIO_NET;
+		conf.status_cb = virtio_dev_status_cb;
+		if (!per_port_pool)
+			conf.default_mp = v_pktmbuf_pool[0];
+		else
+			conf.default_mp = v_pktmbuf_pool[emdev_id];
+
+		for (func_id = 0; func_id < nb_epfvfs; func_id++) {
+			struct rte_eth_link eth_link;
+
+			vnet_conf = &conf.vnet_conf[func_id];
+			portid = virtio_map[emdev_id][func_id].id;
+
+			if (!eth_dev_info[portid].reta_size)
+				vnet_conf->reta_size = 0;
+			else
+				vnet_conf->reta_size = RTE_MAX(VIRTIO_NET_RSS_RETA_SIZE,
+							       eth_dev_info[portid].reta_size);
+
+			vnet_conf->hash_key_size = eth_dev_info[portid].hash_key_size;
+
+			if (rte_eth_link_get(portid, &eth_link))
+				rte_exit(EXIT_FAILURE,
+					 "Error during getting device (port %u) link\n", portid);
+			vnet_conf->link_info.status = eth_link.link_status;
+			vnet_conf->link_info.speed = eth_link.link_speed;
+			vnet_conf->link_info.duplex = eth_link.link_duplex;
+			data = (uint64_t)func_id | (uint64_t)emdev_id << 16;
+			/* Register link status change interrupt callback */
+			rte_eth_dev_callback_register(portid, RTE_ETH_EVENT_INTR_LSC,
+						      lsc_event_callback,
+						      (void *)data);
+			/* Populate default mac address */
+			rte_eth_macaddr_get(portid, (struct rte_ether_addr *)vnet_conf->mac);
+
+			/* Save reta size for future use */
+			vnet_reta_sz[emdev_id][func_id] = vnet_conf->reta_size;
+		}
+
+		rawdev_conf.dev_private = (rte_rawdev_obj_t)(&conf);
+		rc = rte_rawdev_configure(emdev_id, &rawdev_conf, sizeof(conf));
+		if (rc)
+			rte_exit(EXIT_FAILURE, "Can't config cnxk emdev: err=%d, "
+				 "dev=%u\n", rc, emdev_id);
+
+		for (i = 0; i < nb_epfvfs; i++) {
+			/* Initially set for 2 queues at least */
+			for (j = 0; j < 2; j++) {
+				q_map.func_id = i;
+				q_map.qid = 1;
+				q_map.outb_qid = j;
+				rte_rawdev_set_attr(emdev_id, CNXK_EMDEV_ATTR_FUNC_Q_MAP,
+						    (uint64_t)&q_map);
+			}
+		}
+		q_conf.nb_desc = nb_desc;
+		for (i = 0; i < emdev_q_count[emdev_id]; i++) {
+			rc = rte_rawdev_queue_setup(emdev_id, i, &q_conf, sizeof(q_conf));
+			if (rc < 0) {
+				APP_ERR("Failed to setup queue %u.\n", i);
+				goto exit;
+			}
+		}
+		APP_INFO_NH("done\n");
+
+	}
+	return 0;
+exit:
+	for (; emdev_id >= 0; emdev_id--) {
+		if (!is_emdev_enabled(emdev_id))
+			continue;
+		rte_rawdev_stop(emdev_id);
+		rte_rawdev_close(emdev_id);
+	}
+	return rc;
+}
+
+static void
+release_em_device(void)
+{
+	int emdev_id;
+
+	for (emdev_id = 0; emdev_id < RTE_RAWDEV_MAX_DEVS; emdev_id++) {
+		/* Skip emdevs that are not enabled */
+		if (!is_emdev_enabled(emdev_id))
+			continue;
+		rte_rawdev_stop(emdev_id);
+		rte_rawdev_close(emdev_id);
+	}
+}
+
 static void
 release_eth_devices(void)
 {
@@ -1296,6 +1919,7 @@ main(int argc, char **argv)
 	force_quit = false;
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
+	signal(SIGUSR1, sig_user1_handler);
 
 	/* Parse application arguments (after the EAL ones) */
 	rc = parse_args(argc, argv);
@@ -1313,8 +1937,15 @@ main(int argc, char **argv)
 	if (rc < 0)
 		rte_exit(EXIT_FAILURE, "init_lcore_virtio_dev() failed\n");
 
+	rc = assign_lcore_emdev_queues();
+	if (rc < 0)
+		rte_exit(EXIT_FAILURE, "assign_lcore_emdev_queues() failed\n");
+
 	if (check_port_config() < 0)
 		APP_ERR("check_port_config() failed\n");
+
+	if (check_emdev_config() < 0)
+		rte_exit(EXIT_FAILURE, "check_emdev_config() failed\n");
 
 	/* Alloc mempools */
 	setup_mempools();
@@ -1338,6 +1969,13 @@ main(int argc, char **argv)
 
 	check_all_ports_link_status();
 
+	/* Initialize virtio devices */
+	rc = setup_em_devices();
+	if (rc) {
+		APP_ERR("setup_em_device: err=%d\n", rc);
+		goto cleanup_ethdev;
+	}
+
 	if (per_port_pool) {
 		RTE_ETH_FOREACH_DEV(portid) {
 			if (!is_ethdev_enabled(portid))
@@ -1351,6 +1989,12 @@ main(int argc, char **argv)
 			rte_mempool_avail_count(e_pktmbuf_pool[0]));
 	}
 
+	dump_lcore_info();
+
+	/* Close pem device */
+	release_em_device();
+
+cleanup_ethdev:
 	/* Close eth devices */
 	release_eth_devices();
 

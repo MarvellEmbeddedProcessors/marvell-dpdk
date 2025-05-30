@@ -160,6 +160,10 @@ static struct rte_eth_dev_info eth_dev_info[RTE_MAX_ETHPORTS];
 static struct rte_eth_conf eth_dev_conf[RTE_MAX_ETHPORTS];
 static uint16_t eth_dev_q_count[RTE_MAX_ETHPORTS];
 
+static rte_node_t ethdev_rx_nodes[RTE_MAX_ETHPORTS];
+static rte_node_t ethdev_tx_nodes[RTE_MAX_ETHPORTS];
+static rte_node_t emdev_deq_nodes[RTE_RAWDEV_MAX_DEVS];
+static rte_node_t emdev_enq_nodes[RTE_RAWDEV_MAX_DEVS];
 static const char *emdev_deq_edge_names[RTE_RAWDEV_MAX_DEVS + RTE_MAX_ETHPORTS];
 static uint16_t nb_emdev_deq_edges;
 
@@ -191,6 +195,12 @@ static struct rte_mempool *v_pktmbuf_pool[RTE_RAWDEV_MAX_DEVS];
 static uint16_t vnet_reta_sz[RTE_RAWDEV_MAX_DEVS][RTE_PMD_EMDEV_FUNCS_MAX];
 
 static bool ethdev_cgx_loopback;
+
+/* RCU QSBR variable */
+static struct rte_rcu_qsbr *qs_v;
+
+static const char **node_patterns;
+static struct rte_graph_cluster_stats *graph_stats[RTE_MAX_LCORE];
 
 static bool
 is_ethdev_enabled(uint16_t portid)
@@ -1449,6 +1459,290 @@ reconfig_ethdev(uint16_t portid, uint16_t q_count)
 	return 0;
 }
 
+#define VNET_RSS_RETA_SIZE 128
+static int
+rss_reta_configure(uint16_t emdev_id, uint16_t func_id, struct virtio_net_ctrl_rss *rss)
+{
+	struct rte_eth_rss_reta_entry64 reta_conf[VNET_RSS_RETA_SIZE / RTE_ETH_RETA_GROUP_SIZE];
+	struct rte_eth_conf *local_port_conf;
+	uint16_t virt_q_count, portid;
+	uint16_t reta_size;
+	uint16_t next_q;
+	uint32_t i;
+	int rc;
+
+	clear_lcore_queue_mapping(emdev_id, func_id);
+	/* Synchronize RCU */
+	rte_rcu_qsbr_synchronize(qs_v, RTE_QSBR_THRID_INVALID);
+
+	/* Get active virt queue count */
+	virt_q_count = rss->max_tx_vq * 2;
+
+	if (virt_q_count <= 0 || virt_q_count & 0x1 ||
+	    virt_q_count > (num_outb_queues - 1)) {
+		APP_ERR("virtio_dev(%u,%u): invalid virt_q_count=%d\n", emdev_id, func_id,
+			virt_q_count);
+		return -EIO;
+	}
+
+	if (virtio_map[emdev_id][func_id].type != ETHDEV_NEXT)
+		goto skip_eth_reconfig;
+
+	portid = virtio_map[emdev_id][func_id].id;
+	local_port_conf = &eth_dev_conf[portid];
+
+	/* Reconfigure ethdev with required number of queues */
+	rc = reconfig_ethdev(portid, virt_q_count / 2);
+	if (rc)
+		return rc;
+
+	local_port_conf->rx_adv_conf.rss_conf.rss_key = NULL;
+	memset(reta_conf, 0, sizeof(reta_conf));
+	reta_size = vnet_reta_sz[emdev_id][func_id];
+
+	for (i = 0; i < reta_size; i++)
+		reta_conf[i / RTE_ETH_RETA_GROUP_SIZE].mask = UINT64_MAX;
+
+	next_q = rss->indirection_table[0];
+	for (i = 0; i < reta_size; i++) {
+		uint32_t reta_id = i / RTE_ETH_RETA_GROUP_SIZE;
+		uint32_t reta_pos = i % RTE_ETH_RETA_GROUP_SIZE;
+
+		reta_conf[reta_id].reta[reta_pos] = rss->indirection_table[i];
+		if (eth_dev_info[portid].reta_size != reta_size &&
+		    rss->indirection_table[i] != next_q) {
+			APP_ERR("Found a non sequential RETA table, cannot work with"
+				" mismatched reta table size (ethdev=%u, virtio=%u)\n",
+				eth_dev_info[portid].reta_size, reta_size);
+			APP_ERR("Please relaunch application with ethdev '%s' reta_size devarg"
+			       " as %u.", rte_dev_name(eth_dev_info[portid].device),
+			       vnet_reta_sz[emdev_id][func_id]);
+			return -ENOTSUP;
+		}
+		next_q = rss->indirection_table[i] + 1;
+		if (next_q >= virt_q_count / 2)
+			next_q = 0;
+	}
+
+	for (i = reta_size; i < eth_dev_info[portid].reta_size; i++) {
+		uint32_t reta_id = i / RTE_ETH_RETA_GROUP_SIZE;
+		uint32_t reta_pos = i % RTE_ETH_RETA_GROUP_SIZE;
+
+		reta_conf[reta_id].reta[reta_pos] = rss->indirection_table[i];
+		next_q = rss->indirection_table[i] + 1;
+		if (next_q >= virt_q_count / 2)
+			next_q = 0;
+	}
+
+	rc = rte_eth_dev_rss_reta_update(portid, reta_conf, eth_dev_info[portid].reta_size);
+	if (rc) {
+		APP_ERR("Failed to update RSS reta table for portid=%d, rc=%d\n",
+			portid, rc);
+		return rc;
+	}
+
+skip_eth_reconfig:
+	rc = setup_lcore_queue_mapping(emdev_id, func_id, virt_q_count);
+	if (rc)
+		APP_ERR("virtio_dev(%u, %u): failed to setup lcore queue mapping, rc=%d\n",
+			emdev_id, func_id, rc);
+	return rc;
+}
+
+static int
+mq_configure(uint16_t emdev_id, uint16_t func_id, uint16_t virt_q_count)
+{
+	struct rte_eth_rss_reta_entry64
+		reta_conf[VIRTIO_NET_RSS_RETA_SIZE / RTE_ETH_RETA_GROUP_SIZE];
+	uint16_t reta_size, i;
+	uint16_t portid;
+	int rc;
+
+	clear_lcore_queue_mapping(emdev_id, func_id);
+	/* Synchronize RCU */
+	rte_rcu_qsbr_synchronize(qs_v, RTE_QSBR_THRID_INVALID);
+
+	if (virt_q_count <= 0 || virt_q_count & 0x1 ||
+	    virt_q_count >= num_outb_queues) {
+		APP_ERR("virtio_dev(%u,%u): invalid virt_q_count=%d\n", emdev_id, func_id,
+			virt_q_count);
+		return -EIO;
+	}
+	/* Reconfigure ethdev with required number of queues */
+	if (virtio_map[emdev_id][func_id].type == ETHDEV_NEXT) {
+		portid = virtio_map[emdev_id][func_id].id;
+		rc = reconfig_ethdev(virtio_map[emdev_id][func_id].id, virt_q_count / 2);
+		if (rc)
+			return rc;
+		memset(reta_conf, 0, sizeof(reta_conf));
+		reta_size = eth_dev_info[portid].reta_size;
+
+		if (reta_size) {
+			for (i = 0; i < reta_size; i++)
+				reta_conf[i / RTE_ETH_RETA_GROUP_SIZE].mask = UINT64_MAX;
+
+			for (i = 0; i < reta_size; i++) {
+				uint32_t reta_id = i / RTE_ETH_RETA_GROUP_SIZE;
+				uint32_t reta_pos = i % RTE_ETH_RETA_GROUP_SIZE;
+
+				reta_conf[reta_id].reta[reta_pos] = i % (virt_q_count / 2);
+			}
+
+			rc = rte_eth_dev_rss_reta_update(portid, reta_conf, reta_size);
+			if (rc) {
+				APP_ERR("Failed to update RSS reta table for portid=%d, rc=%d\n",
+					portid, rc);
+				return rc;
+			}
+		}
+	}
+
+	rc = setup_lcore_queue_mapping(emdev_id, func_id, virt_q_count);
+	if (rc)
+		APP_ERR("virtio_dev(%u,%u): failed to setup lcore queue mapping, rc=%d\n", emdev_id,
+			func_id, rc);
+
+	return rc;
+}
+
+static int
+virtio_ctrl_cmd_process(uint16_t emdev_id, struct rte_pmd_cnxk_emdev_event *event)
+{
+	struct virtio_net_ctrl *ctrl_cmd = (struct virtio_net_ctrl *)event->data;
+	uint16_t nb_qps;
+	int status = 0;
+
+	APP_INFO("[dev %u] cq class: %u command: %u\n", event->func_id, ctrl_cmd->class,
+		 ctrl_cmd->command);
+	if (ctrl_cmd->class == VIRTIO_NET_CTRL_MQ) {
+		switch (ctrl_cmd->command) {
+		case VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET:
+			nb_qps = *(uint16_t *)ctrl_cmd->data;
+			status = mq_configure(emdev_id, event->func_id, nb_qps * 2);
+			break;
+		case VIRTIO_NET_CTRL_MQ_RSS_CONFIG:
+			status = rss_reta_configure(emdev_id, event->func_id,
+						    (void *)ctrl_cmd->data);
+			break;
+		default:
+			APP_INFO("[dev %u] class:command=%u:%u  is not supported", event->func_id,
+				 ctrl_cmd->class, ctrl_cmd->command);
+			break;
+		}
+		return status;
+	}
+	APP_INFO("[dev %u] class:command=%u:%u  is not supported\n", event->func_id,
+		 ctrl_cmd->class, ctrl_cmd->command);
+
+	return status;
+}
+
+static void
+ctrl_cmd_dequeue(void)
+{
+	struct rte_pmd_cnxk_emdev_event *event;
+	struct rte_rawdev_buf *buf;
+	uint16_t emdev_id = 0;
+	uint64_t context;
+	uint16_t count;
+	int status;
+
+	/* Process control commands from all emdevs queue 0 */
+	for (emdev_id = 0; emdev_id < rte_rawdev_count(); emdev_id++) {
+		if (!is_emdev_enabled(emdev_id))
+			continue;
+
+		context = CQ_NOTIF_QID;
+		/* Dequeue Control commands */
+		count = rte_rawdev_dequeue_buffers(emdev_id, &buf, 1, (void *)context);
+		if (!count)
+			goto next;
+
+		event = rte_pktmbuf_mtod((struct rte_mbuf *)buf, struct rte_pmd_cnxk_emdev_event *);
+
+		status = virtio_ctrl_cmd_process(emdev_id, event);
+
+		*((uint8_t *)event->data) = (status) ? VIRTIO_NET_ERR : VIRTIO_NET_OK;
+		event->data_len = sizeof(uint8_t);
+
+		context = (uint64_t)event->func_id << 8 | (uint64_t)event->qid << 16;
+		count = rte_rawdev_enqueue_buffers(emdev_id, &buf, 1, (void *)context);
+		if (count != 1)
+			APP_ERR("Ctrl cmd ACK enqueue failed\n");
+next:
+		/* Call empty enqueue to flush Tx queues */
+		context = CQ_NOTIF_QID;
+		rte_rawdev_enqueue_buffers(emdev_id, NULL, 0, (void *)context);
+	}
+}
+
+static void
+print_stats(void)
+{
+	const char topLeft[] = {27, '[', '1', ';', '1', 'H', '\0'};
+	const char clr[] = {27, '[', '2', 'J', '\0'};
+	uint16_t lcore_id;
+	int gstats_en;
+
+	gstats_en = rte_graph_has_stats_feature();
+	while (!force_quit) {
+		if (gstats_en && stats_enable) {
+			/* Clear screen and move to top left */
+			printf("%s%s", clr, topLeft);
+			if (verbose_stats != 2)
+				rte_graph_cluster_stats_get(graph_stats[0], 0);
+			for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
+				/* Dump lcore graph stats */
+				if (verbose_stats == 2 && graph_stats[lcore_id])
+					rte_graph_cluster_stats_get(graph_stats[lcore_id], 0);
+			}
+		}
+		ctrl_cmd_dequeue();
+		rte_delay_ms(1E3);
+	}
+}
+
+static int
+graph_main_loop(void *conf)
+{
+	RTE_SET_USED(conf);
+	struct rte_rcu_qsbr *qs_v;
+	struct lcore_conf *qconf;
+	struct rte_graph *graph;
+	uint32_t lcore_id;
+
+	RTE_SET_USED(conf);
+
+	lcore_id = rte_lcore_id();
+	qconf = &lcore_conf[lcore_id];
+	qs_v = qconf->qs_v;
+	graph = qconf->graph;
+
+	if (!graph) {
+		APP_INFO("Lcore %u has nothing to do\n", lcore_id);
+		return 0;
+	}
+
+	/* Register this thread to rdaort quiescent state */
+	rte_rcu_qsbr_thread_register(qs_v, lcore_id);
+	rte_rcu_qsbr_thread_online(qs_v, lcore_id);
+
+	APP_INFO("Entering graph main loop on lcore %u, %s(%p)\n", lcore_id, qconf->name, graph);
+
+	while (likely(!force_quit)) {
+
+		/* Walk through graph */
+		rte_graph_walk(graph);
+
+		/* Update quiescent state */
+		rte_rcu_qsbr_quiescent(qs_v, lcore_id);
+	}
+
+	rte_rcu_qsbr_thread_offline(qs_v, lcore_id);
+	rte_rcu_qsbr_thread_unregister(qs_v, lcore_id);
+	return 0;
+}
+
 static uint32_t
 eth_dev_get_overhead_len(uint32_t max_rx_pktlen, uint16_t max_mtu)
 {
@@ -1617,16 +1911,20 @@ setup_eth_devices(void)
 {
 	struct rte_eth_rss_reta_entry64 reta_conf[4];
 	struct rte_eth_conf local_port_conf;
+	struct rte_node_register *node_reg;
 	struct rte_eth_dev_info dev_info;
 	struct rte_eth_txconf *txconf;
 	uint16_t queueid, i, portid;
 	uint16_t nb_rx_queue;
 	uint32_t nb_tx_queue;
+	char name[32];
 	int rc;
 
 	APP_INFO("\n");
 
 	RTE_ETH_FOREACH_DEV(portid) {
+		const char *edge_name = name;
+
 		local_port_conf = port_conf;
 
 		/* Skip ports that are not enabled */
@@ -1747,6 +2045,25 @@ setup_eth_devices(void)
 		rc = rte_eth_dev_set_ptypes(portid, RTE_PTYPE_UNKNOWN, NULL, 0);
 		if (rc < 0)
 			rte_exit(EXIT_FAILURE, "Failed to disable ptype parsing\n");
+
+		/* Clone ethdev rx and tx nodes for this ethdev */
+		snprintf(name, sizeof(name), "%u", portid);
+		node_reg = l2_ethdev_rx_node_get();
+		ethdev_rx_nodes[portid] = rte_node_clone(node_reg->id, name);
+
+		node_reg = l2_ethdev_tx_node_get();
+		ethdev_tx_nodes[portid] = rte_node_clone(node_reg->id, name);
+
+		/* Update graph edge info */
+		if (eth_map[portid].type == ETHDEV_NEXT) {
+			snprintf(name, sizeof(name), "l2_ethdev_tx-%u", eth_map[portid].id);
+			rte_node_edge_update(ethdev_rx_nodes[portid], RTE_EDGE_ID_INVALID,
+					     &edge_name, 1);
+		} else {
+			snprintf(name, sizeof(name), "l2_emdev_enq-%u", eth_map[portid].id);
+			rte_node_edge_update(ethdev_rx_nodes[portid], RTE_EDGE_ID_INVALID,
+					     &edge_name, 1);
+		}
 	}
 
 	APP_INFO("\n");
@@ -1772,8 +2089,10 @@ setup_em_devices(void)
 	struct rte_pmd_cnxk_emdev_q_conf q_conf;
 	struct rte_pmd_cnxk_emdev_conf conf;
 	struct rte_rawdev_info rawdev_conf;
+	struct rte_node_register *node_reg;
 	uint16_t portid;
 	uint64_t data;
+	char name[32];
 	int rc, i, j, func_id;
 	int emdev_id = 0;
 
@@ -1856,6 +2175,23 @@ setup_em_devices(void)
 				goto exit;
 			}
 		}
+		/* Clone rx and tx nodes for this emdev */
+		snprintf(name, sizeof(name), "%u", emdev_id);
+		node_reg = l2_emdev_deq_node_get();
+		emdev_deq_nodes[emdev_id] = rte_node_clone(node_reg->id, name);
+
+		node_reg = l2_emdev_enq_node_get();
+		emdev_enq_nodes[emdev_id] = rte_node_clone(node_reg->id, name);
+
+		/* Add all ethdev tx nodes to every emdev deq node */
+		rte_node_edge_update(emdev_deq_nodes[emdev_id], 0, emdev_deq_edge_names,
+				     nb_emdev_deq_edges);
+
+		rc = rte_rawdev_start(emdev_id);
+		if (rc) {
+			APP_ERR("rte_rawdev_start: err=%d, dev=%u\n", rc, emdev_id);
+			return rc;
+		}
 		APP_INFO_NH("done\n");
 
 	}
@@ -1868,6 +2204,204 @@ exit:
 		rte_rawdev_close(emdev_id);
 	}
 	return rc;
+}
+
+static int
+setup_graph_workers(void)
+{
+	static const char *const default_patterns[] = {
+		"pkt_drop",
+	};
+	struct rte_graph_cluster_stats_param s_param;
+	struct rte_graph_param graph_conf;
+	struct lcore_conf *qconf;
+	struct rte_node *node;
+	uint32_t emdev_id;
+	uint16_t nb_patterns;
+	rte_node_t node_id;
+	uint32_t lcore_id;
+	uint16_t portid;
+
+	nb_patterns = RTE_DIM(default_patterns);
+	node_patterns = malloc((MAX_ETHDEV_RX_PER_LCORE + MAX_VIRTIO_RX_PER_LCORE + nb_patterns) *
+			       sizeof(*node_patterns));
+	if (!node_patterns)
+		return -ENOMEM;
+	memcpy(node_patterns, default_patterns, nb_patterns * sizeof(*node_patterns));
+
+	memset(&graph_conf, 0, sizeof(graph_conf));
+	graph_conf.node_patterns = node_patterns;
+
+	/* Pcap config */
+	graph_conf.pcap_enable = pcap_trace_enable;
+	graph_conf.num_pkt_to_capture = packet_to_capture;
+	graph_conf.pcap_filename = pcap_filename;
+
+	for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
+		rte_graph_t graph_id;
+		rte_edge_t i;
+
+		if (rte_lcore_is_enabled(lcore_id) == 0)
+			continue;
+
+		qconf = &lcore_conf[lcore_id];
+
+		/* Skip Lcore if not needed */
+		if (!qconf->nb_ethdev_rx && !qconf->nb_emdev_deq)
+			continue;
+
+		qconf->qs_v = qs_v;
+
+		nb_patterns = RTE_DIM(default_patterns);
+		snprintf(qconf->name, sizeof(qconf->name), "worker_%u", lcore_id);
+
+		/* Add ethdev and emdev rx node patterns of this lcore */
+		for (i = 0; i < qconf->nb_ethdev_rx; i++)
+			graph_conf.node_patterns[nb_patterns + i] = qconf->ethdev_rx[i].node_name;
+		nb_patterns += i;
+
+		for (i = 0; i < qconf->nb_emdev_deq; i++)
+			graph_conf.node_patterns[nb_patterns + i] = qconf->emdev_deq[i].node_name;
+		nb_patterns += i;
+
+		graph_conf.nb_node_patterns = nb_patterns;
+		graph_conf.socket_id = rte_lcore_to_socket_id(lcore_id);
+
+		graph_id = rte_graph_create(qconf->name, &graph_conf);
+		if (graph_id == RTE_GRAPH_ID_INVALID) {
+			APP_ERR("rte_graph_create(): graph_id invalid for lcore %u\n",
+				 lcore_id);
+			goto exit;
+		}
+
+		qconf->graph_id = graph_id;
+		qconf->graph = rte_graph_lookup(qconf->name);
+		if (!qconf->graph)
+			rte_exit(EXIT_FAILURE, "rte_graph_lookup(): graph %s not found\n",
+				 qconf->name);
+
+		/* Update context data of ethdev rx and emdev tx nodes of this graph */
+		for (i = 0; i < qconf->nb_ethdev_rx; i++) {
+			portid = qconf->ethdev_rx[i].portid;
+
+			/* ethdev rx ctx */
+			node_id = ethdev_rx_nodes[portid];
+			node = rte_graph_node_get(graph_id, node_id);
+			qconf->ethdev_rx[i].ethdev_rx = (struct l2_ethdev_rx_node_ctx *)node->ctx;
+			qconf->ethdev_rx[i].ethdev_rx->eth_port = portid;
+			qconf->ethdev_rx[i].ethdev_rx->virtio_next = 1;
+			qconf->ethdev_rx[i].ethdev_rx->emdev_id = eth_map[portid].emdev_id;
+			qconf->ethdev_rx[i].ethdev_rx->func_id = eth_map[portid].id;
+
+			/* Mapped virtio tx ctx */
+			node_id = emdev_enq_nodes[eth_map[portid].emdev_id];
+			node = rte_graph_node_get(graph_id, node_id);
+			qconf->ethdev_rx[i].emdev_enq = (struct l2_emdev_enq_node_ctx *)node->ctx;
+			qconf->ethdev_rx[i].emdev_enq->emdev_id = eth_map[portid].emdev_id;
+			qconf->ethdev_rx[i].emdev_enq->emdev_qid = qconf->ethdev_rx[i].emdev_qid;
+		}
+
+		/* Update context data of emdev rx and ethdev tx nodes of this graph */
+		for (i = 0; i < qconf->nb_emdev_deq; i++) {
+			emdev_id = qconf->emdev_deq[i].emdev_id;
+
+			/* virtio rx ctx */
+			node_id = emdev_deq_nodes[i];
+			node = rte_graph_node_get(graph_id, node_id);
+			qconf->emdev_deq[i].emdev_deq = (struct l2_emdev_deq_node_ctx *)node->ctx;
+			qconf->emdev_deq[i].emdev_deq->emdev_id = emdev_id;
+			qconf->emdev_deq[i].emdev_deq->emdev_qid = qconf->emdev_deq[i].emdev_qid;
+			qconf->emdev_deq[i].emdev_deq->eth_next = 1;
+
+			/* Mapped eth tx ctx */
+			portid = virtio_map[emdev_id][0].id;
+			node_id = ethdev_tx_nodes[portid];
+			node = rte_graph_node_get(graph_id, node_id);
+		}
+
+		/* Assign portid to respective tx node context */
+		for (portid = 0; portid < RTE_MAX_ETHPORTS; portid++) {
+			node_id = ethdev_tx_nodes[portid];
+			node = rte_graph_node_get(graph_id, node_id);
+			if (node) {
+				struct l2_ethdev_tx_node_ctx *ethdev_tx_ctx;
+
+				ethdev_tx_ctx = (struct l2_ethdev_tx_node_ctx *)node->ctx;
+				ethdev_tx_ctx->eth_port = portid;
+			}
+		}
+
+		/* Assign emdevid to respective enq node context */
+		for (emdev_id = 0; emdev_id < RTE_RAWDEV_MAX_DEVS; emdev_id++) {
+			node_id = emdev_enq_nodes[emdev_id];
+			node = rte_graph_node_get(graph_id, node_id);
+			if (node) {
+				struct l2_emdev_enq_node_ctx *emdev_enq_ctx;
+
+				emdev_enq_ctx = (struct l2_emdev_enq_node_ctx *)node->ctx;
+				emdev_enq_ctx->emdev_id = emdev_id;
+			}
+		}
+
+		if (rte_graph_has_stats_feature() && stats_enable && verbose_stats == 2) {
+			const char *pattern = qconf->name;
+			/* Prepare per-lcore stats object */
+			memset(&s_param, 0, sizeof(s_param));
+			s_param.f = stdout;
+			s_param.socket_id = SOCKET_ID_ANY;
+			s_param.graph_patterns = &pattern;
+			s_param.nb_graph_patterns = 1;
+
+			graph_stats[lcore_id] = rte_graph_cluster_stats_create(&s_param);
+			if (graph_stats[lcore_id] == NULL) {
+				APP_ERR("Unable to create stats object\n");
+				goto exit;
+			}
+		}
+	}
+
+	if (rte_graph_has_stats_feature() && stats_enable && verbose_stats != 2) {
+		const char *pattern = "worker_*";
+		/* Prepare stats object */
+		memset(&s_param, 0, sizeof(s_param));
+		s_param.f = stdout;
+		s_param.socket_id = SOCKET_ID_ANY;
+		s_param.graph_patterns = &pattern;
+		s_param.nb_graph_patterns = 1;
+
+		graph_stats[0] = rte_graph_cluster_stats_create(&s_param);
+		if (graph_stats[0] == NULL)
+			rte_exit(EXIT_FAILURE, "Unable to create stats object\n");
+	}
+
+	return 0;
+exit:
+	return -EINVAL;
+}
+
+static void
+release_graph_workers(void)
+{
+	uint32_t lcore_id;
+	int rc;
+
+	for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
+		if (graph_stats[lcore_id])
+			rte_graph_cluster_stats_destroy(graph_stats[lcore_id]);
+	}
+
+	/* Wait for worker cores to exit */
+	rc = 0;
+	RTE_LCORE_FOREACH_WORKER(lcore_id)
+	{
+		rc = rte_eal_wait_lcore(lcore_id);
+		/* Destroy graph */
+		if (rc < 0 || rte_graph_destroy(rte_graph_from_name(lcore_conf[lcore_id].name))) {
+			rc = -1;
+			break;
+		}
+	}
+	free(node_patterns);
 }
 
 static void
@@ -1906,7 +2440,10 @@ release_eth_devices(void)
 int
 main(int argc, char **argv)
 {
+	struct lcore_conf *qconf;
+	uint32_t lcore_id;
 	uint16_t portid;
+	size_t sz;
 	int rc;
 
 	/* Init EAL */
@@ -1953,6 +2490,17 @@ main(int argc, char **argv)
 	/* Initialize all ethdev ports. 8< */
 	setup_eth_devices();
 
+	/* Setup RCU QSBR variable */
+	sz = rte_rcu_qsbr_get_memsize(RTE_MAX_LCORE);
+	qs_v = (struct rte_rcu_qsbr *)rte_zmalloc_socket(NULL, sz, RTE_CACHE_LINE_SIZE,
+							 SOCKET_ID_ANY);
+	if (!qs_v)
+		rte_exit(EXIT_FAILURE, "Failed to alloc rcu_qsbr variable\n");
+
+	rc = rte_rcu_qsbr_init(qs_v, RTE_MAX_LCORE);
+	if (rc)
+		rte_exit(EXIT_FAILURE, "rte_rcu_qsbr_init(): failed to init, rc=%d\n", rc);
+
 	/* Start ports */
 	RTE_ETH_FOREACH_DEV(portid) {
 		if (!is_ethdev_enabled(portid))
@@ -1976,6 +2524,15 @@ main(int argc, char **argv)
 		goto cleanup_ethdev;
 	}
 
+	/* Graph Initialization */
+	rc = setup_graph_workers();
+	if (rc) {
+		APP_ERR("setup_graph_workers: err=%d\n", rc);
+		goto cleanup_emdev;
+	}
+
+	APP_INFO("\n");
+
 	if (per_port_pool) {
 		RTE_ETH_FOREACH_DEV(portid) {
 			if (!is_ethdev_enabled(portid))
@@ -1989,8 +2546,23 @@ main(int argc, char **argv)
 			rte_mempool_avail_count(e_pktmbuf_pool[0]));
 	}
 
+	/* Launch per-lcore init on every worker lcore */
+	RTE_LCORE_FOREACH_WORKER(lcore_id)
+	{
+		qconf = &lcore_conf[lcore_id];
+		if (qconf->graph)
+			rte_eal_remote_launch(graph_main_loop, NULL, lcore_id);
+	}
+
 	dump_lcore_info();
 
+	/* Accumulate and print stats on main until exit */
+	print_stats();
+
+	/* Wait for all worker cores to finish and destroy their graphs */
+	release_graph_workers();
+
+cleanup_emdev:
 	/* Close pem device */
 	release_em_device();
 

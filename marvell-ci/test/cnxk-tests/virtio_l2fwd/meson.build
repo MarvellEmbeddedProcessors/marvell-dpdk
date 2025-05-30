@@ -19,7 +19,7 @@ endif
 # Create the test executable
 virtio_l2fwd_test=executable(
     test_exec,
-    files('virtio_l2fwd.c'),
+    files('virtio_l2fwd.c', 'l2_eth_rx.c', 'l2_eth_tx.c', 'l2_emdev_deq.c', 'l2_emdev_enq.c'),
     link_whole: link_libs,
     include_directories: includes,
     dependencies: [cnxk_test_dep_objs, get_variable(def_lib + '_rte_raw_cnxk_emdev')],

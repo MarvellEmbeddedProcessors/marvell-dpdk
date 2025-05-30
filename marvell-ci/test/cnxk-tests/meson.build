@@ -108,6 +108,7 @@ test_subdirs_arm = [
         'flow_aging',
         'cpt_raw_test',
         'port_representor',
+        'virtio_l2fwd',
 ]
 
 test_subdirs_x86 = [

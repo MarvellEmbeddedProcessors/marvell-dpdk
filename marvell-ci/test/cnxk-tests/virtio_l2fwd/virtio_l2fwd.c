@@ -1606,6 +1606,22 @@ mq_configure(uint16_t emdev_id, uint16_t func_id, uint16_t virt_q_count)
 }
 
 static int
+promisc_configure(uint16_t emdev_id, uint16_t func_id, uint8_t enable)
+{
+	if (enable)
+		return rte_eth_promiscuous_enable(virtio_map[emdev_id][func_id].id);
+	return rte_eth_promiscuous_disable(virtio_map[emdev_id][func_id].id);
+}
+
+static int
+allmulti_configure(uint16_t emdev_id, uint16_t func_id, uint8_t enable)
+{
+	if (enable)
+		return rte_eth_allmulticast_enable(virtio_map[emdev_id][func_id].id);
+	return rte_eth_allmulticast_disable(virtio_map[emdev_id][func_id].id);
+}
+
+static int
 virtio_ctrl_cmd_process(uint16_t emdev_id, struct rte_pmd_cnxk_emdev_event *event)
 {
 	struct virtio_net_ctrl *ctrl_cmd = (struct virtio_net_ctrl *)event->data;
@@ -1623,6 +1639,22 @@ virtio_ctrl_cmd_process(uint16_t emdev_id, struct rte_pmd_cnxk_emdev_event *even
 		case VIRTIO_NET_CTRL_MQ_RSS_CONFIG:
 			status = rss_reta_configure(emdev_id, event->func_id,
 						    (void *)ctrl_cmd->data);
+			break;
+		default:
+			APP_INFO("[dev %u] class:command=%u:%u  is not supported", event->func_id,
+				 ctrl_cmd->class, ctrl_cmd->command);
+			break;
+		}
+		return status;
+	} else if (ctrl_cmd->class == VIRTIO_NET_CTRL_RX) {
+		switch (ctrl_cmd->command) {
+		case VIRTIO_NET_CTRL_RX_PROMISC:
+			status = promisc_configure(emdev_id, event->func_id,
+						   *(uint8_t *)ctrl_cmd->data);
+			break;
+		case VIRTIO_NET_CTRL_RX_ALLMULTI:
+			status = allmulti_configure(emdev_id, event->func_id,
+						    *(uint8_t *)ctrl_cmd->data);
 			break;
 		default:
 			APP_INFO("[dev %u] class:command=%u:%u  is not supported", event->func_id,

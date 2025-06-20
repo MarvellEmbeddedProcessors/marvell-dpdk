@@ -14,6 +14,7 @@ EXPERIMENTAL {
 
 	# added in 24.11
 	rte_pmd_cnxk_ae_fpm_table_get;
+	rte_pmd_cnxk_ae_ec_grp_table_get;
 };
 
 INTERNAL {

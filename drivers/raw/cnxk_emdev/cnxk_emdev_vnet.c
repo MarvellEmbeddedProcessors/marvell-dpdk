@@ -35,6 +35,8 @@ vnet_link_sts_update(struct cnxk_emdev_virtio_pfvf *pfvf,
 	dev_cfg->duplex = link_info->duplex;
 	dev_cfg->speed = link_info->speed;
 
+	roc_emdev_psw_mbox_int_trigger(&pfvf->dev->roc_emdev, pfvf->vf_id);
+
 	return 0;
 }
 

@@ -110,6 +110,7 @@ virtio_queues_fini(struct cnxk_emdev_virtio_pfvf *pfvf)
 		/* Reset the queue size */
 		qconf->queue_select = VIRTIO_INVALID_QUEUE_INDEX;
 		qconf->queue_size = VIRTIO_DFLT_QUEUE_SZ;
+		qconf->queue_msix_vector = CNXK_EMDEV_MSIX_VECTOR_INVALID;
 	}
 }
 
@@ -136,6 +137,10 @@ virtio_queue_init(struct cnxk_emdev_virtio_pfvf *pfvf, struct cnxk_emdev_virtio_
 	if (inbq->hib.q_base_addr & 0x3F)
 		return -EINVAL;
 	inbq->hib.msix_vec_num = CNXK_EMDEV_MSIX_VECTOR_INVALID;
+	if (qconf->queue_msix_vector != CNXK_EMDEV_MSIX_VECTOR_INVALID) {
+		inbq->hib.msix_vec_num = qconf->queue_msix_vector;
+		inbq->hib.msix_en = true;
+	}
 	inbq->hib.pround = 1;
 	inbq->ci_init = BIT_ULL(15);
 	inbq->pi_init = BIT_ULL(15);
@@ -506,6 +511,8 @@ static inline int
 config_msix_vector_read(struct cnxk_emdev_virtio_pfvf *pfvf, uint16_t *msix_vector)
 {
 	*msix_vector = pfvf->config_msix_vector;
+
+	plt_emdev_dbg("[dev %u] read config_msix_vector: 0x%04x", pfvf->vf_id, *msix_vector);
 	return 0;
 }
 
@@ -1068,6 +1075,7 @@ cnxk_emdev_virtio_pfvf_init(struct cnxk_emdev *dev, uint16_t nb_pfvfs,
 		for (int j = 0; j < (int)max_queues; j++) {
 			pfvf->queue_conf[j].queue_select = VIRTIO_INVALID_QUEUE_INDEX;
 			pfvf->queue_conf[j].queue_size = VIRTIO_DFLT_QUEUE_SZ;
+			pfvf->queue_conf[j].queue_msix_vector = CNXK_EMDEV_MSIX_VECTOR_INVALID;
 		}
 		pfvf->vnet_qs = plt_zmalloc(max_queues * sizeof(struct cnxk_emdev_vnet_queue), 64);
 		if (!pfvf->vnet_qs) {

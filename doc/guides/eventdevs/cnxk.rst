@@ -189,6 +189,15 @@ Runtime Config Options
 
     -a 0002:0e:00.0,tim_eclk_freq=122880000-1000000000-0
 
+- ``Use ALTAF for MBOX``
+
+  The ``use_altaf`` devargs can be used to enable ALTAF for MBOX communication
+  with CN10K SoCs.
+
+  For Example::
+
+    -a 0002:1e:00.0,use_altaf=1
+
 Power Saving on CN10K/CN20K
 ---------------------------
 

@@ -626,8 +626,34 @@ cnxk_sso_parse_devargs(struct cnxk_sso_evdev *dev, struct rte_devargs *devargs)
 			   &single_ws);
 	rte_kvargs_process(kvlist, CNXK_SSO_STASH, &parse_sso_kvargs_stash_dict,
 			   dev);
+
 	dev->dual_ws = !single_ws;
 	rte_kvargs_free(kvlist);
+}
+
+static inline uint8_t
+parse_altaf(struct rte_devargs *devargs)
+{
+	struct rte_kvargs *kvlist;
+	uint8_t use_altaf = 0;
+
+	if (devargs == NULL)
+		goto exit;
+	kvlist = rte_kvargs_parse(devargs->args, NULL);
+	if (kvlist == NULL)
+		goto exit;
+
+	rte_kvargs_process(kvlist, CNXK_USE_ALTAF, &parse_kvargs_flag, &use_altaf);
+	rte_kvargs_free(kvlist);
+exit:
+	return !!use_altaf;
+}
+
+static int
+cnxk_sso_plt_parse_devargs(struct rte_pci_device *pci_dev)
+{
+	roc_idev_altaf_set(parse_altaf(pci_dev->device.devargs));
+	return 0;
 }
 
 int
@@ -716,4 +742,9 @@ cn9k_sso_set_rsrc(void *arg)
 	dev->max_event_queues = dev->sso.max_hwgrp > RTE_EVENT_MAX_QUEUES_PER_DEV ?
 					RTE_EVENT_MAX_QUEUES_PER_DEV :
 					dev->sso.max_hwgrp;
+}
+
+RTE_INIT(cnxk_sso_parse_common_devargs)
+{
+	roc_sso_altaf_cb_register(cnxk_sso_plt_parse_devargs);
 }

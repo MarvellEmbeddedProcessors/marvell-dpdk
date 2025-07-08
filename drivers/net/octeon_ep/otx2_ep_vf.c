@@ -289,7 +289,7 @@ otx2_vf_setup_iq_regs(struct otx_ep_device *otx_ep, uint32_t iq_no)
 
 	/* Clear the IQ doorbell  */
 	loop = OTX_EP_BUSY_LOOP_COUNT;
-	while ((rte_read32(iq->doorbell_reg) != 0ull) && loop--) {
+	while ((rte_read64(iq->doorbell_reg) != 0ull) && loop--) {
 		rte_write32(OTX_EP_CLEAR_INSTR_DBELL, iq->doorbell_reg);
 		rte_delay_ms(1);
 	}

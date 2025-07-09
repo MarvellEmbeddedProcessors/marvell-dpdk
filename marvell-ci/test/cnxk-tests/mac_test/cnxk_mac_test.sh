@@ -210,6 +210,7 @@ function macfltr_pkt_test()
 	testpmd_cmd_refresh $PRFX "port stop $1"
 	testpmd_cmd_refresh $PRFX "port config $1 loopback 1"
 	testpmd_cmd_refresh $PRFX "port start $1"
+	sleep 2
 	check_port_status $1
 
 	if [[ $3 == "mcast" ]]

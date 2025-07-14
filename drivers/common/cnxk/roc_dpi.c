@@ -254,6 +254,31 @@ exit:
 }
 
 int
+dpi_lf_get_msixoffset(struct dev *dev, uint16_t *msixoff, uint16_t nb_lf)
+{
+	struct mbox *mbox = mbox_get(dev->mbox);
+	struct dpi_msix_offset_rsp *rsp;
+	struct msg_req *req;
+	int rc;
+
+	req = mbox_alloc_msg_dpi_msix_offset(mbox);
+	if (req == NULL) {
+		rc = -ENOSPC;
+		goto exit;
+	}
+
+	rc = mbox_process_msg(mbox, (void **)&rsp);
+	if (rc)
+		goto exit;
+
+	for (int i = 0; i < nb_lf; i++)
+		msixoff[i] = rsp->dpilf_msixoff[i];
+
+exit:
+	return rc;
+}
+
+int
 dpi_lf_detach(struct dev *dev)
 {
 	struct mbox *mbox = mbox_get(dev->mbox);
@@ -581,6 +606,43 @@ fail:
 	return rc;
 }
 
+void
+dpi_lf_err_irq(void *param)
+{
+	struct roc_dpi_lf *lf = (struct roc_dpi_lf *)param;
+	uint64_t intr;
+
+	intr = plt_read64(lf->rbase + DPI_LF_RINGX_ERR(1));
+	if (intr == 0)
+		return;
+
+	roc_dpi_lf_dump(lf, NULL);
+
+	plt_write64(intr, lf->rbase + DPI_LF_RINGX_ERR(1));
+}
+
+int
+dpi_lf_irq_register(struct roc_dpi_lf *lf, struct plt_intr_handle *handle)
+{
+	int rc;
+
+	plt_write64(~0ull, lf->rbase + DPI_LF_RINGX_ERR_ENA_W1C(1));
+	rc = dev_irq_register(handle, dpi_lf_err_irq, lf, lf->msixoff + DPI_LF_INT_RING_ERR);
+	if (rc)
+		return rc;
+
+	plt_write64(~0ull, lf->rbase + DPI_LF_RINGX_ERR_ENA_W1S(1));
+
+	return rc;
+}
+
+void
+dpi_lf_irq_unregister(struct roc_dpi_lf *lf, struct plt_intr_handle *handle)
+{
+	plt_write64(~0ull, lf->rbase + DPI_LF_RINGX_ERR_ENA_W1C(1));
+	dev_irq_unregister(handle, dpi_lf_err_irq, lf, lf->msixoff + DPI_LF_INT_RING_ERR);
+}
+
 int
 dpi_lf_init(struct roc_dpi_lf *lf, struct dev *dev, uint8_t slot)
 {
@@ -592,6 +654,7 @@ dpi_lf_init(struct roc_dpi_lf *lf, struct dev *dev, uint8_t slot)
 	lf->queue[0].lf = lf;
 	lf->queue[1].lf = lf;
 	lf->blk_addr = blk_addr;
+
 	return 0;
 }
 
@@ -603,8 +666,8 @@ dpi_dev_init(struct roc_dpi *roc_dpi, struct plt_pci_device *pci_dev)
 	const struct plt_memzone *mz;
 	struct dev *dev = &dpi->dev;
 	uint8_t blk_addr = RVU_BLOCK_ADDR_DPI0; /* FIX it */
+	uint16_t *msixoff, slot;
 	struct roc_dpi_lf *lf;
-	uint16_t slot;
 	int rc;
 
 	rc = dev_init(dev, pci_dev);
@@ -614,7 +677,8 @@ dpi_dev_init(struct roc_dpi *roc_dpi, struct plt_pci_device *pci_dev)
 	}
 
 	mz = plt_memzone_reserve_cache_align(plt_pci_dev_name(name, ROC_DPI_DEV_NAME, pci_dev),
-					     roc_dpi->nr_lfs * sizeof(struct roc_dpi_lf));
+					     roc_dpi->nr_lfs * sizeof(struct roc_dpi_lf) +
+						     (sizeof(uint16_t) * MAX_RVU_BLKLF_CNT));
 	if (!mz)
 		goto dev_fini;
 
@@ -626,11 +690,26 @@ dpi_dev_init(struct roc_dpi *roc_dpi, struct plt_pci_device *pci_dev)
 		goto free_mem;
 	}
 
+	msixoff = (uint16_t *)((uint8_t *)mz->addr + roc_dpi->nr_lfs * sizeof(struct roc_dpi_lf));
+	rc = dpi_lf_get_msixoffset(dev, msixoff, roc_dpi->nr_lfs);
+	if (rc) {
+		plt_err("Failed to get msix offset");
+		goto free_mem;
+	}
+
 	for (slot = 0; slot < roc_dpi->nr_lfs; slot++) {
 		lf = &roc_dpi->lfs[slot];
+		lf->msixoff = msixoff[slot];
+
 		rc = dpi_lf_init(lf, dev, slot);
 		if (rc) {
 			plt_err("Failed to init dpi lf %u", slot);
+			goto lf_detach;
+		}
+
+		rc = dpi_lf_irq_register(lf, roc_dpi->pci_dev->intr_handle);
+		if (rc) {
+			plt_err("Failed to register irq for lf %u", slot);
 			goto lf_detach;
 		}
 	}
@@ -664,6 +743,8 @@ dpi_dev_fini(struct roc_dpi *roc_dpi)
 			if (que->mz)
 				plt_memzone_free(que->mz);
 		}
+
+		dpi_lf_irq_unregister(lf, roc_dpi->pci_dev->intr_handle);
 	}
 
 	dpi_lf_detach(dev);

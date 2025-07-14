@@ -53,6 +53,7 @@ struct roc_dpi_lf {
 	uint16_t chan_tbl_sz;
 	uint16_t slot;
 	uint16_t blk_addr;
+	uint16_t msixoff;
 };
 
 struct roc_dpi {

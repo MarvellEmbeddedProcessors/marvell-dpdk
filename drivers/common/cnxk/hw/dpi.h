@@ -95,6 +95,10 @@
 #define DPI_Q_RIDX_WRAP(x) (((x) >> 15) & 0x1)
 #define DPI_Q_WIDX_WRAP(x) (((x) >> 15) & 0x1)
 
+/* DPI LF interrupt vectors */
+#define DPI_LF_INT_RING_INT 0
+#define DPI_LF_INT_RING_ERR 1
+
 /**
  * Structure dpi_instr_hdr_s for CN9K
  *

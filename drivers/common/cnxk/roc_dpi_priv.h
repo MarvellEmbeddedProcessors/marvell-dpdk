@@ -75,5 +75,9 @@ int dpi_chan_tbl_ena_dis(struct dev *dev, uint32_t dpi_blkaddr, uint16_t lfid, u
 			 bool enable);
 int dpi_chan_tbl_update(struct dev *dev, uint8_t blk_addr, uint16_t chan_tbl, uint64_t *tbl,
 			uint16_t off, uint16_t nb_entries);
+int dpi_lf_get_msixoffset(struct dev *dev, uint16_t *msixoff, uint16_t nb_lf);
+int dpi_lf_irq_register(struct roc_dpi_lf *lf, struct plt_intr_handle *handle);
+void dpi_lf_irq_unregister(struct roc_dpi_lf *lf, struct plt_intr_handle *handle);
+void dpi_lf_err_irq(void *param);
 
 #endif

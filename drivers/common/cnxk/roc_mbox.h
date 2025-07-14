@@ -426,6 +426,7 @@ struct mbox_msghdr {
 	  msg_rsp)                                                                                 \
 	M(DPI_LF_CHAN_TBL_UPDATE, 0xc00b, dpi_lf_chan_tbl_update, dpi_lf_chan_tbl_update_req,      \
 	  msg_rsp)                                                                                 \
+	M(DPI_MSIX_OFFSET, 0xc011, dpi_msix_offset, msg_req, dpi_msix_offset_rsp)                  \
 	/* PSW mbox IDs (range 0x1200 - 0x13FF) */                                                 \
 	M(PSW_ATTACH_RESOURCES, 0x1200, psw_attach_resources, psw_rsrc_attach_req, msg_rsp)        \
 	M(PSW_DETACH_RESOURCES, 0x1201, psw_detach_resources, psw_rsrc_detach_req, msg_rsp)        \
@@ -1447,6 +1448,14 @@ struct dpi_lf_chan_tbl_update_req {
 	uint16_t __io idx_offset;  /* Offset within the channel table */
 	uint16_t __io num_entries; /* Num of entries to be updated from idx_offset */
 	uint16_t __io chan_tbl;
+};
+
+struct dpi_msix_offset_rsp {
+	struct mbox_msghdr hdr;
+	uint16_t __io dpilfs;
+	uint16_t __io dpilf_msixoff[MAX_RVU_BLKLF_CNT];
+	uint16_t __io dpi1_lfs;
+	uint16_t __io dpi1_lf_msixoff[MAX_RVU_BLKLF_CNT];
 };
 
 /* NPA mbox message formats */

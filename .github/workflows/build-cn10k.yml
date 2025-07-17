@@ -65,6 +65,7 @@ jobs:
           echo "Homepage: https://www.dpdk.org/" >> DEBIAN/control
           echo "Description: DPDK Library for Marvell Octeon 10" >> DEBIAN/control
           cd -
+          rm -rf "${PWD}/install/~" "${PWD}/install/home"
           mv "${PWD}/install" "${PWD}/dpdk-${PKG_VERSION_NAME}-cn10k${PKG_POSTFIX}_${MRVL_PKG_VERSION}_arm64"
           dpkg --build "dpdk-${PKG_VERSION_NAME}-cn10k${PKG_POSTFIX}_${MRVL_PKG_VERSION}_arm64"
           cp "dpdk-${PKG_VERSION_NAME}-cn10k${PKG_POSTFIX}_${MRVL_PKG_VERSION}_arm64.deb" ${PWD}/artifacts/.

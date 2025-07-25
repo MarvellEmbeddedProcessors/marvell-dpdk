@@ -83,8 +83,8 @@ emdev_vnet_ctrl_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue
 	a_ci = plt_read64((uint64_t *)aq->ci_dbl);
 
 	/* Check if Ack queue is full */
-	if (wrap_off_diff(a_pi, a_ci, aq->q_sz) == aq->q_sz)
-		return 0;
+	if (((a_pi + 1) & (aq->q_sz - 1)) == a_ci)
+		return -ENOSPC;
 
 	/* Prepare PSW_ACK_DOORBELL_DESC_S */
 	ack_desc = (uint64_t)event->ci_end << 32;
@@ -94,7 +94,7 @@ emdev_vnet_ctrl_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue
 
 	/* Add instruction to ack queue to trigger descriptor store */
 	*AQ_DESC_PTR_OFF(aq->q_base, a_pi, 0) = ack_desc;
-	a_pi = wrap_off_add(a_pi, 1, aq->q_sz);
+	a_pi = DESC_ADD(a_pi, 1, aq->q_sz);
 	plt_io_wmb();
 	plt_write64(a_pi, aq->pi_dbl);
 
@@ -248,7 +248,7 @@ cnxk_emdev_vnet_enq_dpi_compl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_
 	ci = plt_read64(ci_dbl);
 
 	/* Check if Ack queue is full */
-	if (wrap_off_diff(pi, ci, q_sz) == q_sz)
+	if (DESC_ADD(pi, 1, aq->q_sz) == ci)
 		return -ENOSPC;
 
 	compl_ptr = cnxk_emdev_dma_compl_addr(compl_base, comp_idx);
@@ -264,7 +264,7 @@ cnxk_emdev_vnet_enq_dpi_compl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_
 
 	/* Add instruction to ack queue to trigger descriptor store */
 	*AQ_DESC_PTR_OFF(aq->q_base, pi, 0) = ack_desc;
-	pi = wrap_off_add(pi, 1, q_sz) & (q_sz - 1);
+	pi = DESC_ADD(pi, 1, q_sz);
 	plt_io_wmb();
 	plt_write64(pi, pi_dbl);
 	return 0;

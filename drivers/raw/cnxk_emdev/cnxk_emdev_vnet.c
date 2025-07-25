@@ -14,6 +14,8 @@
 
 #include "cnxk_emdev_vnet.h"
 
+extern const struct rte_rawdev_ops cnxk_emdev_vnet_ops;
+
 static uint16_t
 vnet_cq_id_get(struct cnxk_emdev_virtio_pfvf *pfvf, uint64_t feature_bits)
 {
@@ -40,9 +42,8 @@ vnet_link_sts_update(struct cnxk_emdev_virtio_pfvf *pfvf,
 	return 0;
 }
 
-int
-cnxk_emdev_vnet_cfg_read(struct cnxk_emdev_virtio_pfvf *pfvf, uint32_t offset, void *data,
-			 uint8_t len)
+static int
+vnet_devcfg_read(struct cnxk_emdev_virtio_pfvf *pfvf, uint32_t offset, void *data, uint8_t len)
 {
 	struct virtio_net_config *dev_cfg = &pfvf->net_conf.dev_cfg;
 	uint32_t cfg_offset;
@@ -55,6 +56,48 @@ cnxk_emdev_vnet_cfg_read(struct cnxk_emdev_virtio_pfvf *pfvf, uint32_t offset, v
 
 	return 0;
 }
+
+static void
+vnet_dump(struct cnxk_emdev *dev, FILE *file)
+{
+	struct cnxk_emdev_virtio_pfvf *pfvf = dev->pfvf;
+	struct cnxk_emdev_virtio_queue_conf *conf;
+	uint16_t qid;
+	int i;
+
+	/* Dump all the inbound/outbound queues for all VF's */
+	for (i = 0; i < dev->nb_epfvfs; i++) {
+		plt_info("Dumping inb/outb queues for epf_func 0x%x", pfvf[i].epf_func);
+
+		for (qid = 0; qid < pfvf[i].max_queues; qid++) {
+			conf = &pfvf[i].queue_conf[qid];
+			/* Skip dumping queue if not enabled */
+
+			if (!conf->queue_enable)
+				continue;
+			roc_emdev_psw_inb_q_dump(&conf->inbq, file);
+			roc_emdev_psw_outb_q_dump(&conf->outbq, file);
+		}
+	}
+}
+
+static void
+vnet_queue_setup(struct cnxk_emdev *dev, uint16_t queue_id)
+{
+	struct cnxk_emdev_virtio_pfvf *pfvfs = dev->pfvf;
+	int i;
+
+	/* Take references of vnet queues */
+	for (i = 0; i < dev->nb_epfvfs; i++) {
+		plt_emdev_dbg("VNET queue setup for PFVF %d %p ", i, pfvfs[i].vnet_qs);
+		dev->emdev_qs[queue_id].vnet_q_base[i] = pfvfs[i].vnet_qs;
+	}
+}
+
+static const struct cnxk_emdev_cls_ops vnet_ops = {
+	.cls_queue_setup = vnet_queue_setup,
+	.cls_dump = vnet_dump,
+};
 
 int
 cnxk_emdev_vnet_init(struct cnxk_emdev_virtio_pfvf *pfvf, struct rte_pmd_cnxk_vnet_conf *conf)
@@ -87,8 +130,16 @@ cnxk_emdev_vnet_init(struct cnxk_emdev_virtio_pfvf *pfvf, struct rte_pmd_cnxk_vn
 
 	/* One time setup */
 	emdev_virtio_cbs[EMDEV_TYPE_VIRTIO_NET].cq_id_get = vnet_cq_id_get;
+	emdev_virtio_cbs[EMDEV_TYPE_VIRTIO_NET].dev_cfg_read = vnet_devcfg_read;
 
 	pfvf->dev_feature_bits |= feature_bits;
+
+	/* Update devops to point to vnet_ops */
+	pfvf->dev->rawdev->dev_ops = &cnxk_emdev_vnet_ops;
+	pfvf->dev->cls_ops = &vnet_ops;
+
+	/* Updates null function pointers */
+	cnxk_emdev_vnet_update_fn_ptrs();
 
 	return 0;
 }

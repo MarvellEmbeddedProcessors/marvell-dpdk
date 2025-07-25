@@ -14,9 +14,12 @@ struct cnxk_emdev_virtio_pfvf;
 
 typedef uint16_t (*virtio_cq_id_get_cb_t)(struct cnxk_emdev_virtio_pfvf *pfvf,
 					  uint64_t feature_bits);
+typedef int (*virtio_dev_cfg_read_cb_t)(struct cnxk_emdev_virtio_pfvf *pfvf, uint32_t offset,
+					void *data, uint8_t len);
 
 struct cnxk_emdev_virtio_cbs {
 	virtio_cq_id_get_cb_t cq_id_get;
+	virtio_dev_cfg_read_cb_t dev_cfg_read;
 };
 
 struct cnxk_emdev_virtio_net_conf {

@@ -95,6 +95,28 @@ EMDEV_VNET_DPI_COMPL_FASTPATH_MODES
 EMDEV_VNET_ENQ_FASTPATH_MODES
 #undef E
 
+struct cnxk_emdev_vnet_queue {
+	uint16_t epf_func;
+	uint16_t qid;
+	uint16_t dbl_fn_id;
+	uint16_t dpi_compl_fn_id;
+	uint16_t enq_fn_id;
+	uint16_t q_sz;
+	uint8_t virtio_hdr_sz;
+	uintptr_t sd_base;
+	uint16_t pi_desc;
+	uint16_t ci_desc;
+	uint16_t ci;
+	uint16_t buf_len;
+	uint16_t data_off;
+	uint16_t chan_flags;
+	uint64_t aura_handle;
+	struct rte_mempool *mp;
+
+	/* Slow path */
+	struct cnxk_emdev_virtio_pfvf *pfvf;
+};
+
 static __rte_always_inline void
 cnxk_emdev_vnet_update_fn_ptrs(void)
 {
@@ -116,7 +138,6 @@ static __rte_always_inline uint16_t
 emdev_dbl_desc_process(struct cnxk_emdev_queue *queue)
 {
 	struct cnxk_emdev_psw_q *nq = &queue->nq;
-	struct cnxk_emdev_virtio_pfvf *pfvfs;
 	struct cnxk_emdev_vnet_queue *vnet_q;
 	void *q_base = nq->q_base;
 	uintptr_t ci_dbl = nq->ci_dbl;
@@ -124,14 +145,12 @@ emdev_dbl_desc_process(struct cnxk_emdev_queue *queue)
 	uint64_t desc_data, index;
 	uint16_t q_sz = nq->q_sz;
 	uint16_t pi, ci, rid;
-	uint64_t pi_val;
 	uint8_t vf;
 
-	pi_val = plt_read64(pi_dbl);
-	pi = (pi_val & 0xFFFF) | (~((pi_val >> 16) & 1) << 15);
+	pi = plt_read64(pi_dbl);
 	ci = nq->ci;
 
-	if (wrap_off_diff(pi, ci, q_sz) == 0)
+	if (DESC_DIFF(pi, ci, q_sz) == 0)
 		return 0;
 
 	while (ci != pi) {
@@ -150,8 +169,7 @@ emdev_dbl_desc_process(struct cnxk_emdev_queue *queue)
 		rid = (desc_data >> 8) & 0xff;
 		/* Include phase bit as BIT 15 in index */
 		index = ((desc_data >> 32) & 0xffff);
-		pfvfs = queue->dev->pfvf;
-		vnet_q = &pfvfs[vf].vnet_qs[rid];
+		vnet_q = queue->vnet_q_base[vf] ? queue->vnet_q_base[vf] + rid : NULL;
 		/* Jump to queue specific callback for processing dbell.
 		 * Stall processing if the descriptor is not consumed
 		 */
@@ -161,7 +179,7 @@ emdev_dbl_desc_process(struct cnxk_emdev_queue *queue)
 		if ((*cnxk_emdev_vnet_psw_dbl_fn[vnet_q->dbl_fn_id])(queue, vnet_q, index))
 			break;
 
-		ci = wrap_off_add(ci, 1, q_sz);
+		ci = DESC_ADD(ci, 1, q_sz);
 	}
 
 	nq->ci = ci;
@@ -208,8 +226,6 @@ emdev_dpi_compl_process(struct cnxk_emdev_queue *queue, struct cnxk_emdev_dpi_q 
 }
 
 int cnxk_emdev_vnet_init(struct cnxk_emdev_virtio_pfvf *pfvf, struct rte_pmd_cnxk_vnet_conf *conf);
-int cnxk_emdev_vnet_cfg_read(struct cnxk_emdev_virtio_pfvf *pfvf, uint32_t offset, void *data,
-			     uint8_t len);
 int cnxk_emdev_vnet_enqueue(struct rte_rawdev *rawdev, struct rte_rawdev_buf **bufs, uint32_t count,
 			    rte_rawdev_obj_t ctx);
 int cnxk_emdev_vnet_dequeue(struct rte_rawdev *rawdev, struct rte_rawdev_buf **bufs, uint32_t count,

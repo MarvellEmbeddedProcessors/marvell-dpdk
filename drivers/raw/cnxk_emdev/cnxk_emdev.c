@@ -25,8 +25,6 @@
 
 #define NB_DESC_MAX 4096
 
-extern struct rte_rawdev_ops cnxk_emdev_vnet_ops;
-
 static void
 cnxk_emdev_get_name(char *name, struct rte_pci_device *pci_dev)
 {
@@ -48,14 +46,13 @@ cnxk_emdev_queue_setup(struct rte_rawdev *rawdev, uint16_t queue_id, rte_rawdev_
 {
 	struct cnxk_emdev *dev = cnxk_rawdev_priv(rawdev);
 	struct rte_pmd_cnxk_emdev_q_conf *conf = queue_conf;
-	struct cnxk_emdev_virtio_pfvf *pfvfs = dev->pfvf;
 	struct roc_emdev_psw_nq_qp *roc_nq_qp;
 	struct cnxk_emdev_queue *emdev_q;
 	struct roc_dpi_lf_que *roc_dpi_q;
 	struct cnxk_emdev_dpi_q *dpi_q;
 	struct roc_dpi_lf *dpi_lf;
 	uintptr_t rbase;
-	int rc, i;
+	int rc;
 
 	if (conf_size != sizeof(*conf))
 		return -EINVAL;
@@ -81,15 +78,15 @@ cnxk_emdev_queue_setup(struct rte_rawdev *rawdev, uint16_t queue_id, rte_rawdev_
 	emdev_q->nq.q_sz = roc_nq_qp->q_sz;
 	emdev_q->nq.pi_dbl = roc_nq_qp->notify_q_pi_dbell;
 	emdev_q->nq.ci_dbl = roc_nq_qp->notify_q_ci_dbell;
-	emdev_q->nq.ci = BIT_ULL(15);
+	emdev_q->nq.ci = 0;
 	emdev_q->aq.q_base = roc_nq_qp->ack_q_base;
 	emdev_q->aq.q_sz = roc_nq_qp->q_sz;
 	emdev_q->aq.pi_dbl = roc_nq_qp->ack_q_pi_dbell;
 	emdev_q->aq.ci_dbl = roc_nq_qp->ack_q_ci_dbell;
 	emdev_q->roc_nq_qp = roc_nq_qp;
 	emdev_q->dev = dev;
-	emdev_q->mbuf_pi = BIT_ULL(15);
-	emdev_q->mbuf_ci = BIT_ULL(15);
+	emdev_q->mbuf_pi = 0;
+	emdev_q->mbuf_ci = 0;
 
 	/* Associate with DPI inbound and outbound queues */
 	dpi_lf = &dev->dpi_lfs[queue_id];
@@ -123,11 +120,8 @@ cnxk_emdev_queue_setup(struct rte_rawdev *rawdev, uint16_t queue_id, rte_rawdev_
 	if (!dpi_q->compl_base)
 		goto psw_nq_qp_fini;
 
-	/* Take references of vnet queues */
-	for (i = 0; i < dev->nb_epfvfs; i++) {
-		plt_emdev_dbg("VNET queue setup for PFVF %d %p ", i, pfvfs[i].vnet_qs);
-		dev->emdev_qs[queue_id].vnet_q_base[i] = pfvfs[i].vnet_qs;
-	}
+	if (dev->cls_ops && dev->cls_ops->cls_queue_setup)
+		dev->cls_ops->cls_queue_setup(dev, queue_id);
 
 	return 0;
 psw_nq_qp_fini:
@@ -368,11 +362,8 @@ cnxk_emdev_attr_set(struct rte_rawdev *rawdev, const char *attr_name, uint64_t a
 			return -EINVAL;
 		}
 		dev->func_q_map[q_map->func_id][q_map->outb_qid] = q_map->qid;
-		/* Reinitialize the queues since notification queue to be mapped might be
-		 * different
-		 */
-		cnxk_emdev_virtio_queue_fini(dev, q_map->func_id, q_map->outb_qid);
-		return cnxk_emdev_virtio_queue_init(dev, q_map->func_id, q_map->outb_qid);
+
+		return 0;
 	}
 	return -EINVAL;
 }
@@ -402,11 +393,6 @@ cnxk_emdev_start(struct rte_rawdev *rawdev)
 	struct roc_emdev *roc_emdev = &dev->roc_emdev;
 	uint16_t notify_qoff;
 	int i, rc;
-
-	if (dev->emdev_type == EMDEV_TYPE_VIRTIO_NET) {
-		/* Update devops to point to vnet_ops */
-		rawdev->dev_ops = &cnxk_emdev_vnet_ops;
-	}
 
 	for (i = 0; i < dev->nb_epfvfs; i++) {
 		notify_qoff = dev->func_q_map[i][0];
@@ -450,11 +436,8 @@ int
 cnxk_emdev_dump(struct rte_rawdev *rawdev, FILE *file)
 {
 	struct cnxk_emdev *dev = cnxk_rawdev_priv(rawdev);
-	struct cnxk_emdev_virtio_pfvf *pfvf = dev->pfvf;
-	struct cnxk_emdev_virtio_queue_conf *conf;
 	struct cnxk_emdev_queue *emdev_q;
 	struct roc_dpi_lf *dpi_lf;
-	uint16_t qid;
 	int i;
 
 	/* Dump all the notify/ack queues a.k.a emdev queues and associated DPI LFs */
@@ -471,21 +454,8 @@ cnxk_emdev_dump(struct rte_rawdev *rawdev, FILE *file)
 		dpi_lf = &dev->dpi_lfs[i];
 		roc_dpi_lf_dump(dpi_lf, file);
 	}
-
-	/* Dump all the inbound/outbound queues for all VF's */
-	for (i = 0; i < dev->nb_epfvfs; i++) {
-		plt_info("Dumping inb/outb queues for epf_func 0x%x", pfvf[i].epf_func);
-
-		for (qid = 0; qid < pfvf[i].max_queues; qid++) {
-			conf = &pfvf[i].queue_conf[qid];
-			/* Skip dumping queue if not enabled */
-
-			if (!conf->queue_enable)
-				continue;
-			roc_emdev_psw_inb_q_dump(&conf->inbq, file);
-			roc_emdev_psw_outb_q_dump(&conf->outbq, file);
-		}
-	}
+	if (dev->cls_ops && dev->cls_ops->cls_dump)
+		dev->cls_ops->cls_dump(dev, file);
 
 	return 0;
 }
@@ -542,9 +512,7 @@ cnxk_emdev_probe(struct rte_pci_driver *pci_drv, struct rte_pci_device *pci_dev)
 
 	dev = cnxk_rawdev_priv(rawdev);
 	dev->roc_emdev.pci_dev = pci_dev;
-
-	/* Updates null function pointers */
-	cnxk_emdev_vnet_update_fn_ptrs();
+	dev->rawdev = rawdev;
 
 	return roc_emdev_init(&dev->roc_emdev);
 }

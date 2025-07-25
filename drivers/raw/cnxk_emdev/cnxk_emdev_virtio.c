@@ -664,22 +664,6 @@ apinotif_write_handle(struct cnxk_emdev_virtio_pfvf *pfvf, struct roc_emdev_apin
 }
 
 static inline int
-dev_cfg_read(struct cnxk_emdev_virtio_pfvf *pfvf, uint32_t offset, void *data, uint32_t len)
-{
-	int rc = 0;
-
-	switch (pfvf->emdev_type) {
-	case EMDEV_TYPE_VIRTIO_NET:
-		rc = cnxk_emdev_vnet_cfg_read(pfvf, offset, data, len);
-		break;
-	default:
-		break;
-	}
-
-	return rc;
-}
-
-static inline int
 num_queues_read(struct cnxk_emdev_virtio_pfvf *pfvf, uint16_t *num_queues)
 {
 	*num_queues = pfvf->max_queues;
@@ -1041,7 +1025,7 @@ apinotif_read_handle(struct cnxk_emdev_virtio_pfvf *pfvf, struct roc_emdev_apino
 		rc = queue_used_hi_read(pfvf, (uint32_t *)data);
 		break;
 	default:
-		rc = dev_cfg_read(pfvf, offset, data, len);
+		rc = emdev_virtio_cbs[pfvf->emdev_type].dev_cfg_read(pfvf, offset, data, len);
 		break;
 	}
 

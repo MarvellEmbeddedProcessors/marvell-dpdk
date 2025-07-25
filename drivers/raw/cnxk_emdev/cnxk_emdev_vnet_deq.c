@@ -50,8 +50,8 @@ cnxk_emdev_vnet_ctrl_deq_psw_dbl(struct cnxk_emdev_queue *queue,
 		return 0;
 
 	/* Skip if there is no space to save the event */
-	space = CNXK_EMDEV_Q_MBUF_RING_SZ;
-	space -= wrap_off_diff(queue->mbuf_pi, queue->mbuf_ci, CNXK_EMDEV_Q_MBUF_RING_SZ);
+	space = CNXK_EMDEV_Q_MBUF_RING_SZ - 1;
+	space -= DESC_DIFF(queue->mbuf_pi, queue->mbuf_ci, CNXK_EMDEV_Q_MBUF_RING_SZ);
 	if (space < nb_desc)
 		return 0;
 
@@ -130,8 +130,8 @@ cnxk_emdev_vnet_ctrl_deq_psw_dbl(struct cnxk_emdev_queue *queue,
 	mbuf->port = vnet_q->epf_func;
 	mbuf->hash.fdir.id = vnet_q->qid;
 	/* Store the event in the mbuf ring */
-	queue->mbuf_arr[WRAP_OFF(queue->mbuf_pi)] = mbuf;
-	queue->mbuf_pi = wrap_off_add(queue->mbuf_pi, 1, CNXK_EMDEV_Q_MBUF_RING_SZ);
+	queue->mbuf_arr[queue->mbuf_pi] = mbuf;
+	queue->mbuf_pi = DESC_ADD(queue->mbuf_pi, 1, CNXK_EMDEV_Q_MBUF_RING_SZ);
 
 	/* Change the shadow queue descriptor flag to USED */
 	*VNET_DESC_PTR_OFF(sd_base, off, 8) = VRING_DESC_F_WRITE;
@@ -173,7 +173,7 @@ cnxk_emdev_vnet_deq_dpi_compl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_
 	aq_ci = plt_read64(aq_ci_dbl);
 
 	/* Check if Ack queue is full */
-	if (wrap_off_diff(aq_pi, aq_ci, aq->q_sz) == aq->q_sz)
+	if (DESC_ADD(aq_pi, 1, aq->q_sz) == aq_ci)
 		return -ENOSPC;
 
 	/* Prepare PSW_ACK_DOORBELL_DESC_S */
@@ -186,8 +186,8 @@ cnxk_emdev_vnet_deq_dpi_compl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_
 	/* Check if we have space in mbuf ring */
 	mbuf_ci = queue->mbuf_ci;
 	mbuf_pi = queue->mbuf_pi;
-	space = CNXK_EMDEV_Q_MBUF_RING_SZ -
-		wrap_off_diff(mbuf_pi, mbuf_ci, CNXK_EMDEV_Q_MBUF_RING_SZ);
+	space = (CNXK_EMDEV_Q_MBUF_RING_SZ - 1) -
+		DESC_DIFF(mbuf_pi, mbuf_ci, CNXK_EMDEV_Q_MBUF_RING_SZ);
 	if (space < count)
 		return -ENOSPC;
 
@@ -210,8 +210,8 @@ cnxk_emdev_vnet_deq_dpi_compl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_
 		mbuf->hash.fdir.id = vnet_q->qid;
 
 		/* Store mbuf in ring */
-		mbuf_arr[WRAP_OFF(mbuf_pi)] = mbuf;
-		mbuf_pi = wrap_off_add(mbuf_pi, 1, CNXK_EMDEV_Q_MBUF_RING_SZ);
+		mbuf_arr[mbuf_pi] = mbuf;
+		mbuf_pi = DESC_ADD(mbuf_pi, 1, CNXK_EMDEV_Q_MBUF_RING_SZ);
 
 		dma_idx_s = cnxk_emdev_dma_next_idx(dma_idx_s);
 	}
@@ -234,7 +234,7 @@ cnxk_emdev_vnet_deq_dpi_compl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_
 
 	/* Add instruction to ack queue to trigger descriptor store */
 	*AQ_DESC_PTR_OFF(aq->q_base, aq_pi, 0) = ack_desc;
-	aq_pi = wrap_off_add(aq_pi, 1, aq->q_sz) & (q_sz - 1);
+	aq_pi = DESC_ADD(aq_pi, 1, aq->q_sz);
 	plt_io_wmb();
 	plt_write64(aq_pi, aq_pi_dbl);
 
@@ -357,7 +357,7 @@ cnxk_emdev_vnet_dequeue(struct rte_rawdev *rawdev, struct rte_rawdev_buf **bufs,
 	mbuf_pi = queue->mbuf_pi;
 	mbuf_ci = queue->mbuf_ci;
 
-	max = wrap_off_diff(mbuf_pi, mbuf_ci, CNXK_EMDEV_Q_MBUF_RING_SZ);
+	max = DESC_DIFF(mbuf_pi, mbuf_ci, CNXK_EMDEV_Q_MBUF_RING_SZ);
 	/* Check if there are processed mbufs */
 	if (!max)
 		return 0;
@@ -366,10 +366,10 @@ cnxk_emdev_vnet_dequeue(struct rte_rawdev *rawdev, struct rte_rawdev_buf **bufs,
 	count = RTE_MIN(count, max);
 
 	/* Copy processed mbufs from ring to return */
-	nb_pkts = (WRAP_OFF(mbuf_ci) + count) > CNXK_EMDEV_Q_MBUF_RING_SZ ?
-			  CNXK_EMDEV_Q_MBUF_RING_SZ - WRAP_OFF(mbuf_ci) :
+	nb_pkts = (mbuf_ci + count) > CNXK_EMDEV_Q_MBUF_RING_SZ ?
+			  CNXK_EMDEV_Q_MBUF_RING_SZ - mbuf_ci :
 			  count;
-	rte_memcpy(bufs, (struct rte_rawdev_buf **)&mbuf_arr[WRAP_OFF(mbuf_ci)],
+	rte_memcpy(bufs, (struct rte_rawdev_buf **)&mbuf_arr[mbuf_ci],
 		   nb_pkts * sizeof(struct rte_mbuf *));
 	nb_pkts = count - nb_pkts;
 	if (nb_pkts) {
@@ -377,7 +377,7 @@ cnxk_emdev_vnet_dequeue(struct rte_rawdev *rawdev, struct rte_rawdev_buf **bufs,
 			   nb_pkts * sizeof(struct rte_mbuf *));
 	}
 
-	mbuf_ci = wrap_off_add(mbuf_ci, count, CNXK_EMDEV_Q_MBUF_RING_SZ);
+	mbuf_ci = DESC_ADD(mbuf_ci, count, CNXK_EMDEV_Q_MBUF_RING_SZ);
 	queue->mbuf_ci = mbuf_ci;
 	return count;
 }

@@ -16,11 +16,22 @@
 #define CNXK_EMDEV_DFLT_QID 1
 #define CNXK_EMDEV_MSIX_VECTOR_INVALID 0xFFFF
 
-#define CNXK_EMDEV_DMA_TMO_MS  5000
+#define CNXK_EMDEV_DMA_TMO_MS 5000
 
 /* Transport specific device object */
 typedef void *cnxk_emdev_pfvf_obj_t;
 struct cnxk_emdev;
+
+typedef void (*cnxk_emdev_cls_queue_setup_t)(struct cnxk_emdev *dev, uint16_t queue_id);
+typedef void (*cnxk_emdev_cls_dump_t)(struct cnxk_emdev *dev, FILE *file);
+
+/* Class specific operations function pointer table */
+struct cnxk_emdev_cls_ops {
+	cnxk_emdev_cls_queue_setup_t cls_queue_setup;
+	cnxk_emdev_cls_dump_t cls_dump;
+};
+
+struct cnxk_emdev_vnet_queue;
 
 /* PSW queue */
 struct cnxk_emdev_psw_q {
@@ -41,28 +52,6 @@ struct cnxk_emdev_dpi_q {
 	uint16_t compl_idx;
 	uint8_t qid;
 	struct rte_mempool *mp;
-};
-
-struct cnxk_emdev_vnet_queue {
-	uint16_t epf_func;
-	uint16_t qid;
-	uint16_t dbl_fn_id;
-	uint16_t dpi_compl_fn_id;
-	uint16_t enq_fn_id;
-	uint16_t q_sz;
-	uint8_t virtio_hdr_sz;
-	uintptr_t sd_base;
-	uint16_t pi_desc;
-	uint16_t ci_desc;
-	uint16_t ci;
-	uint16_t buf_len;
-	uint16_t data_off;
-	uint16_t chan_flags;
-	uint64_t aura_handle;
-	struct rte_mempool *mp;
-
-	/* Slow path */
-	struct cnxk_emdev_virtio_pfvf *pfvf;
 };
 
 /* Notify queue and ack queue */
@@ -98,6 +87,8 @@ struct cnxk_emdev {
 	/* EMDEV device type */
 	enum rte_pmd_emdev_type emdev_type;
 
+	const struct cnxk_emdev_cls_ops *cls_ops;
+
 	/* PSW Notify Ack queue pairs */
 	struct roc_emdev_psw_nq_qp *notify_qs;
 	uint16_t nb_notify_qs;
@@ -114,6 +105,7 @@ struct cnxk_emdev {
 	uint16_t nb_epfvfs;
 	uint16_t func_q_map[ROC_PSW_VFS_MAX][ROC_PSW_OUTB_QUEUES_MAX];
 	struct rte_mempool *default_mp;
+	struct rte_rawdev *rawdev;
 	uint16_t dev_id;
 };
 
@@ -124,6 +116,10 @@ struct cnxk_emdev {
 
 #define AQ_DESC_SZ(x)		 (WRAP_OFF(x) * PSW_AQ_DESC_SZ)
 #define AQ_DESC_PTR_OFF(b, i, o) (uint64_t *)(((uintptr_t)b) + AQ_DESC_SZ(i) + (o))
+
+#define DESC_DIFF(a, b, q_sz) ((a - b + q_sz) & (q_sz - 1))
+#define DESC_ADD(a, b, q_sz)  ((a + b) & (q_sz - 1))
+#define DESC_SUB(a, b, q_sz)  ((a - b + q_sz) & (q_sz - 1))
 
 static __rte_always_inline uint16_t
 wrap_off_add(uint16_t a, uint16_t b, uint16_t q_sz)

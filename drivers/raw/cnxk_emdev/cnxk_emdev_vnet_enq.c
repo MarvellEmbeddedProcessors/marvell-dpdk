@@ -36,6 +36,7 @@ emdev_vnet_ctrl_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue
 	uint16_t q_sz = vnet_q->q_sz;
 	uint64_t val, ack_desc;
 	uint16_t a_pi, a_ci;
+	uint16_t tmo_ms;
 	uint64_t mdata;
 
 	PLT_SET_USED(flags);
@@ -67,8 +68,15 @@ emdev_vnet_ctrl_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue
 	plt_write64(1, outb_q->widx_r);
 
 	/* Wait for DMA completion */
+	tmo_ms = CNXK_EMDEV_DMA_TMO_MS;
 	do {
+		rte_delay_us_sleep(1000);
 		__atomic_load(&compl_ptr[0], &val, __ATOMIC_ACQUIRE);
+		tmo_ms--;
+		if (!tmo_ms) {
+			plt_err("[dev 0x%x] ctrl enq DMA timeout", vnet_q->epf_func);
+			return -EFAULT;
+		}
 	} while (val == 0xFF);
 
 	a_pi = plt_read64((uint64_t *)aq->pi_dbl);

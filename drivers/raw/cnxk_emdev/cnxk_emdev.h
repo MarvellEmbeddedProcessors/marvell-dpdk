@@ -16,6 +16,8 @@
 #define CNXK_EMDEV_DFLT_QID 1
 #define CNXK_EMDEV_MSIX_VECTOR_INVALID 0xFFFF
 
+#define CNXK_EMDEV_DMA_TMO_MS  5000
+
 /* Transport specific device object */
 typedef void *cnxk_emdev_pfvf_obj_t;
 struct cnxk_emdev;

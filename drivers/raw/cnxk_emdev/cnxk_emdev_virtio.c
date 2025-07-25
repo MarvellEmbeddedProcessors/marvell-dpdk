@@ -147,6 +147,7 @@ virtio_queue_init(struct cnxk_emdev_virtio_pfvf *pfvf, struct cnxk_emdev_virtio_
 	if (!rte_is_power_of_2(qconf->queue_size))
 		return -EINVAL;
 	inbq->nb_desc = qconf->queue_size;
+	inbq->desc_sz = VIRTIO_DESC_SZ;
 	/* Allocate 256 bytes more to make host queue address and shadow queue address have
 	 * same lsb 8 bits.
 	 */
@@ -167,6 +168,7 @@ virtio_queue_init(struct cnxk_emdev_virtio_pfvf *pfvf, struct cnxk_emdev_virtio_
 	outbq->hob.notify_qid = dev->func_q_map[vf_id][qid];
 	outbq->shob.q_base_addr = inbq->shib.q_base_addr;
 	outbq->nb_desc = qconf->queue_size;
+	outbq->desc_sz = VIRTIO_DESC_SZ;
 	outbq->hob.pround = 1;
 	outbq->ci_init = BIT_ULL(15);
 	outbq->pi_init = BIT_ULL(15);
@@ -244,6 +246,26 @@ cnxk_emdev_virtio_queue_fini(struct cnxk_emdev *dev, uint16_t func_id, uint16_t 
 	dev->func_q_map[pfvf->vf_id][outb_qid] = CNXK_EMDEV_DFLT_QID;
 }
 
+static void
+dma_compl_wait(struct cnxk_emdev_virtio_pfvf *pfvf)
+{
+	struct cnxk_emdev *dev = pfvf->dev;
+	struct cnxk_emdev_queue *emdev_q;
+	uint16_t nq_id;
+
+	for (nq_id = 0; nq_id < dev->nb_emdev_qs; nq_id++) {
+		emdev_q = &dev->emdev_qs[nq_id];
+		if (emdev_q->roc_nq_qp) {
+			if (cnxk_emdev_dma_compl_wait(&emdev_q->dpi_q_inb, CNXK_EMDEV_DMA_TMO_MS))
+				plt_err("[0x%x][Q%d] DMA Completion Timeout", pfvf->epf_func,
+					nq_id);
+			if (cnxk_emdev_dma_compl_wait(&emdev_q->dpi_q_outb, CNXK_EMDEV_DMA_TMO_MS))
+				plt_err("[0x%x][Q%d] DMA Completion Timeout", pfvf->epf_func,
+					nq_id);
+		}
+	}
+}
+
 static inline int
 device_status_write(struct cnxk_emdev_virtio_pfvf *pfvf, uint8_t device_status)
 {
@@ -255,6 +277,8 @@ device_status_write(struct cnxk_emdev_virtio_pfvf *pfvf, uint8_t device_status)
 
 		/* Call callback before starting reset */
 		pfvf->status_cb(pfvf->dev->dev_id, pfvf->vf_id, device_status);
+
+		dma_compl_wait(pfvf);
 
 		/* Cleanup virtio queues */
 		virtio_queues_fini(pfvf);

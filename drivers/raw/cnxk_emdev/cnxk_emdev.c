@@ -183,13 +183,11 @@ cnxk_emdev_class_init(const struct rte_rawdev *rawdev, struct rte_pmd_cnxk_emdev
 	switch (dev->emdev_type) {
 	case EMDEV_TYPE_VIRTIO_NET:
 		rc = cnxk_emdev_virtio_setup(dev, conf);
-		if (rc)
-			goto exit;
 		break;
 	default:
+		rc = -ENOTSUP;
 		break;
 	}
-exit:
 	return rc;
 }
 
@@ -232,6 +230,14 @@ cnxk_emdev_configure(const struct rte_rawdev *rawdev, rte_rawdev_obj_t config, s
 	roc_emdev->nb_inb_qs = conf->max_outb_queues;
 	roc_emdev->nb_epfvfs = conf->num_funcs;
 	roc_emdev->nb_dpi_lfs = nb_emdev_qs;
+	switch (conf->emdev_type) {
+	case EMDEV_TYPE_VIRTIO_NET:
+		roc_emdev->emul_type = ROC_EMDEV_TYPE_VIRTIO;
+		break;
+	default:
+		plt_err("Unsupported emdev type : %d", conf->emdev_type);
+		return -ENOTSUP;
+	}
 
 	dev->emdev_type = conf->emdev_type;
 	dev->default_mp = conf->default_mp;
@@ -266,7 +272,7 @@ cnxk_emdev_configure(const struct rte_rawdev *rawdev, rte_rawdev_obj_t config, s
 		goto exit;
 
 	/* Setup ROC EMDEV */
-	rc = roc_emdev_setup(&dev->roc_emdev);
+	rc = roc_emdev_setup(roc_emdev);
 	if (rc) {
 		plt_err("Failed to setup roc_emdev, rc=%d", rc);
 		return rc;
@@ -303,7 +309,7 @@ class_fini:
 irq_unregister:
 	roc_emdev_irqs_unregister(roc_emdev);
 emdev_release:
-	rc |= roc_emdev_release(&dev->roc_emdev);
+	rc |= roc_emdev_release(roc_emdev);
 exit:
 	rte_free(dev->notify_qs);
 	rte_free(dev->emdev_qs);

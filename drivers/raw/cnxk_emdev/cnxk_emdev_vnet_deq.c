@@ -22,18 +22,20 @@ cnxk_emdev_vnet_ctrl_deq_psw_dbl(struct cnxk_emdev_queue *queue,
 				 const uint16_t flags)
 {
 	struct cnxk_emdev_dpi_q *inb_q = &queue->dpi_q_inb;
-	uint64_t *compl_base = inb_q->compl_base, *compl_ptr;
+	uint64_t *compl_base = inb_q->compl_base;
 	uint64_t *dma_base = inb_q->inst_base, *dma_ptr;
 	struct rte_pmd_cnxk_emdev_event *event;
 	uintptr_t sd_base = vnet_q->sd_base;
 	uint16_t q_sz = vnet_q->q_sz;
 	uint16_t nb_desc, ci, off, segs = 0;
+	uint64_t *compl_ptr = NULL;
 	uint16_t avail, dma_idx;
 	struct rte_mbuf *mbuf;
 	uint32_t tot_len = 0;
 	uint64_t dflags, val;
 	uint64_t desc_flag;
 	uint32_t i, len;
+	uint16_t tmo_ms;
 	uint32_t space;
 
 	PLT_SET_USED(flags);
@@ -75,7 +77,7 @@ cnxk_emdev_vnet_ctrl_deq_psw_dbl(struct cnxk_emdev_queue *queue,
 		return -ENOMEM;
 
 	off = ci;
-	for (i = 0; i < nb_desc; i++) {
+	for (i = 0; i < segs; i++) {
 		dma_ptr = cnxk_emdev_dma_inst_addr(dma_base, dma_idx);
 		compl_ptr = cnxk_emdev_dma_compl_addr(compl_base, dma_idx);
 
@@ -103,8 +105,16 @@ cnxk_emdev_vnet_ctrl_deq_psw_dbl(struct cnxk_emdev_queue *queue,
 	plt_write64(nb_desc, inb_q->widx_r);
 
 	/* Wait for the DMA to complete */
+	tmo_ms = CNXK_EMDEV_DMA_TMO_MS;
 	do {
+		rte_delay_us_sleep(1000);
 		__atomic_load(&compl_ptr[0], &val, __ATOMIC_ACQUIRE);
+		tmo_ms--;
+		if (!tmo_ms) {
+			plt_err("[dev 0x%x] ctrl deq DMA timeout", vnet_q->epf_func);
+			rte_pktmbuf_free(mbuf);
+			return -EFAULT;
+		}
 	} while (val == 0xFF);
 
 	/* Populate event info */

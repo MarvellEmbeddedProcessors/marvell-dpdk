@@ -13,14 +13,20 @@
  * Wait till all DMA instructions are completed
  * Called from non-data path core
  */
-static __rte_always_inline void
-cnxk_emdev_dma_compl_wait(struct cnxk_emdev_dpi_q *q)
+static __rte_always_inline int
+cnxk_emdev_dma_compl_wait(struct cnxk_emdev_dpi_q *q, uint16_t tmo_ms)
 {
 	uint16_t wr_idx = plt_read64(q->widx_r) & 0xFFF;
 
 	/* No pending in-flight instructions */
-	while (!((plt_read64(q->ridx_r) >> 63) && (q->compl_idx == wr_idx)))
+	while (!((plt_read64(q->ridx_r) >> 63) && (q->compl_idx == wr_idx))) {
+		tmo_ms--;
+		if (!tmo_ms)
+			return -EFAULT;
 		rte_delay_us_sleep(1000);
+	}
+
+	return 0;
 }
 
 /**

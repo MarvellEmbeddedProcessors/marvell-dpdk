@@ -109,6 +109,7 @@ test_subdirs_arm = [
         'cpt_raw_test',
         'port_representor',
         'virtio_l2fwd',
+        'port_config_stress',
 ]
 
 test_subdirs_x86 = [

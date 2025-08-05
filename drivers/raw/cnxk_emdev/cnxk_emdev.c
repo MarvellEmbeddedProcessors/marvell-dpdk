@@ -251,7 +251,7 @@ cnxk_emdev_configure(const struct rte_rawdev *rawdev, rte_rawdev_obj_t config, s
 	first_skip += rte_pktmbuf_priv_size(conf->default_mp);
 	first_skip /= 8;
 	roc_emdev->first_skip = first_skip;
-	roc_emdev->later_skip = 0;
+	roc_emdev->later_skip = first_skip;
 
 	rc = -ENOMEM;
 	dev->notify_qs = rte_zmalloc("cnxk_emdev_notify_queues",

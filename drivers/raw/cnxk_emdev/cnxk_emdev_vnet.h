@@ -78,16 +78,19 @@ EMDEV_VNET_DPI_COMPL_FASTPATH_MODES
 #define EMDEV_VNET_ENQ_OFFLOAD_NONE (0)
 #define EMDEV_VNET_ENQ_OFFLOAD_CTRL RTE_BIT64(0)
 #define EMDEV_VNET_ENQ_OFFLOAD_FF   RTE_BIT64(1)
-#define EMDEV_VNET_ENQ_OFFLOAD_LAST RTE_BIT64(1)
+#define EMDEV_VNET_ENQ_OFFLOAD_MSEG RTE_BIT64(2)
+#define EMDEV_VNET_ENQ_OFFLOAD_LAST RTE_BIT64(2)
 
 #define E_CTRL_F EMDEV_VNET_ENQ_OFFLOAD_CTRL
 #define E_FF_F	 EMDEV_VNET_ENQ_OFFLOAD_FF
+#define E_MSEG_F EMDEV_VNET_ENQ_OFFLOAD_MSEG
 
 #define EMDEV_VNET_ENQ_FASTPATH_MODES                                                              \
 	E(none, EMDEV_VNET_ENQ_OFFLOAD_NONE)                                                       \
 	E(ctrl, E_CTRL_F)                                                                          \
 	E(ff, E_FF_F)                                                                              \
-	E(ctrl_ff, (E_CTRL_F | E_FF_F))
+	E(ctrl_ff, (E_CTRL_F | E_FF_F))                                                            \
+	E(ff_mseg, (E_FF_F | E_MSEG_F))
 
 #define E(name, flags)                                                                             \
 	int cnxk_emdev_vnet_enq_##name(void *q, void *vnet_q, struct rte_mbuf **pkts, uint16_t num);

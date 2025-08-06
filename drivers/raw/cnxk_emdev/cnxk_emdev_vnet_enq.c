@@ -22,6 +22,136 @@ cnxk_emdev_vnet_enq_fn_t cnxk_emdev_vnet_enq_fn[EMDEV_VNET_ENQ_OFFLOAD_LAST << 1
 #undef E
 };
 
+static __rte_always_inline uint32_t
+calculate_nb_enq(uintptr_t sd_base, uint16_t off, uint32_t slen, uint16_t q_sz, uint16_t avail_sd)
+{
+	uint16_t nb_enq = 0;
+	uint32_t dlen = 0;
+	uint64_t d_flags;
+
+	while (dlen < slen && avail_sd) {
+		d_flags = *VNET_DESC_PTR_OFF(sd_base, off, 8);
+		dlen += d_flags & (RTE_BIT64(32) - 1);
+		off = DESC_ADD(off, 1, q_sz);
+		nb_enq += 1;
+		avail_sd--;
+	}
+	return dlen >= slen ? nb_enq : UINT16_MAX;
+}
+
+static __rte_always_inline uint16_t
+process_mseg_pkts_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue *vnet_q,
+		      struct rte_mbuf *mbuf, uint16_t *ci_desc, uint16_t *qdma_idx)
+{
+	uint32_t dlens[DPI_DMA_64B_MAX_NLST], slen, xlen = 0, buf_len;
+	struct cnxk_emdev_dpi_q *outb_q = &queue->dpi_q_outb;
+	uintptr_t dsts[DPI_DMA_64B_MAX_NLST], src;
+	uint64_t *compl_base = outb_q->compl_base;
+	uint16_t hdr_sz = vnet_q->virtio_hdr_sz;
+	uint64_t *dma_base = outb_q->inst_base;
+	uint32_t pend_dlen = 0, pend, pkt_len;
+	uintptr_t sd_base = vnet_q->sd_base;
+	uint64_t *dma_ptr, *compl_ptr;
+	uint16_t q_sz = vnet_q->q_sz;
+	uint16_t dma_idx = *qdma_idx;
+	struct rte_mbuf *m_next;
+	uint64_t d_flags, avail;
+	uint8_t num, d_idx = 0;
+	uint16_t off = *ci_desc;
+	uint64_t mdata, aura;
+	uint16_t dma_cnt = 0;
+	uintptr_t hdr;
+
+	aura = roc_npa_aura_handle_to_aura(mbuf->pool->pool_id) << 32;
+	pkt_len = mbuf->pkt_len + hdr_sz;
+
+	/* Src:Dest 1:N per DMA instructions */
+	do {
+		hdr = rte_pktmbuf_mtod_offset(mbuf, uintptr_t, -hdr_sz);
+		src = (uintptr_t)hdr;
+		slen = mbuf->data_len + hdr_sz;
+		m_next = mbuf->next;
+		mbuf->nb_segs = 1;
+		mbuf->next = NULL;
+		mbuf = m_next;
+		hdr_sz = 0;
+
+		dma_ptr = cnxk_emdev_dma_inst_addr(dma_base, dma_idx);
+		compl_ptr = cnxk_emdev_dma_compl_addr(compl_base, dma_idx);
+		mdata = vnet_q->chan_flags | aura;
+
+		pend = slen > pend_dlen ? slen - pend_dlen : 0;
+		if (unlikely(!pend)) {
+			/* Continue with previous descriptor space */
+			dlens[d_idx - 1] = slen;
+			goto submit;
+		}
+
+again:
+		d_flags = *VNET_DESC_PTR_OFF(sd_base, off, 8);
+		buf_len = d_flags & (RTE_BIT64(32) - 1);
+
+		d_flags = d_flags & 0xFFFFFFFF00000000UL;
+		avail = !!(d_flags & VIRT_PACKED_RING_DESC_F_AVAIL);
+		d_flags &= ~VIRT_PACKED_RING_DESC_F_AVAIL_USED;
+
+		xlen = RTE_MIN(pend, buf_len);
+		pend = pend - xlen;
+
+		dsts[d_idx] = *VNET_DESC_PTR_OFF(sd_base, off, 0);
+		dlens[d_idx++] = xlen;
+		pend_dlen = buf_len;
+
+		xlen = RTE_MIN(buf_len, pkt_len);
+		pkt_len -= xlen;
+
+		/* Set both AVAIL and USED bit same and fillup length in Tx desc */
+		*VNET_DESC_PTR_OFF(sd_base, off, 8) =
+			avail << 55 | avail << 63 | d_flags | (xlen & (RTE_BIT64(32) - 1));
+
+		off = DESC_ADD(off, 1, q_sz);
+
+		if (unlikely(pend)) {
+			if (d_idx == DPI_DMA_64B_MAX_NLST) {
+				num = (d_idx << 4) | 1;
+				xlen = slen - pend;
+				cnxk_emdev_dma_enq_xn(dma_ptr, compl_ptr, mdata, &src, dsts, num,
+						      &xlen, dlens);
+				compl_ptr[1] = 0;
+				dma_idx = cnxk_emdev_dma_next_idx(dma_idx);
+				dma_ptr = cnxk_emdev_dma_inst_addr(dma_base, dma_idx);
+				compl_ptr = cnxk_emdev_dma_compl_addr(compl_base, dma_idx);
+
+				dma_cnt++;
+				src += xlen;
+				slen -= xlen;
+				d_idx = 0;
+			}
+			goto again;
+		}
+
+submit:
+		num = (d_idx << 4) | 1;
+		mdata |= (1 << 13); /* set FP_L, to be free from HW */
+		cnxk_emdev_dma_enq_xn(dma_ptr, compl_ptr, mdata, &src, dsts, num, &slen, dlens);
+		compl_ptr[1] = 0;
+		dma_idx = cnxk_emdev_dma_next_idx(dma_idx);
+		dma_cnt++;
+
+		/* Space left in previous descriptor ? */
+		xlen = dlens[d_idx - 1];
+		pend_dlen -= xlen;
+		dsts[0] = pend_dlen > 0 ? dsts[d_idx - 1] + xlen : 0;
+		dlens[0] = pend_dlen > 0 ? pend_dlen : 0;
+		d_idx = !!pend_dlen;
+
+	} while (mbuf);
+
+	*ci_desc = off;
+	*qdma_idx = dma_idx;
+	return dma_cnt;
+}
+
 static __rte_always_inline int
 emdev_vnet_ctrl_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue *vnet_q,
 		    struct rte_mbuf **mbufs, uint16_t count, const uint16_t flags)
@@ -112,15 +242,16 @@ emdev_vnet_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue *vne
 	uint16_t hdr_sz = vnet_q->virtio_hdr_sz;
 	uintptr_t sd_base = vnet_q->sd_base;
 	uint16_t pi_desc, nb_desc, i;
-	uint16_t dma_cnt = 0;
-	uint64_t mdata = 0; /* set ZBW_CA */
 	uint64_t *dma_ptr, *compl_ptr;
 	uint16_t q_sz = vnet_q->q_sz;
 	uint16_t dma_avail, ci_desc;
 	uint16_t dma_idx, ci_start;
 	struct virtio_net_hdr *hdr;
+	uint16_t avail_sd, nb_enq;
 	uint64_t d_flags, avail;
 	uint32_t buf_len, len;
+	uint16_t dma_cnt = 0;
+	uint64_t mdata = 0; /* set ZBW_CA */
 	uint64_t *mbuf0;
 
 	PLT_SET_USED(flags);
@@ -138,8 +269,8 @@ emdev_vnet_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue *vne
 		return 0;
 
 	/* Limit the count to available descriptors and available DMA instructions */
-	count = RTE_MIN(count, nb_desc);
-	count = RTE_MIN(count, dma_avail << 1);
+	avail_sd = RTE_MIN(nb_desc, dma_avail << 1);
+	count = RTE_MIN(count, avail_sd);
 	/* Process the mbufs */
 	i = 0;
 
@@ -170,26 +301,45 @@ emdev_vnet_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue *vne
 		buf_len = d_flags & (RTE_BIT64(32) - 1);
 		len = ((struct rte_mbuf *)mbuf0)->pkt_len + hdr_sz;
 
-		hdr->num_buffers = 1;
-		d_flags = d_flags & 0xFFFFFFFF00000000UL;
+		if ((flags & EMDEV_VNET_ENQ_OFFLOAD_MSEG) &&
+		    ((((struct rte_mbuf *)mbuf0)->nb_segs > 1) || (buf_len < len))) {
+			nb_enq = 1;
 
-		/* Limit length to buf len */
-		len = len > buf_len ? buf_len : len;
+			if (unlikely(buf_len < len)) {
+				nb_enq = calculate_nb_enq(sd_base, ci_desc, len, q_sz, avail_sd);
 
-		avail = !!(d_flags & VIRT_PACKED_RING_DESC_F_AVAIL);
-		d_flags &= ~VIRT_PACKED_RING_DESC_F_AVAIL_USED;
+				/* Check for available descriptors and mbuf space */
+				if (nb_enq == UINT16_MAX)
+					goto exit;
+			}
 
-		/* Set both AVAIL and USED bit same and fillup length in Tx desc */
-		*VNET_DESC_PTR_OFF(sd_base, ci_desc, 8) =
-			avail << 55 | avail << 63 | d_flags | (len & (RTE_BIT64(32) - 1));
+			hdr->num_buffers = nb_enq;
+			avail_sd -= nb_enq;
+			dma_cnt += process_mseg_pkts_enq(queue, vnet_q, (struct rte_mbuf *)mbuf0,
+							 &ci_desc, &dma_idx);
+		} else {
+			hdr->num_buffers = 1;
+			d_flags = d_flags & 0xFFFFFFFF00000000UL;
 
-		/* Prepare DMA src/dst of mbuf transfer */
-		cnxk_emdev_dma_enq_x1(dma_ptr, compl_ptr, mdata, (uintptr_t)hdr,
-				      *VNET_DESC_PTR_OFF(sd_base, ci_desc, 0), len);
-		compl_ptr[1] = 0;
-		dma_cnt++;
-		dma_idx = cnxk_emdev_dma_next_idx(dma_idx);
-		ci_desc = wrap_off_add(ci_desc, 1, q_sz);
+			/* Limit length to buf len */
+			len = len > buf_len ? buf_len : len;
+
+			avail = !!(d_flags & VIRT_PACKED_RING_DESC_F_AVAIL);
+			d_flags &= ~VIRT_PACKED_RING_DESC_F_AVAIL_USED;
+
+			/* Set both AVAIL and USED bit same and fillup length in Tx desc */
+			*VNET_DESC_PTR_OFF(sd_base, ci_desc, 8) =
+				avail << 55 | avail << 63 | d_flags | (len & (RTE_BIT64(32) - 1));
+
+			/* Prepare DMA src/dst of mbuf transfer */
+			cnxk_emdev_dma_enq_x1(dma_ptr, compl_ptr, mdata, (uintptr_t)hdr,
+					      *VNET_DESC_PTR_OFF(sd_base, ci_desc, 0), len);
+			ci_desc = wrap_off_add(ci_desc, 1, q_sz);
+			compl_ptr[1] = 0;
+			dma_idx = cnxk_emdev_dma_next_idx(dma_idx);
+			dma_cnt++;
+		}
+
 #ifdef RTE_LIBRTE_MEMPOOL_DEBUG
 		/* When fast free is enabled, all the buffers would be freed by DPI to NPA
 		 * Mark them as put since SW didnot not be freeing them.
@@ -199,6 +349,7 @@ emdev_vnet_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue *vne
 		i++;
 	}
 
+exit:
 	if (likely(i)) {
 		/* Store vnet_q in the last completion to get callback after that */
 		compl_ptr[1] = (uintptr_t)vnet_q;

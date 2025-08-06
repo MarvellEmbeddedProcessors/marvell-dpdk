@@ -70,9 +70,11 @@ emdev_vnet_set_functions(struct cnxk_emdev_virtio_pfvf *pfvf, struct cnxk_emdev_
 			 uint16_t qid, uint16_t cq_id)
 {
 	bool no_inorder = false;
+	bool mseg = false;
 
 	/* Extend functions w.r.t. negotiated features */
 	no_inorder = (pfvf->feature_bits & RTE_BIT64(VIRTIO_F_IN_ORDER)) ? false : true;
+	mseg = (pfvf->feature_bits & RTE_BIT64(VIRTIO_NET_F_MRG_RXBUF)) ? true : false;
 
 	if (qid == cq_id) {
 		vnet_q->dbl_fn_id = EMDEV_VNET_PSW_DBL_OFFLOAD_CTRL_DEQ;
@@ -82,6 +84,8 @@ emdev_vnet_set_functions(struct cnxk_emdev_virtio_pfvf *pfvf, struct cnxk_emdev_
 		vnet_q->dbl_fn_id = EMDEV_VNET_PSW_DBL_OFFLOAD_ENQ;
 		vnet_q->dpi_compl_fn_id = EMDEV_VNET_DPI_COMPL_OFFLOAD_ENQ;
 		vnet_q->enq_fn_id = EMDEV_VNET_ENQ_OFFLOAD_FF;
+		if (mseg)
+			vnet_q->enq_fn_id |= EMDEV_VNET_ENQ_OFFLOAD_MSEG;
 	} else {
 		vnet_q->dbl_fn_id = EMDEV_VNET_PSW_DBL_OFFLOAD_DEQ;
 		vnet_q->dpi_compl_fn_id = EMDEV_VNET_DPI_COMPL_OFFLOAD_DEQ;
@@ -91,6 +95,17 @@ emdev_vnet_set_functions(struct cnxk_emdev_virtio_pfvf *pfvf, struct cnxk_emdev_
 			vnet_q->dbl_fn_id |= DBL_DEQ_NOINORDER_F;
 		}
 	}
+}
+
+static void
+emdev_vnet_reset_functions(struct cnxk_emdev_virtio_pfvf *pfvf, uint16_t qid)
+{
+	struct cnxk_emdev_vnet_queue *vnet_q;
+
+	vnet_q = &pfvf->vnet_qs[qid];
+	vnet_q->dpi_compl_fn_id = EMDEV_VNET_DPI_COMPL_OFFLOAD_NONE;
+	vnet_q->dbl_fn_id = EMDEV_VNET_PSW_DBL_OFFLOAD_NONE;
+	vnet_q->enq_fn_id = EMDEV_VNET_ENQ_OFFLOAD_NONE;
 }
 
 static inline void
@@ -111,6 +126,9 @@ virtio_queues_fini(struct cnxk_emdev_virtio_pfvf *pfvf)
 		qconf->queue_select = VIRTIO_INVALID_QUEUE_INDEX;
 		qconf->queue_size = VIRTIO_DFLT_QUEUE_SZ;
 		qconf->queue_msix_vector = CNXK_EMDEV_MSIX_VECTOR_INVALID;
+
+		/* Reset functions */
+		emdev_vnet_reset_functions(pfvf, qid);
 	}
 }
 

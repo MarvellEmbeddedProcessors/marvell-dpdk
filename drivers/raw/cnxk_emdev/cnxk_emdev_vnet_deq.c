@@ -142,6 +142,82 @@ cnxk_emdev_vnet_ctrl_deq_psw_dbl(struct cnxk_emdev_queue *queue,
 	return 0;
 }
 
+static __rte_always_inline void
+emdev_vnet_deq_process_mseg(struct cnxk_emdev_vnet_queue *vnet_q, uint64_t *dma_base,
+			    uint16_t *dma_idx, uint16_t off, struct rte_mbuf *mbuf, uint16_t nlst,
+			    uint16_t vsegs, uint32_t len)
+{
+	const uint64_t rearm_data = 0x100010000ULL | RTE_PKTMBUF_HEADROOM;
+	uint16_t data_off = vnet_q->data_off;
+	uintptr_t sd_base = vnet_q->sd_base;
+	struct rte_mbuf *mbuf0, *mbuf1;
+	uint8_t segs = 1, ptr_idx = 0;
+	uint16_t q_sz = vnet_q->q_sz;
+	uint32_t plen = 0, dlen = 0;
+	uint16_t idx = *dma_idx;
+	uint64_t *dma_ptr;
+	uint64_t d_flags;
+	uint64_t data;
+
+	dma_ptr = cnxk_emdev_dma_inst_addr(dma_base, idx);
+	data = *(dma_ptr + 5);
+	dma_ptr += 6;
+	mbuf0 = mbuf;
+
+mseg_process:
+	while (unlikely(nlst)) {
+		mbuf1 = (struct rte_mbuf *)((uintptr_t)dma_ptr[ptr_idx] - data_off);
+		*((uint64_t *)&mbuf1->rearm_data) = rearm_data;
+
+		dlen = (ptr_idx == 0) ? data & 0xFFFFFF : (data >> 32) & 0xFFFFFF;
+		mbuf1->data_len = dlen;
+		mbuf1->next = NULL;
+		mbuf0->next = mbuf1;
+		mbuf0 = mbuf1;
+		len -= dlen;
+		ptr_idx++;
+		segs++;
+		nlst--;
+
+		if (!nlst && (len > 0)) {
+			/* Get next mbuf from DPI_DMA_PTR_S */
+			idx = cnxk_emdev_dma_next_idx(idx);
+			dma_ptr = cnxk_emdev_dma_inst_addr(dma_base, idx);
+			data = *dma_ptr;
+			nlst = (data >> 4) & 0x7;
+			ptr_idx = 1;
+			data = *(dma_ptr + 2);
+			dma_ptr += 3;
+		} else if (ptr_idx == 2) {
+			data = *(dma_ptr + ptr_idx);
+			dma_ptr += ptr_idx + 1;
+			ptr_idx = 0;
+		}
+	}
+
+	/* Create mbuf chain from descriptors */
+	while (unlikely(vsegs)) {
+		idx = cnxk_emdev_dma_next_idx(idx);
+		dma_ptr = cnxk_emdev_dma_inst_addr(dma_base, idx);
+		data = *dma_ptr;
+		nlst = ((data >> 4) & 0x7);
+		ptr_idx = 1;
+		data = *(dma_ptr + 2);
+		dma_ptr += 3;
+		off = DESC_ADD(off, 1, q_sz);
+		d_flags = *VNET_DESC_PTR_OFF(sd_base, off, 8);
+		len = d_flags & (RTE_BIT64(32) - 1);
+		plen += len;
+		vsegs--;
+
+		goto mseg_process;
+	}
+
+	mbuf->nb_segs = segs;
+	mbuf->pkt_len += plen;
+	*dma_idx = idx;
+}
+
 int
 cnxk_emdev_vnet_deq_dpi_compl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue *vnet_q,
 			      uint16_t comp_idx, const uint16_t flags)
@@ -162,9 +238,14 @@ cnxk_emdev_vnet_deq_dpi_compl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_
 	uint64_t *compl_ptr, data;
 	uint16_t mbuf_ci, mbuf_pi;
 	uint64_t ack_desc, space;
+	uint16_t count, done = 0;
 	struct rte_mbuf *mbuf;
+	uint8_t vsegs, nlst;
+	uint16_t off, d_off;
 	uint64_t *dma_ptr;
-	uint16_t count;
+	uint64_t d_flags;
+	uint32_t dlen;
+	int pkt_len;
 
 	/* Check if we have space in AQ */
 	aq_pi_dbl = (uint64_t *)aq->pi_dbl;
@@ -195,27 +276,54 @@ cnxk_emdev_vnet_deq_dpi_compl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_
 	dma_idx = (data >> 32) & 0xFFFF;
 	dma_idx_s = (data >> 48);
 
+	off = ci_start;
 	while (dma_idx_s != dma_idx) {
-		/* Get mbuf from DPI_DMA_PTR_S */
-		dma_ptr = cnxk_emdev_dma_ptr_addr(dma_base, dma_idx_s);
+		d_flags = *VNET_DESC_PTR_OFF(sd_base, off, 8);
+		pkt_len = d_flags & (RTE_BIT64(32) - 1);
 
-		mbuf = (struct rte_mbuf *)((uintptr_t)dma_ptr[2] - vnet_q->data_off);
-		data = dma_ptr[0] & 0xFFFFFF;
+		/* Check if the descriptors are chained */
+		d_flags = (d_flags >> VRING_DESC_F_NEXT) & 1;
+		d_off = off;
+		vsegs = 0;
+		while (unlikely(d_flags)) {
+			d_off = DESC_ADD(d_off, 1, q_sz);
+			d_flags = (*VNET_DESC_PTR_OFF(sd_base, d_off, 8) >> VRING_DESC_F_NEXT) & 1;
+			vsegs++;
+		}
+
+		if (unlikely(done + vsegs > count))
+			break;
+
+		/* Get mbuf from DPI_DMA_PTR_S */
+		dma_ptr = cnxk_emdev_dma_inst_addr(dma_base, dma_idx_s);
+		data = *dma_ptr;
+		nlst = ((data >> 4) & 0x7) - 1;
+
+		mbuf = (struct rte_mbuf *)((uintptr_t)dma_ptr[4] - vnet_q->data_off);
+		data = *(dma_ptr + 2);
+		dlen = (data >> 32) & 0xFFFFFF;
 		*((uint64_t *)&mbuf->rearm_data) = rearm_data + vhdr_sz;
-		mbuf->pkt_len = data - vhdr_sz;
-		mbuf->data_len = data - vhdr_sz;
+		mbuf->pkt_len = pkt_len - vhdr_sz;
+		mbuf->data_len = dlen - vhdr_sz;
 		mbuf->next = NULL;
 		mbuf->ol_flags = 0;
 		mbuf->port = vnet_q->epf_func;
 		mbuf->hash.fdir.id = vnet_q->qid;
 
+		if (unlikely(nlst || vsegs))
+			emdev_vnet_deq_process_mseg(vnet_q, dma_base, &dma_idx_s, off, mbuf, nlst,
+						    vsegs, pkt_len - dlen);
+
 		/* Store mbuf in ring */
 		mbuf_arr[mbuf_pi] = mbuf;
 		mbuf_pi = DESC_ADD(mbuf_pi, 1, CNXK_EMDEV_Q_MBUF_RING_SZ);
 
+		off = DESC_ADD(off, vsegs, q_sz);
 		dma_idx_s = cnxk_emdev_dma_next_idx(dma_idx_s);
+		done += vsegs + 1;
 	}
 	queue->mbuf_pi = mbuf_pi;
+	ci_desc = wrap_off_add(ci_start, done, q_sz);
 	vnet_q->ci_desc = ci_desc;
 
 	if (!(flags & DPI_DEQ_NOINORDER_F)) {
@@ -245,19 +353,25 @@ int
 cnxk_emdev_vnet_deq_psw_dbl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue *vnet_q,
 			    uint16_t pi, const uint16_t flags)
 {
+	rte_iova_t src, dsts[DPI_DMA_64B_MAX_NLST * 2] = {0};
 	struct cnxk_emdev_dpi_q *inb_q = &queue->dpi_q_inb;
+	uint32_t d_lens[DPI_DMA_64B_MAX_NLST * 2];
+	uint32_t s_lens[DPI_DMA_64B_MAX_NFST] = {0};
 	uint64_t *compl_base = inb_q->compl_base;
 	uint16_t avail, dma_idx, i, dma_idx_s;
 	uint64_t *dma_base = inb_q->inst_base;
 	uintptr_t sd_base = vnet_q->sd_base;
-	uint32_t buf_len, slen, dlen, pend;
 	uint16_t pi_desc = vnet_q->pi_desc;
 	uint64_t *compl_ptr, *dma_ptr;
+	uint8_t s_idx = 0, d_idx = 0;
 	uint16_t q_sz = vnet_q->q_sz;
 	uint64_t d_flags, mdata;
+	uint32_t buf_len, slen;
 	uint16_t dma_cnt = 0;
 	uint16_t nb_desc;
 	uint64_t used;
+	uint16_t num;
+	uint64_t aura;
 
 	/* Check space in DPI ring and skip consuming the desc if DPI queue is full */
 	avail = cnxk_emdev_dma_avail(inb_q, &dma_idx);
@@ -286,18 +400,25 @@ cnxk_emdev_vnet_deq_psw_dbl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vn
 	dma_idx_s = dma_idx;
 
 	/* Process the descriptors */
-	mdata = (1 << 14) | roc_npa_aura_handle_to_aura(vnet_q->mp->pool_id) << 32;
+	aura = roc_npa_aura_handle_to_aura(vnet_q->mp->pool_id);
 	i = pi_desc;
 	while (i != WRAP_OFF(pi)) {
 
 		d_flags = *VNET_DESC_PTR_OFF(sd_base, i, 8);
 		slen = d_flags & (RTE_BIT64(32) - 1);
-		dlen = slen;
+		s_idx = 0;
+		d_idx = 0;
 
-		if (unlikely(slen > buf_len)) {
-			pend = slen - buf_len;
-			dlen = buf_len;
+		while (unlikely((slen > buf_len) && (d_idx < 5))) {
+			/* Max segments limiting to 6 */
+			d_lens[d_idx++] = buf_len;
+			s_lens[s_idx] += buf_len;
+			s_idx += (d_idx % DPI_DMA_64B_MAX_NLST) ? 0 : 1;
+			slen -= buf_len;
 		}
+
+		s_lens[s_idx] += slen;
+		d_lens[d_idx++] = slen;
 
 		if (flags & DBL_DEQ_NOINORDER_F) {
 			used = (d_flags >> 55) & 0x1;
@@ -309,13 +430,36 @@ cnxk_emdev_vnet_deq_psw_dbl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vn
 		/* Enqueue req to DPI */
 		dma_ptr = cnxk_emdev_dma_inst_addr(dma_base, dma_idx);
 		compl_ptr = cnxk_emdev_dma_compl_addr(compl_base, dma_idx);
-		cnxk_emdev_dma_enq_x1(dma_ptr, compl_ptr, mdata, *VNET_DESC_PTR_OFF(sd_base, i, 0),
-				      (rte_iova_t)NULL, dlen);
+		src = *VNET_DESC_PTR_OFF(sd_base, i, 0);
+		num = (d_idx > DPI_DMA_64B_MAX_NLST) ? DPI_DMA_64B_MAX_NLST : d_idx;
+		mdata = ((1 << num) - 1) << 14 | aura << 32;
+		num = (num << 4) | 1;
+		/* DMA can be up to 3 dest pointers */
+		cnxk_emdev_dma_enq_xn(dma_ptr, compl_ptr, mdata, &src, dsts, num, s_lens, d_lens);
+
 		compl_ptr[1] = 0;
-		dma_idx = cnxk_emdev_dma_next_idx(dma_idx);
 		dma_cnt++;
-		i = (i + 1) & (q_sz - 1);
-		PLT_SET_USED(pend);
+		dma_idx = cnxk_emdev_dma_next_idx(dma_idx);
+
+		if (unlikely(d_idx > DPI_DMA_64B_MAX_NLST)) {
+			/* Max 6 seg pointers can be supported, processing for remaining 3 */
+			d_idx -= DPI_DMA_64B_MAX_NLST;
+			dma_ptr = cnxk_emdev_dma_inst_addr(dma_base, dma_idx);
+			compl_ptr = cnxk_emdev_dma_compl_addr(compl_base, dma_idx);
+			src += s_lens[0];
+			num = (d_idx > DPI_DMA_64B_MAX_NLST) ? DPI_DMA_64B_MAX_NLST : d_idx;
+			mdata = ((1 << num) - 1) << 14 | aura << 32;
+			num = (num << 4) | 1;
+			cnxk_emdev_dma_enq_xn(dma_ptr, compl_ptr, mdata, &src, dsts, num,
+					      s_lens + 1, d_lens + DPI_DMA_64B_MAX_NLST);
+			compl_ptr[1] = 0;
+			s_lens[1] = 0;
+			dma_cnt++;
+			dma_idx = cnxk_emdev_dma_next_idx(dma_idx);
+		}
+		s_lens[0] = 0;
+
+		i = DESC_ADD(i, 1, q_sz);
 	}
 
 	if (likely(dma_cnt)) {

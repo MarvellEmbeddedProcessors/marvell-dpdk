@@ -175,9 +175,11 @@ emdev_lf_attach(struct emdev *emdev)
 {
 	uint8_t dpi_blkaddr = RVU_BLOCK_ADDR_DPI0;
 	struct psw_msix_offset_rsp *msix_rsp;
+	struct roc_dpi_lf *dpi_lf;
 	struct msg_req *msix_req;
 	struct psw_lf *psw_lf;
 	struct mbox *mbox;
+	uint16_t *msixoff;
 	int rc, i;
 
 	emdev->dpi_blkaddr = dpi_blkaddr;
@@ -217,14 +219,30 @@ emdev_lf_attach(struct emdev *emdev)
 		psw_lf->emdev = emdev;
 	}
 
+	msixoff = emdev->dpi_msixoff;
+	rc = dpi_lf_get_msixoffset(&emdev->dev, msixoff, emdev->nb_dpi_lfs);
+	if (rc) {
+		plt_err("Failed to get msix offset");
+		goto dpi_detach;
+	}
+
 	/* Init DPI LF's */
 	for (i = 0; i < emdev->nb_dpi_lfs; i++) {
-		rc = dpi_lf_init(&emdev->dpi_lfs[i], &emdev->dev, i);
+		dpi_lf = &emdev->dpi_lfs[i];
+		dpi_lf->msixoff = msixoff[i];
+
+		rc = dpi_lf_init(dpi_lf, &emdev->dev, i);
 		if (rc)
 			goto dpi_detach;
 
+		rc = dpi_lf_irq_register(dpi_lf, emdev->pci_dev->intr_handle);
+		if (rc) {
+			plt_err("Failed to register irq for DPI LF %u, rc=%d", i, rc);
+			goto dpi_detach;
+		}
+
 		/* Update DPI LF's SSO/NPA PF_FUNC's */
-		rc = roc_dpi_lf_pffunc_cfg(&emdev->dpi_lfs[i]);
+		rc = roc_dpi_lf_pffunc_cfg(dpi_lf);
 		if (rc) {
 			plt_err("Failed to configure SSO/NPA PF_FUNC for DPI LF, rc=%d", rc);
 			goto dpi_detach;
@@ -867,6 +885,11 @@ roc_emdev_setup(struct roc_emdev *roc_emdev)
 	if (!emdev->dpi_lfs)
 		goto free_mem;
 
+	/* Allocate memory to hold DPI LFs msix offset */
+	emdev->dpi_msixoff = plt_zmalloc(sizeof(uint16_t) * emdev->nb_dpi_lfs, 0);
+	if (!emdev->dpi_msixoff)
+		goto free_mem;
+
 	emdev->emul_type = roc_emdev->emul_type;
 
 	rc = emdev_psw_caps_get(emdev);
@@ -912,6 +935,7 @@ dpi_lf_release:
 detach_lf:
 	rc |= emdev_lf_detach(emdev);
 free_mem:
+	plt_free(emdev->dpi_msixoff);
 	plt_free(emdev->dpi_lfs);
 	plt_free(emdev->psw_lfs);
 	plt_free(emdev->nq_qps);
@@ -955,10 +979,12 @@ roc_emdev_release(struct roc_emdev *roc_emdev)
 	plt_free(emdev->nq_qps);
 	plt_free(emdev->psw_lfs);
 	plt_free(emdev->dpi_lfs);
+	plt_free(emdev->dpi_msixoff);
 	emdev->aq_qps = NULL;
 	emdev->nq_qps = NULL;
 	emdev->psw_lfs = NULL;
 	emdev->dpi_lfs = NULL;
+	emdev->dpi_msixoff = NULL;
 
 	return 0;
 }

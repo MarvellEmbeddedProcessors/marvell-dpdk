@@ -126,6 +126,7 @@ struct emdev {
 	/* DPI LFs */
 	uint8_t dpi_blkaddr;
 	struct roc_dpi_lf *dpi_lfs;
+	uint16_t *dpi_msixoff;
 	uint16_t nb_dpi_lfs;
 	uint16_t dpi_chan_tbl;
 	uint16_t dpi_chan_tbl_sz;

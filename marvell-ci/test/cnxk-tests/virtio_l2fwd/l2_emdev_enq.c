@@ -24,7 +24,9 @@ l2_emdev_enqueue(struct rte_graph *graph, struct rte_node *node, void **objs,
 		nb_pkts = l2_mbuf_tx_priv1(mbuf)->nb_pkts;
 		/* Even number queue in pair for Enqueue */
 		queue = l2_mbuf_tx_priv1(mbuf)->tx_queue * 2;
-		context = (uint64_t)queue << 16 | (uint64_t)emdev_qid;
+		context = (uint64_t)emdev_qid;
+		context |= (uint64_t)mbuf->port << 8;
+		context |= (uint64_t)queue << 16;
 		/* Enqueue to host */
 		count = rte_rawdev_enqueue_buffers(emdev_id, (struct rte_rawdev_buf **)&objs[i],
 						   nb_pkts, (void *)context);

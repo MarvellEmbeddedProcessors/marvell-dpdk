@@ -10,11 +10,12 @@ static __rte_always_inline uint16_t
 l2_emdev_dequeue_inline(struct rte_graph *graph, struct rte_node *node,
 			l2_emdev_deq_node_ctx_t *ctx)
 {
-	uint16_t nb_pkts = 0, next_index, count;
+	struct rte_mbuf *mbufs[L2_EMDEV_DEQ_BURST_MAX];
+	uint16_t nb_pkts = 0, count;
 	uint16_t idx = 0, i, curr_q, next_q;
 	uint16_t emdev_qid = ctx->emdev_qid;
 	uint16_t emdev_id = ctx->emdev_id;
-	struct rte_mbuf **mbufs;
+	uint16_t next_func, curr_func;
 	uint16_t max_pkts;
 
 	/* Do an enqueue flush to push previous pkts out.
@@ -22,26 +23,29 @@ l2_emdev_dequeue_inline(struct rte_graph *graph, struct rte_node *node,
 	 */
 	rte_rawdev_enqueue_buffers(emdev_id, NULL, 0, (void *)(uintptr_t)emdev_qid);
 
-	next_index = ctx->eth_next;
 	max_pkts = L2_EMDEV_DEQ_BURST_MAX;
 
-	/* Get stream for pkts */
-	mbufs = (struct rte_mbuf **)rte_node_next_stream_get(graph, node, next_index, max_pkts);
-
 	/* Dequeue packets from a given emdev queue */
-	nb_pkts = rte_rawdev_dequeue_buffers(emdev_id, (void *)&mbufs[nb_pkts], max_pkts,
+	nb_pkts = rte_rawdev_dequeue_buffers(emdev_id, (void *)mbufs, max_pkts,
 					     (void *)(uintptr_t)emdev_qid);
 	if (unlikely(nb_pkts == 0))
 		return 0;
 
 	count = 1;
 	curr_q = (mbufs[idx])->hash.fdir.id / 2;
+	curr_func = (mbufs[idx])->port & 0xFF;
 	for (i = 1; i < nb_pkts; i++) {
+		next_func = (mbufs[i])->port & 0xFF;
 		next_q = (mbufs[i])->hash.fdir.id / 2;
-		if (next_q != curr_q) {
+		if (next_func != curr_func || next_q != curr_q) {
 			/* Update destination Tx queue and pkt count in first pkt */
 			l2_mbuf_tx_priv1(mbufs[idx])->nb_pkts = count;
 			l2_mbuf_tx_priv1(mbufs[idx])->tx_queue = curr_q;
+			if (next_func != curr_func) {
+				rte_node_enqueue(graph, node, ctx->eth_next + curr_func,
+						 (void **)&mbufs[idx], count);
+				curr_func = next_func;
+			}
 			curr_q = next_q;
 			idx = i;
 			count = 0;
@@ -52,8 +56,7 @@ l2_emdev_dequeue_inline(struct rte_graph *graph, struct rte_node *node,
 	l2_mbuf_tx_priv1(mbufs[idx])->nb_pkts = count;
 	l2_mbuf_tx_priv1(mbufs[idx])->tx_queue = curr_q;
 
-	/* Put pkts to next node */
-	rte_node_next_stream_put(graph, node, next_index, nb_pkts);
+	rte_node_enqueue(graph, node, ctx->eth_next + curr_func, (void **)&mbufs[idx], count);
 
 	return nb_pkts;
 }

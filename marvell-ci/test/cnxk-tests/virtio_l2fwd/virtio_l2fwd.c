@@ -802,6 +802,7 @@ static const char short_options[] = "p:" /* portmask */
 #define CMD_LINE_OPT_PCAP_FILENAME "pcap-file-name"
 #define CMD_LINE_OPT_ENA_L4_CSUM   "enable-l4-csum"
 #define CMD_LINE_OPT_NUM_QUEUES    "num-outb-queues"
+#define CMD_LINE_OPT_NUM_VFS       "num-emdev-vfs"
 enum {
 	/* Long options mapped to a short option */
 
@@ -821,6 +822,7 @@ enum {
 	CMD_LINE_OPT_PCAP_FILENAME_CAP,
 	CMD_LINE_OPT_PARSE_ENA_L4_CSUM,
 	CMD_LINE_OPT_PARSE_NUM_QUEUES,
+	CMD_LINE_OPT_PARSE_NUM_VFS,
 };
 
 static const struct option lgopts[] = {
@@ -836,6 +838,7 @@ static const struct option lgopts[] = {
 	{CMD_LINE_OPT_PCAP_FILENAME, 1, 0, CMD_LINE_OPT_PCAP_FILENAME_CAP},
 	{CMD_LINE_OPT_ENA_L4_CSUM, 0, 0, CMD_LINE_OPT_PARSE_ENA_L4_CSUM},
 	{CMD_LINE_OPT_NUM_QUEUES, 1, 0, CMD_LINE_OPT_PARSE_NUM_QUEUES},
+	{CMD_LINE_OPT_NUM_VFS, 1, 0, CMD_LINE_OPT_PARSE_NUM_VFS},
 	{NULL, 0, 0, 0},
 };
 
@@ -1010,8 +1013,15 @@ parse_args(int argc, char **argv)
 			break;
 
 		case CMD_LINE_OPT_PARSE_NUM_QUEUES:
-			APP_INFO("Number of maximum outbound queues\n");
 			num_outb_queues = parse_uint(optarg);
+			APP_INFO("Number of maximum outbound queues: %d\n", num_outb_queues);
+			break;
+
+		case CMD_LINE_OPT_PARSE_NUM_VFS:
+			nb_epfvfs = parse_uint(optarg);
+			APP_INFO("Number of vfs of a emdev: %d\n", nb_epfvfs);
+			/* Include PF device also for virtio functioning */
+			nb_epfvfs += 1;
 			break;
 
 		default:
@@ -1316,11 +1326,12 @@ setup_lcore_queue_mapping(uint16_t emdev_id, uint16_t func_id, uint16_t virt_q_c
 
 			for (i = 0; i < qconf->nb_ethdev_rx; i++) {
 				/* Check for matching virtio devid */
-				if (!qconf->ethdev_rx[i].emdev_enq)
+				if (!qconf->ethdev_rx[i].emdev_enq ||
+				    qconf->ethdev_rx[i].ethdev_rx->func_id != func_id)
 					continue;
 
-				/* Add queue to valid ethdev queue map */
 				ethdev_rx = qconf->ethdev_rx[i].ethdev_rx;
+				/* Add queue to valid ethdev queue map */
 				ethdev_rx->rx_q_map |= RTE_BIT64(q_id);
 				ethdev_rx->rx_q_count++;
 				/* Update lcore weight */
@@ -1363,7 +1374,8 @@ clear_lcore_queue_mapping(uint16_t emdev_id, uint16_t func_id)
 
 		for (i = 0; i < qconf->nb_ethdev_rx; i++) {
 			/* Check for matching virtio devid */
-			if (!qconf->ethdev_rx[i].emdev_enq)
+			if (!qconf->ethdev_rx[i].emdev_enq ||
+			    qconf->ethdev_rx[i].ethdev_rx->func_id != func_id)
 				continue;
 
 			/* Clear valid ethdev queue map */
@@ -2092,7 +2104,7 @@ setup_eth_devices(void)
 			rte_node_edge_update(ethdev_rx_nodes[portid], RTE_EDGE_ID_INVALID,
 					     &edge_name, 1);
 		} else {
-			snprintf(name, sizeof(name), "l2_emdev_enq-%u", eth_map[portid].id);
+			snprintf(name, sizeof(name), "l2_emdev_enq-%u", eth_map[portid].emdev_id);
 			rte_node_edge_update(ethdev_rx_nodes[portid], RTE_EDGE_ID_INVALID,
 					     &edge_name, 1);
 		}
@@ -2294,6 +2306,7 @@ setup_graph_workers(void)
 
 		for (i = 0; i < qconf->nb_emdev_deq; i++)
 			graph_conf.node_patterns[nb_patterns + i] = qconf->emdev_deq[i].node_name;
+
 		nb_patterns += i;
 
 		graph_conf.nb_node_patterns = nb_patterns;
@@ -2344,11 +2357,6 @@ setup_graph_workers(void)
 			qconf->emdev_deq[i].emdev_deq->emdev_id = emdev_id;
 			qconf->emdev_deq[i].emdev_deq->emdev_qid = qconf->emdev_deq[i].emdev_qid;
 			qconf->emdev_deq[i].emdev_deq->eth_next = 1;
-
-			/* Mapped eth tx ctx */
-			portid = virtio_map[emdev_id][0].id;
-			node_id = ethdev_tx_nodes[portid];
-			node = rte_graph_node_get(graph_id, node_id);
 		}
 
 		/* Assign portid to respective tx node context */

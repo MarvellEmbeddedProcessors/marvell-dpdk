@@ -88,7 +88,7 @@ cnxk_cpt_parse_devargs(struct rte_devargs *devargs, struct cnxk_cpt_vf *vf)
 	uint16_t max_qps_limit = CNXK_MAX_QPS_LIMIT_MAX;
 	struct rte_kvargs *kvlist;
 	uint16_t rx_inject_qp;
-	uint16_t ctx_ilen;
+	uint16_t ctx_ilen = 0;
 	int rc;
 
 	/* Set to max value as default so that the feature is disabled by default. */

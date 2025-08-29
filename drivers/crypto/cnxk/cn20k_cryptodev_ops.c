@@ -260,6 +260,7 @@ cn20k_cpt_fill_inst(struct cnxk_cpt_qp *qp, struct rte_crypto_op *ops[], struct 
 	}
 
 	inst[0].res_addr = (uint64_t)&infl_req->res;
+	inst[0].cq_ena = 1;
 	rte_atomic_store_explicit(&infl_req->res.u64[0], res.u64[0], rte_memory_order_relaxed);
 	infl_req->cop = op;
 

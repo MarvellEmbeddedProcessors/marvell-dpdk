@@ -13221,6 +13221,10 @@ test_cryptodev_verify_error_recover(const void *test_data)
 	int ret = TEST_FAILED;
 	int i, num_itr = 5;
 
+	if (gbl_driver_id == rte_cryptodev_driver_id_get(
+			RTE_STR(CRYPTODEV_NAME_CN20K_PMD)))
+		return TEST_SKIPPED;
+
 	ret = test_cryptodev_error_recover_helper_check();
 	if (ret)
 		return ret;

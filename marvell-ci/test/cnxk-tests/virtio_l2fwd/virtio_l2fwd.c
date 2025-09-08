@@ -1035,8 +1035,8 @@ parse_args(int argc, char **argv)
 	rc = optind - 1;
 	optind = 1; /* Reset getopt lib */
 
-	if (!nb_ethdevs || !nb_emdevs) {
-		APP_ERR("Need at least one port and emdev\n");
+	if (!nb_ethdevs && !nb_emdevs) {
+		APP_ERR("Need at least one port or emdev\n");
 		return -1;
 	}
 	for (i = 0; i < RTE_MAX_ETHPORTS; i++)
@@ -1620,6 +1620,9 @@ mq_configure(uint16_t emdev_id, uint16_t func_id, uint16_t virt_q_count)
 static int
 promisc_configure(uint16_t emdev_id, uint16_t func_id, uint8_t enable)
 {
+	if (virtio_map[emdev_id][func_id].type != ETHDEV_NEXT)
+		return 0;
+
 	if (enable)
 		return rte_eth_promiscuous_enable(virtio_map[emdev_id][func_id].id);
 	return rte_eth_promiscuous_disable(virtio_map[emdev_id][func_id].id);
@@ -1628,6 +1631,9 @@ promisc_configure(uint16_t emdev_id, uint16_t func_id, uint8_t enable)
 static int
 allmulti_configure(uint16_t emdev_id, uint16_t func_id, uint8_t enable)
 {
+	if (virtio_map[emdev_id][func_id].type != ETHDEV_NEXT)
+		return 0;
+
 	if (enable)
 		return rte_eth_allmulticast_enable(virtio_map[emdev_id][func_id].id);
 	return rte_eth_allmulticast_disable(virtio_map[emdev_id][func_id].id);
@@ -2165,34 +2171,49 @@ setup_em_devices(void)
 
 		for (func_id = 0; func_id < nb_epfvfs; func_id++) {
 			struct rte_eth_link eth_link;
+			uint16_t reta_size;
 
 			vnet_conf = &conf.vnet_conf[func_id];
 			portid = virtio_map[emdev_id][func_id].id;
 
-			if (!eth_dev_info[portid].reta_size)
+			if (virtio_map[emdev_id][func_id].type == ETHDEV_NEXT) {
+				reta_size = eth_dev_info[portid].reta_size;
+				if (!reta_size)
+					vnet_conf->reta_size = 0;
+				else
+					vnet_conf->reta_size = RTE_MAX(VIRTIO_NET_RSS_RETA_SIZE,
+								       reta_size);
+
+				vnet_conf->hash_key_size = eth_dev_info[portid].hash_key_size;
+
+				if (rte_eth_link_get(portid, &eth_link))
+					rte_exit(EXIT_FAILURE,
+						 "Error during getting device (port %u) link\n",
+						 portid);
+				vnet_conf->link_info.status = eth_link.link_status;
+				vnet_conf->link_info.speed = eth_link.link_speed;
+				vnet_conf->link_info.duplex = eth_link.link_duplex;
+				data = (uint64_t)func_id | (uint64_t)emdev_id << 16;
+				/* Register link status change interrupt callback */
+				rte_eth_dev_callback_register(portid, RTE_ETH_EVENT_INTR_LSC,
+							      lsc_event_callback,
+							      (void *)data);
+				/* Populate default mac address */
+				rte_eth_macaddr_get(portid,
+						    (struct rte_ether_addr *)vnet_conf->mac);
+
+				/* Save reta size for future use */
+				vnet_reta_sz[emdev_id][func_id] = vnet_conf->reta_size;
+			} else {
 				vnet_conf->reta_size = 0;
-			else
-				vnet_conf->reta_size = RTE_MAX(VIRTIO_NET_RSS_RETA_SIZE,
-							       eth_dev_info[portid].reta_size);
-
-			vnet_conf->hash_key_size = eth_dev_info[portid].hash_key_size;
-
-			if (rte_eth_link_get(portid, &eth_link))
-				rte_exit(EXIT_FAILURE,
-					 "Error during getting device (port %u) link\n", portid);
-			vnet_conf->link_info.status = eth_link.link_status;
-			vnet_conf->link_info.speed = eth_link.link_speed;
-			vnet_conf->link_info.duplex = eth_link.link_duplex;
-			data = (uint64_t)func_id | (uint64_t)emdev_id << 16;
-			/* Register link status change interrupt callback */
-			rte_eth_dev_callback_register(portid, RTE_ETH_EVENT_INTR_LSC,
-						      lsc_event_callback,
-						      (void *)data);
-			/* Populate default mac address */
-			rte_eth_macaddr_get(portid, (struct rte_ether_addr *)vnet_conf->mac);
-
-			/* Save reta size for future use */
-			vnet_reta_sz[emdev_id][func_id] = vnet_conf->reta_size;
+				vnet_conf->hash_key_size = 0;
+				vnet_conf->mac[0] = 0x1;
+				vnet_conf->mac[1] = 0x2;
+				vnet_conf->mac[2] = 0x3;
+				vnet_conf->mac[3] = 0x4;
+				vnet_conf->mac[4] = 0x5;
+				vnet_conf->mac[5] = func_id;
+			}
 		}
 
 		rawdev_conf.dev_private = (rte_rawdev_obj_t)(&conf);
@@ -2357,6 +2378,17 @@ setup_graph_workers(void)
 			qconf->emdev_deq[i].emdev_deq->emdev_id = emdev_id;
 			qconf->emdev_deq[i].emdev_deq->emdev_qid = qconf->emdev_deq[i].emdev_qid;
 			qconf->emdev_deq[i].emdev_deq->eth_next = 1;
+
+			/* Assign same emdev qid if a node exists on this graph */
+			node_id = emdev_enq_nodes[emdev_id];
+			node = rte_graph_node_get(graph_id, node_id);
+			if (node) {
+				struct l2_emdev_enq_node_ctx *emdev_enq_ctx;
+
+				emdev_enq_ctx = (struct l2_emdev_enq_node_ctx *)node->ctx;
+				emdev_enq_ctx->emdev_id = emdev_id;
+				emdev_enq_ctx->emdev_qid = qconf->emdev_deq[i].emdev_qid;
+			}
 		}
 
 		/* Assign portid to respective tx node context */
@@ -2582,8 +2614,9 @@ main(int argc, char **argv)
 				rte_mempool_avail_count(e_pktmbuf_pool[portid]));
 		}
 	} else {
-		APP_ERR("Initial Packet pool avail buff_cnt=%d\n",
-			rte_mempool_avail_count(e_pktmbuf_pool[0]));
+		if (e_pktmbuf_pool[0] != NULL)
+			APP_ERR("Initial Packet pool avail buff_cnt=%d\n",
+				rte_mempool_avail_count(e_pktmbuf_pool[0]));
 	}
 
 	/* Launch per-lcore init on every worker lcore */

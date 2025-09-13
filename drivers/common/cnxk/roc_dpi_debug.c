@@ -43,8 +43,16 @@ roc_dpi_lf_dump(struct roc_dpi_lf *lf, FILE *file)
 			 plt_read64(rbase + DPI_LF_RINGX_WIDX(i)));
 		dpi_dump(file, "\tDPI_LF_RING[%u]_ERR: 0x%" PRIx64, i,
 			 plt_read64(rbase + DPI_LF_RINGX_ERR(i)));
+		dpi_dump(file, "\tDPI_LF_RING[%u]_ISTAT: 0x%" PRIx64, i,
+			 plt_read64(rbase + DPI_LF_RINGX_ISTAT(i)));
 		dpi_dump(file, "\tDPI_LF_RING[%u]_INT: 0x%" PRIx64, i,
 			 plt_read64(rbase + DPI_LF_RINGX_INT(i)));
+		dpi_dump(file, "\tDPI_LF_RING[%u]_ERR_STAT: 0x%" PRIx64, i,
+			 plt_read64(rbase + DPI_LF_RINGX_ERR_STAT(i)));
+		dpi_dump(file, "\tDPI_LF_RING[%u]_DMA_CNT: 0x%" PRIx64, i,
+			 plt_read64(rbase + DPI_LF_RINGX_DMA_CNT(i)));
+		dpi_dump(file, "\tDPI_LF_RING[%u]_DMA_BCNT: 0x%" PRIx64, i,
+			 plt_read64(rbase + DPI_LF_RINGX_DMA_BCNT(i)));
 	}
 
 	return 0;

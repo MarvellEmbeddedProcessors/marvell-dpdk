@@ -41,6 +41,8 @@
 #define DPI_LF_RINGX_ERR_W1S(x)	    ((0x208ull | (uint64_t)(x) << 3))
 #define DPI_LF_RINGX_ERR_ENA_W1C(x) ((0x210ull | (uint64_t)(x) << 3))
 #define DPI_LF_RINGX_ERR_ENA_W1S(x) ((0x218ull | (uint64_t)(x) << 3))
+#define DPI_LF_RINGX_DMA_CNT(x)	    ((0x220ull | (uint64_t)(x) << 3))
+#define DPI_LF_RINGX_DMA_BCNT(x)    ((0x230ull | (uint64_t)(x) << 3))
 
 /**
  * Enumeration dpi_hdr_xtype_e

@@ -72,7 +72,36 @@ roc_emdev_psw_nq_desc_dump(FILE *file, void *desc)
 	return 0;
 }
 
-int
+static void
+roc_psw_lf_dump(struct psw_lf *lf, FILE *file)
+{
+	uintptr_t rbase;
+
+	emdev_dump(file, "PSW LF%u", lf->lf_id);
+
+	rbase = lf->rbase;
+
+	emdev_dump(file, "\tPSW_LF_ERR_CAPTURE: 0x%" PRIx64,
+		   plt_read64(rbase + PSW_LF_ERR_CAPTURE));
+	emdev_dump(file, "\tPSW_LF_ACK_ERR_CAPTURE: 0x%" PRIx64,
+		   plt_read64(rbase + PSW_LF_ACK_ERR_CAPTURE));
+	emdev_dump(file, "\tPSW_LF_RAS_INT: 0x%" PRIx64, plt_read64(rbase + PSW_LF_RAS_INT));
+	emdev_dump(file, "\tPSW_LF_NOTIF_INT: 0x%" PRIx64, plt_read64(rbase + PSW_LF_NOTIF_INT));
+	emdev_dump(file, "\tPSW_LF_NOTIF_INT_ENA_W1S: 0x%" PRIx64,
+		   plt_read64(rbase + PSW_LF_NOTIF_INT_ENA_W1S));
+	emdev_dump(file, "\tPSW_LF_ACK_INT: 0x%" PRIx64, plt_read64(rbase + PSW_LF_ACK_INT));
+	emdev_dump(file, "\tPSW_LF_ACK_INT_ENA_W1S: 0x%" PRIx64,
+		   plt_read64(rbase + PSW_LF_ACK_INT_ENA_W1S));
+	emdev_dump(file, "\tPSW_LF_APINOTIF_INT: 0x%" PRIx64,
+		   plt_read64(rbase + PSW_LF_APINOTIF_INT));
+	emdev_dump(file, "\tPSW_LF_APINOTIF_INT_ENA_W1S: 0x%" PRIx64,
+		   plt_read64(rbase + PSW_LF_APINOTIF_INT_ENA_W1S));
+	emdev_dump(file, "\tPSW_LF_APIACK_INT: 0x%" PRIx64, plt_read64(rbase + PSW_LF_APIACK_INT));
+	emdev_dump(file, "\tPSW_LF_APIACK_INT_ENA_W1S: 0x%" PRIx64,
+		   plt_read64(rbase + PSW_LF_APIACK_INT_ENA_W1S));
+}
+
+static int
 roc_emdev_psw_aq_qp_dump(struct roc_emdev_psw_aq_qp *aq, FILE *file)
 {
 	struct roc_emdev *roc_emdev = aq->roc_emdev;
@@ -129,6 +158,30 @@ roc_emdev_psw_aq_qp_dump(struct roc_emdev_psw_aq_qp *aq, FILE *file)
 	emdev_dump(file, "\tW3: ci 0x%x", q_cfg_base.s.ci);
 	emdev_dump(file, "\tW7: qerror 0x%x idle 0x%x ii 0x%x", apiack_q_cfg.s.qerror,
 		   apiack_q_cfg.s.idle, apiack_q_cfg.s.ii);
+
+	roc_psw_lf_dump(psw_lf, file);
+
+	return 0;
+}
+
+int
+roc_emdev_psw_aq_qps_dump(struct roc_emdev *roc_emdev, FILE *file)
+{
+	struct emdev *emdev = roc_emdev_to_emdev_priv(roc_emdev);
+	struct roc_emdev_psw_aq_qp *aq_qp;
+	int rc, i;
+
+	plt_info("nb_psw_lfs: %d", emdev->nb_psw_lfs);
+	for (i = 0; i < emdev->nb_psw_lfs; i++) {
+		aq_qp = &emdev->aq_qps[i];
+
+		rc = roc_emdev_psw_aq_qp_dump(aq_qp, file);
+		if (rc) {
+			plt_err("Failed to dump aq qp, rc=%d", rc);
+			return rc;
+		}
+	}
+
 	return 0;
 }
 

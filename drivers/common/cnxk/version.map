@@ -117,6 +117,7 @@ INTERNAL {
 	roc_emdev_psw_aq_qp_init;
 	roc_emdev_psw_aq_qp_fini;
 	roc_emdev_psw_aq_qp_dump;
+	roc_emdev_psw_aq_qps_dump;
 	roc_emdev_psw_nq_qp_init;
 	roc_emdev_psw_nq_qp_fini;
 	roc_emdev_psw_nq_qp_dump;

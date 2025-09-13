@@ -214,7 +214,7 @@ uint16_t __roc_api roc_emdev_epf_func_get(struct roc_emdev *roc_emdev, uint16_t 
 /* Debug APIs */
 int __roc_api roc_emdev_psw_anq_desc_dump(FILE *file, void *data);
 int __roc_api roc_emdev_psw_nq_desc_dump(FILE *file, void *data);
-int __roc_api roc_emdev_psw_aq_qp_dump(struct roc_emdev_psw_aq_qp *anq, FILE *file);
+int __roc_api roc_emdev_psw_aq_qps_dump(struct roc_emdev *roc_emdev, FILE *file);
 int __roc_api roc_emdev_psw_nq_qp_dump(struct roc_emdev_psw_nq_qp *nq, FILE *file);
 int __roc_api roc_emdev_psw_inb_q_dump(struct roc_emdev_psw_inb_q *inbq, FILE *file);
 int __roc_api roc_emdev_psw_outb_q_dump(struct roc_emdev_psw_outb_q *outbq, FILE *file);

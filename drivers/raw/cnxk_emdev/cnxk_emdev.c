@@ -441,6 +441,8 @@ cnxk_emdev_dump(struct rte_rawdev *rawdev, FILE *file)
 	int i;
 
 	/* Dump all the notify/ack queues a.k.a emdev queues and associated DPI LFs */
+	roc_emdev_psw_aq_qps_dump(&dev->roc_emdev, file);
+
 	for (i = 0; i < dev->nb_emdev_qs; i++) {
 
 		emdev_q = &dev->emdev_qs[i];

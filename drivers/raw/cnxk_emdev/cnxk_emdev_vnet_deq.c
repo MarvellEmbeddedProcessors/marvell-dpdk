@@ -102,7 +102,16 @@ cnxk_emdev_vnet_ctrl_deq_psw_dbl(struct cnxk_emdev_queue *queue,
 
 	/* Trigger DMA */
 	plt_io_wmb();
-	plt_write64(nb_desc, inb_q->widx_r);
+	plt_write64(segs, inb_q->widx_r);
+	inb_q->widx = DESC_ADD(inb_q->widx, segs, ROC_EMDEV_DPI_Q_SZ);
+
+#ifdef CNXK_EMDEV_DEBUG
+	uint16_t hw_widx = plt_read64(inb_q->widx_r) & 0xFFF;
+
+	if (hw_widx != inb_q->widx)
+		plt_info("CTL ENQ: HW widx and SW widx are not same hw_widx: %x widx: %x", hw_widx,
+			 inb_q->widx);
+#endif
 
 	/* Wait for the DMA to complete */
 	tmo_ms = CNXK_EMDEV_DMA_TMO_MS;
@@ -117,6 +126,7 @@ cnxk_emdev_vnet_ctrl_deq_psw_dbl(struct cnxk_emdev_queue *queue,
 		}
 	} while (val == 0xFF);
 
+	inb_q->compl_idx = DESC_ADD(inb_q->compl_idx, segs, ROC_EMDEV_DPI_Q_SZ);
 	/* Populate event info */
 	event = rte_pktmbuf_mtod(mbuf, struct rte_pmd_cnxk_emdev_event *);
 	event->func_id = vnet_q->epf_func & 0xFF;
@@ -204,7 +214,7 @@ mseg_process:
 		ptr_idx = 1;
 		data = *(dma_ptr + 2);
 		dma_ptr += 3;
-		off = DESC_ADD(off, 1, q_sz);
+		off = wrap_off_add(off, 1, q_sz);
 		d_flags = *VNET_DESC_PTR_OFF(sd_base, off, 8);
 		len = d_flags & (RTE_BIT64(32) - 1);
 		plen += len;
@@ -286,7 +296,7 @@ cnxk_emdev_vnet_deq_dpi_compl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_
 		d_off = off;
 		vsegs = 0;
 		while (unlikely(d_flags)) {
-			d_off = DESC_ADD(d_off, 1, q_sz);
+			d_off = wrap_off_add(d_off, 1, q_sz);
 			d_flags = (*VNET_DESC_PTR_OFF(sd_base, d_off, 8) >> VRING_DESC_F_NEXT) & 1;
 			vsegs++;
 		}
@@ -300,6 +310,12 @@ cnxk_emdev_vnet_deq_dpi_compl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_
 		nlst = ((data >> 4) & 0x7) - 1;
 
 		mbuf = (struct rte_mbuf *)((uintptr_t)dma_ptr[4] - vnet_q->data_off);
+#ifdef CNXK_EMDEV_DEBUG
+		if (dma_ptr[4] == NULL) {
+			plt_info("Got NULL mbuf pointer");
+			rte_hexdump(stdout, NULL, dma_ptr, 64);
+		}
+#endif
 		data = *(dma_ptr + 2);
 		dlen = (data >> 32) & 0xFFFFFF;
 		*((uint64_t *)&mbuf->rearm_data) = rearm_data + vhdr_sz;
@@ -316,11 +332,17 @@ cnxk_emdev_vnet_deq_dpi_compl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_
 
 		/* Store mbuf in ring */
 		mbuf_arr[mbuf_pi] = mbuf;
+#ifdef RTE_LIBRTE_MEMPOOL_DEBUG
+		/* When fast free is enabled, all the buffers would be freed by DPI to NPA
+		 * Mark them as put since SW didnot not be freeing them.
+		 */
+		RTE_MEMPOOL_CHECK_COOKIES(mbuf->pool, (void **)&mbuf, 1, 1);
+#endif
 		mbuf_pi = DESC_ADD(mbuf_pi, 1, CNXK_EMDEV_Q_MBUF_RING_SZ);
-
-		off = DESC_ADD(off, vsegs, q_sz);
+		vsegs += 1;
+		off = wrap_off_add(off, vsegs, q_sz);
 		dma_idx_s = cnxk_emdev_dma_next_idx(dma_idx_s);
-		done += vsegs + 1;
+		done += vsegs;
 	}
 	queue->mbuf_pi = mbuf_pi;
 	ci_desc = wrap_off_add(ci_start, done, q_sz);
@@ -387,7 +409,7 @@ cnxk_emdev_vnet_deq_psw_dbl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vn
 	rte_hexdump(stdout, "Host Tx queue descriptors", VNET_DESC_PTR_OFF(sd_base, pi_desc, 0),
 		    nb_desc * 16);
 #endif
-	nb_desc = RTE_MIN(nb_desc, avail << 1);
+	nb_desc = RTE_MIN(nb_desc, avail >> 1);
 
 	nb_desc = RTE_MIN(nb_desc, ROC_EMDEV_PSW_BURST_SZ);
 
@@ -402,7 +424,7 @@ cnxk_emdev_vnet_deq_psw_dbl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vn
 	/* Process the descriptors */
 	aura = roc_npa_aura_handle_to_aura(vnet_q->mp->pool_id);
 	i = pi_desc;
-	while (i != WRAP_OFF(pi)) {
+	while (i != pi) {
 
 		d_flags = *VNET_DESC_PTR_OFF(sd_base, i, 8);
 		slen = d_flags & (RTE_BIT64(32) - 1);
@@ -459,7 +481,7 @@ cnxk_emdev_vnet_deq_psw_dbl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vn
 		}
 		s_lens[0] = 0;
 
-		i = DESC_ADD(i, 1, q_sz);
+		i = wrap_off_add(i, 1, q_sz);
 	}
 
 	if (likely(dma_cnt)) {
@@ -469,12 +491,21 @@ cnxk_emdev_vnet_deq_psw_dbl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vn
 		compl_ptr[2] |= (uint64_t)dma_idx_s << 48 | (uint64_t)dma_idx << 32;
 		/* Issue a doorbell to trigger DMA */
 		plt_io_wmb();
+		inb_q->widx = DESC_ADD(inb_q->widx, dma_cnt, ROC_EMDEV_DPI_Q_SZ);
 		plt_write64(dma_cnt, inb_q->widx_r);
+
+#ifdef CNXK_EMDEV_DEBUG
+		uint16_t hw_widx = plt_read64(inb_q->widx_r) & 0xFFF;
+
+		if (hw_widx != inb_q->widx)
+			plt_info("DEQ: HW widx and SW widx are not same hw_widx: %x widx: %x",
+				 hw_widx, inb_q->widx);
+#endif
 	}
 
 	vnet_q->pi_desc = pi;
 	/* Return success only if all descriptors are sent to next stage */
-	return !(i == WRAP_OFF(pi));
+	return !(i == pi);
 }
 
 int
@@ -515,9 +546,11 @@ cnxk_emdev_vnet_dequeue(struct rte_rawdev *rawdev, struct rte_rawdev_buf **bufs,
 			  count;
 	rte_memcpy(bufs, (struct rte_rawdev_buf **)&mbuf_arr[mbuf_ci],
 		   nb_pkts * sizeof(struct rte_mbuf *));
+	bufs += nb_pkts;
+
 	nb_pkts = count - nb_pkts;
 	if (nb_pkts) {
-		rte_memcpy(bufs + nb_pkts, (struct rte_rawdev_buf **)&mbuf_arr[0],
+		rte_memcpy(bufs, (struct rte_rawdev_buf **)&mbuf_arr[0],
 			   nb_pkts * sizeof(struct rte_mbuf *));
 	}
 

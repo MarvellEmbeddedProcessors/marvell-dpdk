@@ -153,6 +153,7 @@ emdev_dbl_desc_process(struct cnxk_emdev_queue *queue)
 	pi = plt_read64(pi_dbl);
 	ci = nq->ci;
 
+	rte_io_rmb();
 	if (DESC_DIFF(pi, ci, q_sz) == 0)
 		return 0;
 
@@ -164,10 +165,16 @@ emdev_dbl_desc_process(struct cnxk_emdev_queue *queue)
 		dtype = (desc_data >> 1) & 0x7;
 		if (dtype != PSW_NOTIF_DESC_TYPE_PI_DBL) {
 			plt_err("Invalid Descriptor found");
+			ci = DESC_ADD(ci, 1, q_sz);
 			return 0;
 		}
 #endif
 		desc_data = *NQ_DESC_PTR_OFF(q_base, ci, 0);
+		if (!desc_data) {
+			plt_err("Got NQ Desc Data as zero");
+			ci = DESC_ADD(ci, 1, q_sz);
+			continue;
+		}
 		vf = (desc_data >> 16) & 0xff;
 		rid = (desc_data >> 8) & 0xff;
 		/* Include phase bit as BIT 15 in index */
@@ -197,14 +204,15 @@ static __rte_always_inline uint16_t
 emdev_dpi_compl_process(struct cnxk_emdev_queue *queue, struct cnxk_emdev_dpi_q *dpi_q)
 {
 	uint64_t *compl_base = dpi_q->compl_base;
-	uint64_t *widx_r = dpi_q->widx_r;
 	struct cnxk_emdev_vnet_queue *vnet_q;
 	uint16_t widx, compl_idx;
 	uint64_t *compl_ptr;
 	uint8_t cs, fn_id;
 
-	widx = plt_read64(widx_r) & 0xFFF;
-	compl_idx = dpi_q->compl_idx;
+	widx = dpi_q->widx;
+	rte_io_rmb();
+
+	compl_idx = dpi_q->compl_idx & 0xFFF;
 	while (compl_idx != widx) {
 		/* Process the completion */
 		compl_ptr = cnxk_emdev_dma_compl_addr(compl_base, compl_idx);
@@ -213,6 +221,9 @@ emdev_dpi_compl_process(struct cnxk_emdev_queue *queue, struct cnxk_emdev_dpi_q 
 		if (cs == 0xFF)
 			break;
 
+		if (cs != 0)
+			plt_warn("DPI failed with the completion code: %u", cs);
+
 		vnet_q = (struct cnxk_emdev_vnet_queue *)compl_ptr[1];
 		if (vnet_q) {
 			fn_id = vnet_q->dpi_compl_fn_id;
@@ -220,11 +231,13 @@ emdev_dpi_compl_process(struct cnxk_emdev_queue *queue, struct cnxk_emdev_dpi_q 
 			 * Donot continue if the completion is not consumed.
 			 */
 			if ((*cnxk_emdev_vnet_dpi_compl_fn[fn_id])(queue, vnet_q, compl_idx))
-				break;
+				goto exit;
+
+			dpi_q->compl_idx = cnxk_emdev_dma_next_idx(compl_idx);
 		}
 		compl_idx = cnxk_emdev_dma_next_idx(compl_idx);
 	}
-	dpi_q->compl_idx = compl_idx;
+exit:
 	return 0;
 }
 

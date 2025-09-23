@@ -50,6 +50,7 @@ struct cnxk_emdev_dpi_q {
 	uint64_t *widx_r;
 	uint16_t avail;
 	uint16_t compl_idx;
+	uint16_t widx;
 	uint8_t qid;
 	struct rte_mempool *mp;
 };

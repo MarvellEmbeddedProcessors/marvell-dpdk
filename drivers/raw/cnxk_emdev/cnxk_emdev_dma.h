@@ -39,14 +39,14 @@ cnxk_emdev_dma_compl_wait(struct cnxk_emdev_dpi_q *q, uint16_t tmo_ms)
 static __rte_always_inline uint16_t
 cnxk_emdev_dma_avail(struct cnxk_emdev_dpi_q *q, uint16_t *idx)
 {
-	uint16_t widx = plt_read64(q->widx_r) & 0xFFF;
 	uint16_t compl_idx = q->compl_idx;
 	uint16_t q_sz = ROC_EMDEV_DPI_Q_SZ;
+	uint16_t widx = q->widx;
 	uint16_t used;
 
 	used = widx >= compl_idx ? widx - compl_idx : widx + q_sz - compl_idx;
 	*idx = widx & 0xFFF;
-	return q_sz - used;
+	return (q_sz - 1) - used;
 }
 
 static __rte_always_inline uint16_t

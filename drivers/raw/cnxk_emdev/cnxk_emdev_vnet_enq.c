@@ -32,7 +32,7 @@ calculate_nb_enq(uintptr_t sd_base, uint16_t off, uint32_t slen, uint16_t q_sz, 
 	while (dlen < slen && avail_sd) {
 		d_flags = *VNET_DESC_PTR_OFF(sd_base, off, 8);
 		dlen += d_flags & (RTE_BIT64(32) - 1);
-		off = DESC_ADD(off, 1, q_sz);
+		off = wrap_off_add(off, 1, q_sz);
 		nb_enq += 1;
 		avail_sd--;
 	}
@@ -109,7 +109,7 @@ again:
 		*VNET_DESC_PTR_OFF(sd_base, off, 8) =
 			avail << 55 | avail << 63 | d_flags | (xlen & (RTE_BIT64(32) - 1));
 
-		off = DESC_ADD(off, 1, q_sz);
+		off = wrap_off_add(off, 1, q_sz);
 
 		if (unlikely(pend)) {
 			if (d_idx == DPI_DMA_64B_MAX_NLST) {
@@ -187,7 +187,7 @@ emdev_vnet_ctrl_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue
 	/* DMA status to last descriptor */
 	dma_ptr = cnxk_emdev_dma_inst_addr(dma_base, dma_idx);
 	compl_ptr = cnxk_emdev_dma_compl_addr(compl_base, dma_idx);
-	mdata = (1 << 13) | roc_npa_aura_handle_to_aura(mbufs[0]->pool->pool_id) << 32;
+	mdata = 0x0ULL;
 
 	/* Submit a DMA instruction */
 	cnxk_emdev_dma_enq_x1(dma_ptr, compl_ptr, mdata, (uintptr_t)&event->status,
@@ -197,6 +197,16 @@ emdev_vnet_ctrl_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue
 	plt_io_wmb();
 	plt_write64(1, outb_q->widx_r);
 
+	outb_q->widx = DESC_ADD(outb_q->widx, 1, ROC_EMDEV_DPI_Q_SZ);
+
+#ifdef CNXK_EMDEV_DEBUG
+	uint16_t hw_widx = plt_read64(outb_q->widx_r) & 0xFFF;
+
+	if (hw_widx != outb_q->widx)
+		plt_info("CTLENQ: HW widx and SW widx are not same hw_widx: %x widx: %x", hw_widx,
+			 outb_q->widx);
+#endif
+
 	/* Wait for DMA completion */
 	tmo_ms = CNXK_EMDEV_DMA_TMO_MS;
 	do {
@@ -205,9 +215,12 @@ emdev_vnet_ctrl_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue
 		tmo_ms--;
 		if (!tmo_ms) {
 			plt_err("[dev 0x%x] ctrl enq DMA timeout", vnet_q->epf_func);
+			rte_pktmbuf_free(mbufs[0]);
 			return -EFAULT;
 		}
 	} while (val == 0xFF);
+
+	outb_q->compl_idx = DESC_ADD(outb_q->compl_idx, 1, ROC_EMDEV_DPI_Q_SZ);
 
 	a_pi = plt_read64((uint64_t *)aq->pi_dbl);
 	a_ci = plt_read64((uint64_t *)aq->ci_dbl);
@@ -229,6 +242,8 @@ emdev_vnet_ctrl_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue
 	plt_write64(a_pi, aq->pi_dbl);
 
 	vnet_q->ci = event->ci_end;
+	rte_pktmbuf_free(mbufs[0]);
+
 	return count;
 }
 
@@ -269,7 +284,7 @@ emdev_vnet_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue *vne
 		return 0;
 
 	/* Limit the count to available descriptors and available DMA instructions */
-	avail_sd = RTE_MIN(nb_desc, dma_avail << 1);
+	avail_sd = RTE_MIN(nb_desc, dma_avail);
 	count = RTE_MIN(count, avail_sd);
 	/* Process the mbufs */
 	i = 0;
@@ -356,7 +371,16 @@ exit:
 		compl_ptr[2] = ci_start << 16 | ci_desc;
 		/* Issue a doorbell to trigger DMA */
 		plt_io_wmb();
+		outb_q->widx = DESC_ADD(outb_q->widx, dma_cnt, ROC_EMDEV_DPI_Q_SZ);
 		plt_write64(dma_cnt, outb_q->widx_r);
+#ifdef CNXK_EMDEV_DEBUG
+		plt_io_wmb();
+		uint16_t hw_widx = plt_read64(outb_q->widx_r) & 0xFFF;
+
+		if (hw_widx != outb_q->widx)
+			plt_info("ENQ: HW widx and SW widx mismatch hw_widx: %x widx: %x", hw_widx,
+				 outb_q->widx);
+#endif
 	}
 
 	vnet_q->ci_desc = ci_desc;
@@ -387,7 +411,6 @@ cnxk_emdev_vnet_enq_dpi_compl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_
 	uint64_t *compl_base = outb_q->compl_base;
 	struct cnxk_emdev_psw_q *aq = &queue->aq;
 	uint16_t ci_start, ci_desc, pi, ci;
-	uint16_t q_sz = vnet_q->q_sz;
 	uint64_t *compl_ptr, ci_data;
 	uint64_t *pi_dbl, *ci_dbl;
 	uint64_t ack_desc;
@@ -415,7 +438,7 @@ cnxk_emdev_vnet_enq_dpi_compl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_
 
 	/* Add instruction to ack queue to trigger descriptor store */
 	*AQ_DESC_PTR_OFF(aq->q_base, pi, 0) = ack_desc;
-	pi = DESC_ADD(pi, 1, q_sz);
+	pi = DESC_ADD(pi, 1, aq->q_sz);
 	plt_io_wmb();
 	plt_write64(pi, pi_dbl);
 	return 0;

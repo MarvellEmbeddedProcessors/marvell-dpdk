@@ -99,6 +99,8 @@ cnxk_emdev_queue_setup(struct rte_rawdev *rawdev, uint16_t queue_id, rte_rawdev_
 	dpi_q->qid = ROC_EMDEV_DPI_LF_RING_INB;
 	dpi_q->ridx_r = (uint64_t *)(rbase + DPI_LF_RINGX_RIDX(ROC_EMDEV_DPI_LF_RING_INB));
 	dpi_q->widx_r = (uint64_t *)(rbase + DPI_LF_RINGX_WIDX(ROC_EMDEV_DPI_LF_RING_INB));
+	dpi_q->compl_idx = 0;
+	dpi_q->widx = 0;
 
 	rc = -ENOMEM;
 	dpi_q->compl_base =
@@ -113,6 +115,8 @@ cnxk_emdev_queue_setup(struct rte_rawdev *rawdev, uint16_t queue_id, rte_rawdev_
 	dpi_q->qid = ROC_EMDEV_DPI_LF_RING_OUTB;
 	dpi_q->ridx_r = (uint64_t *)(rbase + DPI_LF_RINGX_RIDX(ROC_EMDEV_DPI_LF_RING_OUTB));
 	dpi_q->widx_r = (uint64_t *)(rbase + DPI_LF_RINGX_WIDX(ROC_EMDEV_DPI_LF_RING_OUTB));
+	dpi_q->compl_idx = 0;
+	dpi_q->widx = 0;
 
 	rc = -ENOMEM;
 	dpi_q->compl_base =

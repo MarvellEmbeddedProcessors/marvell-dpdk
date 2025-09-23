@@ -19,7 +19,7 @@
 #define BIT_MASK32		   (0xFFFFFFFFU)
 #define VIRTIO_INVALID_QUEUE_INDEX 0xFFFF
 #define VIRTIO_DESC_SZ		   16
-#define VIRTIO_DFLT_QUEUE_SZ	   4096
+#define VIRTIO_DFLT_QUEUE_SZ	   1024
 
 struct cnxk_emdev_virtio_cbs emdev_virtio_cbs[EMDEV_TYPE_MAX];
 
@@ -275,10 +275,10 @@ dma_compl_wait(struct cnxk_emdev_virtio_pfvf *pfvf)
 		emdev_q = &dev->emdev_qs[nq_id];
 		if (emdev_q->roc_nq_qp) {
 			if (cnxk_emdev_dma_compl_wait(&emdev_q->dpi_q_inb, CNXK_EMDEV_DMA_TMO_MS))
-				plt_err("[0x%x][Q%d] DMA Completion Timeout", pfvf->epf_func,
+				plt_err("[0x%x][Q%d] DMA Inb Completion Timeout", pfvf->epf_func,
 					nq_id);
 			if (cnxk_emdev_dma_compl_wait(&emdev_q->dpi_q_outb, CNXK_EMDEV_DMA_TMO_MS))
-				plt_err("[0x%x][Q%d] DMA Completion Timeout", pfvf->epf_func,
+				plt_err("[0x%x][Q%d] DMA Outb Completion Timeout", pfvf->epf_func,
 					nq_id);
 		}
 	}

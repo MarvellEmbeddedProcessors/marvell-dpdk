@@ -439,6 +439,8 @@ cperf_verify_devices_capabilities(struct cperf_options *opts,
 				case CPERF_ASYM_SECP521R1:
 					set_ecdsa_key_null(opts->secp521r1_data);
 					break;
+				default:
+					break;
 				}
 			}
 		}

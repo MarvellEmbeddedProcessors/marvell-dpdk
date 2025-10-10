@@ -1161,7 +1161,6 @@ cperf_create_session(struct rte_mempool *sess_mp,
 		ecdsa_curve_data = options->secp521r1_data;
 		break;
 	default:
-		rte_panic("Unsupported ECDSA operation type %d\n", options->op_type);
 		break;
 	}
 

@@ -43,7 +43,7 @@ jobs:
           export CC='ccache gcc-14'
           echo "cache_dir = ~/.ccache" > ~/.ccache/ccache.conf
           ccache -p
-          meson build -Dexamples=all -Denable_drivers="*/cnxk,net/ring,net/tap" -Dplatform=cn9k --prefix="${PWD}/install"
+          meson build -Dexamples=all -Denable_drivers="*/cnxk,raw/cnxk_emdev,net/ring,net/tap" -Dplatform=cn9k --prefix="${PWD}/install"
           ninja install -C build
           sed -i "s/prefix=.*/prefix=/g" "${PWD}/install/lib/aarch64-linux-gnu/pkgconfig/libdpdk.pc"
           sed -i "s/prefix=.*/prefix=/g" "${PWD}/install/lib/aarch64-linux-gnu/pkgconfig/libdpdk-libs.pc"

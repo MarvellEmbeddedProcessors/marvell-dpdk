@@ -288,6 +288,10 @@ New Features
   Added ability for a node to advertise and update multiple xstat counters,
   that can be retrieved using ``rte_graph_cluster_stats_get``.
 
+* **Added new RSS offload types for IB_BTH in RSS flow.**
+
+     Added ``RTE_ETH_RSS_IB_BTH`` macro so that the IB BTH header can be used as input set for RSS.
+
 
 Removed Items
 -------------

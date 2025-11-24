@@ -41,7 +41,7 @@ get_test_args()
 	local num_cores=$2
 	local sched_mode=$3
 
-	local tx_cnt=2048
+	local tx_cnt=4096
 
 	case $test_name in
 		L2FWD_EVENT)

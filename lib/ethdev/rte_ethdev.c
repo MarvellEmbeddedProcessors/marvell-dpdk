@@ -3210,7 +3210,7 @@ rte_eth_link_to_str(char *str, size_t len, const struct rte_eth_link *eth_link)
 			"FDX" : "HDX",
 			(eth_link->link_autoneg == RTE_ETH_LINK_AUTONEG) ?
 			"Autoneg" : "Fixed",
-			rte_eth_link_type_to_str(eth_link->link_type));
+			rte_eth_link_connector_to_str(eth_link->link_connector));
 
 	rte_eth_trace_link_to_str(len, eth_link, str, ret);
 
@@ -3218,42 +3218,42 @@ rte_eth_link_to_str(char *str, size_t len, const struct rte_eth_link *eth_link)
 }
 
 const char *
-rte_eth_link_type_to_str(uint8_t link_type)
+rte_eth_link_connector_to_str(enum rte_eth_link_connector link_connector)
 {
-	const char *ret;
+	static const char * const link_connector_str[] = {
+		[RTE_ETH_LINK_CONNECTOR_NONE] = "None",
+		[RTE_ETH_LINK_CONNECTOR_TP] = "Twisted Pair",
+		[RTE_ETH_LINK_CONNECTOR_AUI] = "Attachment Unit Interface",
+		[RTE_ETH_LINK_CONNECTOR_MII] = "Media Independent Interface",
+		[RTE_ETH_LINK_CONNECTOR_FIBER] = "Fiber",
+		[RTE_ETH_LINK_CONNECTOR_BNC] = "BNC",
+		[RTE_ETH_LINK_CONNECTOR_DAC] = "Direct Attach Copper",
+		[RTE_ETH_LINK_CONNECTOR_SGMII] = "SGMII",
+		[RTE_ETH_LINK_CONNECTOR_QSGMII] = "QSGMII",
+		[RTE_ETH_LINK_CONNECTOR_XFI] = "XFI",
+		[RTE_ETH_LINK_CONNECTOR_SFI] = "SFI",
+		[RTE_ETH_LINK_CONNECTOR_XLAUI] = "XLAUI",
+		[RTE_ETH_LINK_CONNECTOR_GAUI] = "GAUI",
+		[RTE_ETH_LINK_CONNECTOR_XAUI] = "XAUI",
+		[RTE_ETH_LINK_CONNECTOR_CAUI] = "CAUI",
+		[RTE_ETH_LINK_CONNECTOR_LAUI] = "LAUI",
+		[RTE_ETH_LINK_CONNECTOR_SFP] = "SFP",
+		[RTE_ETH_LINK_CONNECTOR_SFP_DD] = "SFP-DD",
+		[RTE_ETH_LINK_CONNECTOR_SFP_PLUS] = "SFP+",
+		[RTE_ETH_LINK_CONNECTOR_SFP28] = "SFP28",
+		[RTE_ETH_LINK_CONNECTOR_QSFP] = "QSFP",
+		[RTE_ETH_LINK_CONNECTOR_QSFP_PLUS] = "QSFP+",
+		[RTE_ETH_LINK_CONNECTOR_QSFP28] = "QSFP28",
+		[RTE_ETH_LINK_CONNECTOR_QSFP56] = "QSFP56",
+		[RTE_ETH_LINK_CONNECTOR_QSFP_DD] = "QSFP-DD",
+		[RTE_ETH_LINK_CONNECTOR_OTHER] = "Other",
+	};
+	const char *str = NULL;
 
-	switch (link_type) {
-	case RTE_ETH_LINK_TYPE_NONE:
-		ret = "None";
-		break;
-	case RTE_ETH_LINK_TYPE_TP:
-		ret = "Twisted Pair";
-		break;
-	case RTE_ETH_LINK_TYPE_AUI:
-		ret = "AUI";
-		break;
-	case RTE_ETH_LINK_TYPE_MII:
-		ret = "MII";
-		break;
-	case RTE_ETH_LINK_TYPE_FIBRE:
-		ret = "Fibre";
-		break;
-	case RTE_ETH_LINK_TYPE_BNC:
-		ret = "BNC";
-		break;
-	case RTE_ETH_LINK_TYPE_DA:
-		ret = "Direct Attach Copper";
-		break;
-	case RTE_ETH_LINK_TYPE_OTHER:
-		ret = "Other";
-		break;
-	default:
-		ret = "Invalid";
-	}
+	if (link_connector < ((enum rte_eth_link_connector)RTE_DIM(link_connector_str)))
+		str = link_connector_str[link_connector];
 
-	rte_eth_trace_link_type_to_str(link_type, ret);
-
-	return ret;
+	return str;
 }
 
 int

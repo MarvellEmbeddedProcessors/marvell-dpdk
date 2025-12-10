@@ -62,14 +62,14 @@ static const uint32_t cnxk_mac_modes[CGX_MODE_MAX + 1] = {
 };
 
 static const uint8_t cnxk_port_type[] = {
-	[CGX_PORT_TP] = RTE_ETH_LINK_TYPE_TP,
-	[CGX_PORT_AUI] = RTE_ETH_LINK_TYPE_AUI,
-	[CGX_PORT_MII] = RTE_ETH_LINK_TYPE_MII,
-	[CGX_PORT_FIBRE] = RTE_ETH_LINK_TYPE_FIBRE,
-	[CGX_PORT_BNC] = RTE_ETH_LINK_TYPE_BNC,
-	[CGX_PORT_DA] = RTE_ETH_LINK_TYPE_DA,
-	[CGX_PORT_NONE] = RTE_ETH_LINK_TYPE_NONE,
-	[CGX_PORT_OTHER] = RTE_ETH_LINK_TYPE_OTHER,
+	[CGX_PORT_TP] = RTE_ETH_LINK_CONNECTOR_TP,
+	[CGX_PORT_AUI] = RTE_ETH_LINK_CONNECTOR_AUI,
+	[CGX_PORT_MII] = RTE_ETH_LINK_CONNECTOR_MII,
+	[CGX_PORT_FIBRE] = RTE_ETH_LINK_CONNECTOR_FIBER,
+	[CGX_PORT_BNC] = RTE_ETH_LINK_CONNECTOR_BNC,
+	[CGX_PORT_DA] = RTE_ETH_LINK_CONNECTOR_DAC,
+	[CGX_PORT_NONE] = RTE_ETH_LINK_CONNECTOR_NONE,
+	[CGX_PORT_OTHER] = RTE_ETH_LINK_CONNECTOR_OTHER,
 };
 
 cnxk_ethdev_rx_offload_cb_t cnxk_ethdev_rx_offload_cb;
@@ -134,7 +134,7 @@ nix_get_speed_capa(struct cnxk_eth_dev *dev)
 
 		/* Set link type at init */
 		memset(&link, 0, sizeof(link));
-		link.link_type = dev->link_type;
+		link.link_connector = dev->link_type;
 		rte_eth_linkstatus_set(dev->eth_dev, &link);
 	}
 
@@ -1813,7 +1813,7 @@ cnxk_nix_dev_stop(struct rte_eth_dev *eth_dev)
 
 	/* Bring down link status internally */
 	memset(&link, 0, sizeof(link));
-	link.link_type = dev->link_type;
+	link.link_connector = dev->link_type;
 	rte_eth_linkstatus_set(eth_dev, &link);
 
 	return 0;

@@ -295,7 +295,7 @@ exit:
 static int
 npa_aura_pool_fini(struct mbox *m_box, uint32_t aura_id, uint64_t aura_handle)
 {
-	struct npa_cn20k_aq_enq_req *aura_req_cn20k, *pool_req_cn20k;
+	struct npa_cn20k_aq_enq_req *pool_req_cn20k;
 	struct npa_aq_enq_req *aura_req, *pool_req;
 	struct npa_aq_enq_rsp *aura_rsp, *pool_rsp;
 	struct mbox_dev *mdev = &m_box->dev[0];

@@ -315,8 +315,11 @@ INTERNAL {
 	roc_nix_inl_inb_init;
 	roc_nix_inl_inb_inj_lf_get;
 	roc_nix_inl_inb_reass_profile_id_get;
+	roc_nix_inl_custom_profile_setup;
+	roc_nix_inl_custom_profile_release;
 	roc_nix_inl_inb_rx_inject_enable;
 	roc_nix_inl_inb_sa_base_get;
+	roc_nix_inl_inb_prof_sa_base_get;
 	roc_nix_inl_inb_sa_get;
 	roc_nix_inl_inb_spi_range;
 	roc_nix_inl_inb_sa_sz;

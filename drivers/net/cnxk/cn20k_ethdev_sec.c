@@ -565,8 +565,8 @@ cn20k_eth_sec_sso_work_cb(uint64_t *gw, void *args, enum nix_inl_event_type type
 			struct cpt_cq_s *cqs = (struct cpt_cq_s *)cq_s;
 			if (type < NIX_INL_SSO) {
 				cn20k_eth_sec_post_event(eth_dev, args, type,
-						(uint16_t)cqs->w0.s.uc_compcode,
-						(uint16_t)cqs->w0.s.compcode, NULL);
+							 (uint16_t)cqs->w0.s.uc_compcode,
+							 (uint16_t)cqs->w0.s.compcode, NULL);
 				return;
 			}
 			if (type == NIX_INL_SOFT_EXPIRY_THRD) {

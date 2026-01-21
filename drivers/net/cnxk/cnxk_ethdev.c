@@ -519,13 +519,12 @@ nix_security_release(struct cnxk_eth_dev *dev)
 		ret |= cnxk_nix_inl_inb_fini(dev);
 
 		cnxk_nix_lookup_mem_metapool_clear(dev);
-
 	}
 
 	if (dev->ip_reass_en) {
 		cnxk_nix_ip_reass_rule_clr(eth_dev);
 		dev->ip_reass_en = false;
-        }
+	}
 
 	/* Cleanup Inline outbound */
 	if (dev->tx_offloads & RTE_ETH_TX_OFFLOAD_SECURITY ||

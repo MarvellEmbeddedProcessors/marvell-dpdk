@@ -2493,7 +2493,7 @@ roc_nix_sq_resize(struct roc_nix_sq *sq, uint32_t nb_desc)
 	if (!rc) {
 		sq->nb_desc = nb_desc;
 		if (sq->sq_cnt_ptr)
-			plt_atomic_store_explicit((uint64_t *)sq->sq_cnt_ptr, nb_desc,
+			plt_atomic_store_explicit((uint64_t __plt_atomic *)sq->sq_cnt_ptr, nb_desc,
 						  plt_memory_order_release);
 		*(uint64_t *)sq->fc = roc_npa_aura_op_cnt_get(sq->aura_handle);
 	} else {
@@ -2584,7 +2584,7 @@ roc_nix_sq_cnt_update(struct roc_nix_sq *sq, bool enable)
 {
 	struct nix *nix = roc_nix_to_nix_priv(sq->roc_nix);
 	struct mbox *mbox = mbox_get((&nix->dev)->mbox);
-	int64_t *sq_cntm = (int64_t *)sq->sq_cnt_ptr;
+	int64_t __plt_atomic *sq_cntm = (int64_t __plt_atomic *)sq->sq_cnt_ptr;
 	struct nix_cn20k_aq_enq_rsp *rsp;
 	struct nix_cn20k_aq_enq_req *aq;
 	int rc;

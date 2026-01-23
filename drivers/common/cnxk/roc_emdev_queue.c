@@ -322,6 +322,7 @@ roc_emdev_psw_inb_q_init(struct roc_emdev *roc_emdev, struct roc_emdev_psw_inb_q
 	q_cfg_base.s.enable = 1;
 
 	memset(&shib_q_cfg, 0, sizeof(shib_q_cfg));
+	shib_q_cfg.s.ii = inbq->pi_init;
 
 	roc_atomic64_cas(wdata, q_cfg_base.u[1], PLT_PTR_CAST(rbase + PSW_LF_OP_SHIQCX(1)));
 	roc_atomic64_cas(wdata, q_cfg_base.u[2], PLT_PTR_CAST(rbase + PSW_LF_OP_SHIQCX(2)));
@@ -338,6 +339,7 @@ roc_emdev_psw_inb_q_init(struct roc_emdev *roc_emdev, struct roc_emdev_psw_inb_q
 	q_cfg_base.s.base_addr = inbq->hib.q_base_addr >> 6;
 	q_cfg_base.s.log2ds = plt_log2_u32(inbq->desc_sz) - 3;
 	q_cfg_base.s.log2qs = plt_log2_u32(inbq->nb_desc) - 1;
+	q_cfg_base.s.pround = inbq->hib.pround;
 	q_cfg_base.s.pi = inbq->pi_init;
 	q_cfg_base.s.ci = inbq->ci_init;
 	q_cfg_base.s.enable = 1;
@@ -349,6 +351,8 @@ roc_emdev_psw_inb_q_init(struct roc_emdev *roc_emdev, struct roc_emdev_psw_inb_q
 	hib_q_cfg.u[0] = pattr.u;
 	hib_q_cfg.s.msg_type = inbq->hib.msix_en ? 1 : 0;
 	hib_q_cfg.s.msix_vec_num = inbq->hib.msix_vec_num;
+	hib_q_cfg.s.ii = inbq->pi_init;
+	hib_q_cfg.s.log2bs = 3; /* Burst Size 32 */
 
 	roc_atomic64_cas(wdata, q_cfg_base.u[1], PLT_PTR_CAST(rbase + PSW_LF_OP_HIQCX(1)));
 	roc_atomic64_cas(wdata, q_cfg_base.u[2], PLT_PTR_CAST(rbase + PSW_LF_OP_HIQCX(2)));
@@ -457,6 +461,8 @@ roc_emdev_psw_outb_q_init(struct roc_emdev *roc_emdev, struct roc_emdev_psw_outb
 	pattr.s.pasid_ctrl = outbq->pasid_en;
 	hob_q_cfg.u[0] = pattr.u;
 	hob_q_cfg.s.notif_qnum = outbq->hob.notify_qid;
+	hob_q_cfg.s.ii = outbq->pi_init;
+	hob_q_cfg.s.log2bs = 3; /* Burst Size 32 */
 
 	roc_atomic64_cas(wdata, q_cfg_base.u[1], PLT_PTR_CAST(rbase + PSW_LF_OP_HOQCX(1)));
 	roc_atomic64_cas(wdata, q_cfg_base.u[2], PLT_PTR_CAST(rbase + PSW_LF_OP_HOQCX(2)));
@@ -473,12 +479,14 @@ roc_emdev_psw_outb_q_init(struct roc_emdev *roc_emdev, struct roc_emdev_psw_outb
 	q_cfg_base.s.base_addr = outbq->shob.q_base_addr >> 6;
 	q_cfg_base.s.log2ds = plt_log2_u32(outbq->desc_sz) - 3;
 	q_cfg_base.s.log2qs = plt_log2_u32(outbq->nb_desc) - 1;
+	q_cfg_base.s.pround = outbq->hob.pround;
 	q_cfg_base.s.enable = 1;
 	q_cfg_base.s.pi = outbq->pi_init;
 	q_cfg_base.s.ci = outbq->ci_init;
 
 	memset(&shob_q_cfg, 0, sizeof(shob_q_cfg));
 
+	shob_q_cfg.s.ii = outbq->pi_init;
 	roc_atomic64_cas(wdata, q_cfg_base.u[1], PLT_PTR_CAST(rbase + PSW_LF_OP_SHOQCX(1)));
 	roc_atomic64_cas(wdata, q_cfg_base.u[2], PLT_PTR_CAST(rbase + PSW_LF_OP_SHOQCX(2)));
 	roc_atomic64_cas(wdata, q_cfg_base.u[3], PLT_PTR_CAST(rbase + PSW_LF_OP_SHOQCX(3)));

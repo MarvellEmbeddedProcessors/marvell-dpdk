@@ -7,10 +7,10 @@
 #define ROC_EMDEV_API_Q_SZ 4096
 
 /* VIRTIO PCI NOTIFY area BAR offset */
-#define ROC_EMDEV_VIRTIO_NOTIFY_AREA_OFF    256
+#define ROC_EMDEV_VIRTIO_NOTIFY_AREA_OFF    2048
 #define ROC_EMDEV_VIRTIO_NOTIFY_AREA_STRIDE 8
 #define ROC_EMDEV_VIRTIO_MSIX_OFFSET	    4096
-#define ROC_EMDEV_VIRTIO_PBA_OFFSET	    8192
+#define ROC_EMDEV_VIRTIO_PBA_OFFSET	    12288
 
 #define MBOX_MSIX_VECS 4
 #define MSIX_VEC_SZ    16
@@ -281,8 +281,10 @@ psw_virtio_fid_table_setup(struct emdev *emdev)
 			continue;
 		/* Allocate entry for common config and device config */
 		req = mbox_alloc_msg_psw_fid_alloc_entry(mbox);
-		if (!req)
+		if (!req) {
+			mbox_put(mbox);
 			return -ENOMEM;
+		}
 
 		/* Matches this EPF and all its VF's */
 		req->evf_id = 0;
@@ -320,9 +322,12 @@ psw_virtio_fid_table_setup(struct emdev *emdev)
 		}
 
 		req->base_mask = (~(size - 1)) >> 3;
-		req->log2size = plt_log2_u32(size);
+		req->log2size = plt_log2_u32(size / 8);
 		/* Stride is in multiple of 8 bytes */
-		req->log2stride = plt_log2_u32(entry->stride / 8);
+		if (entry->psw_type == PSW_TYPES_API)
+			req->log2stride = 31;
+		else
+			req->log2stride = plt_log2_u32(entry->stride / 8);
 		req->psw_type = entry->psw_type;
 		req->read_mask = entry->read_mask;
 		req->read_en = entry->read_en;

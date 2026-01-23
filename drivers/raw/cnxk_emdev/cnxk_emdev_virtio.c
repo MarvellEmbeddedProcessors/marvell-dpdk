@@ -606,12 +606,17 @@ static inline int
 apinotif_write_handle(struct cnxk_emdev_virtio_pfvf *pfvf, struct roc_emdev_apinotif_handle *desc,
 		      void *args)
 {
-	uint32_t offset = desc->addr >> 3;
+	uint32_t offset = desc->addr, pos = 0;
 	uint64_t data = desc->data;
 	int rc = 0;
 
 	RTE_SET_USED(args);
+
 	offset = offset - ROC_EMDEV_VIRTIO_PCI_COMMON_CFG_OFF;
+	rte_bsf32_safe((uint32_t)desc->be, &pos);
+	offset += pos;
+	data >>= (pos * 8);
+
 	switch (offset) {
 	case 0:
 		/* device_feature_select */
@@ -971,14 +976,18 @@ static inline int
 apinotif_read_handle(struct cnxk_emdev_virtio_pfvf *pfvf, struct roc_emdev_apinotif_handle *desc,
 		     void *args)
 {
-	uint32_t offset = desc->addr >> 3;
-	void *data = &desc->data;
+	uint32_t offset = desc->addr, pos = 0;
+	uintptr_t data = (uintptr_t)&desc->data;
 	uint8_t len;
 	int rc = 0;
 
 	RTE_SET_USED(args);
+
 	offset = offset - ROC_EMDEV_VIRTIO_PCI_COMMON_CFG_OFF;
 	len = (uint8_t)rte_popcount32((uint32_t)desc->be);
+	rte_bsf32_safe((uint32_t)desc->be, &pos);
+	offset += pos;
+	data += pos;
 
 	switch (offset) {
 	case 0:
@@ -1043,7 +1052,8 @@ apinotif_read_handle(struct cnxk_emdev_virtio_pfvf *pfvf, struct roc_emdev_apino
 		rc = queue_used_hi_read(pfvf, (uint32_t *)data);
 		break;
 	default:
-		rc = emdev_virtio_cbs[pfvf->emdev_type].dev_cfg_read(pfvf, offset, data, len);
+		rc = emdev_virtio_cbs[pfvf->emdev_type].dev_cfg_read(pfvf, offset, (void *)data,
+								     len);
 		break;
 	}
 

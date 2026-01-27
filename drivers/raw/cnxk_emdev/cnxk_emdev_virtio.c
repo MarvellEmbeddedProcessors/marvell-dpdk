@@ -422,7 +422,7 @@ queue_enable_write(struct cnxk_emdev_virtio_pfvf *pfvf, uint16_t queue_enable)
 	if (queue_enable) {
 		rc = virtio_queue_init(pfvf, qconf, queue_id);
 		if (rc) {
-			plt_err("Failed to initialize the emdev queue");
+			plt_err("Failed to initialize the virtqueue %d", queue_id);
 			return rc;
 		}
 	} else {
@@ -603,6 +603,19 @@ guest_feature_write(struct cnxk_emdev_virtio_pfvf *pfvf, uint32_t driver_feature
 }
 
 static inline int
+epfvf_msix_write(struct cnxk_emdev_virtio_pfvf *pfvf, uint64_t offset, uint32_t data)
+{
+	uint32_t msix_offset;
+
+	if (offset < ROC_EMDEV_VIRTIO_MSIX_OFFSET)
+		return 0;
+
+	msix_offset = offset - ROC_EMDEV_VIRTIO_MSIX_OFFSET;
+
+	return roc_emdev_epfvf_msix_write(&pfvf->dev->roc_emdev, pfvf->vf_id, msix_offset, data);
+}
+
+static inline int
 apinotif_write_handle(struct cnxk_emdev_virtio_pfvf *pfvf, struct roc_emdev_apinotif_handle *desc,
 		      void *args)
 {
@@ -680,6 +693,7 @@ apinotif_write_handle(struct cnxk_emdev_virtio_pfvf *pfvf, struct roc_emdev_apin
 		rc = queue_used_hi_write(pfvf, (uint32_t)data);
 		break;
 	default:
+		rc = epfvf_msix_write(pfvf, offset, (uint32_t)data);
 		break;
 	}
 
@@ -973,6 +987,29 @@ guest_feature_read(struct cnxk_emdev_virtio_pfvf *pfvf, uint32_t *driver_feature
 }
 
 static inline int
+epfvf_msix_read(struct cnxk_emdev_virtio_pfvf *pfvf, uint32_t offset, uint32_t *data)
+{
+	uint32_t msix_offset;
+
+	msix_offset = offset - ROC_EMDEV_VIRTIO_MSIX_OFFSET;
+
+	return roc_emdev_epfvf_msix_read(&pfvf->dev->roc_emdev, pfvf->vf_id, msix_offset, data);
+}
+
+static inline int
+default_read_handle(struct cnxk_emdev_virtio_pfvf *pfvf, uint32_t offset, uint32_t *data,
+		    uint8_t len)
+{
+	if (offset >= 64 && offset < 128)
+		return emdev_virtio_cbs[pfvf->emdev_type].dev_cfg_read(pfvf, offset, (void *)data,
+								       len);
+	else if (offset >= ROC_EMDEV_VIRTIO_MSIX_OFFSET)
+		return epfvf_msix_read(pfvf, offset, data);
+	else
+		return -EINVAL;
+}
+
+static inline int
 apinotif_read_handle(struct cnxk_emdev_virtio_pfvf *pfvf, struct roc_emdev_apinotif_handle *desc,
 		     void *args)
 {
@@ -1052,8 +1089,7 @@ apinotif_read_handle(struct cnxk_emdev_virtio_pfvf *pfvf, struct roc_emdev_apino
 		rc = queue_used_hi_read(pfvf, (uint32_t *)data);
 		break;
 	default:
-		rc = emdev_virtio_cbs[pfvf->emdev_type].dev_cfg_read(pfvf, offset, (void *)data,
-								     len);
+		rc = default_read_handle(pfvf, offset, (uint32_t *)data, len);
 		break;
 	}
 

@@ -114,6 +114,8 @@ INTERNAL {
 	roc_emdev_mbox_msix_cfg;
 	roc_emdev_setup;
 	roc_emdev_release;
+	roc_emdev_epfvf_msix_read;
+	roc_emdev_epfvf_msix_write;
 	roc_emdev_psw_aq_qp_init;
 	roc_emdev_psw_aq_qp_fini;
 	roc_emdev_psw_aq_qp_dump;

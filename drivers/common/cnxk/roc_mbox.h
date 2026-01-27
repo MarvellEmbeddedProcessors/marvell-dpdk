@@ -444,7 +444,8 @@ struct mbox_msghdr {
 	M(PSW_TST_ADD_ENTRY, 0x120D, psw_tst_add_entry, psw_tst_add_entry_req,                     \
 	  psw_tst_add_entry_rsp)                                                                   \
 	M(PSW_TST_MODIFY_ENTRY, 0x120E, psw_tst_modify_entry, psw_tst_modify_entry_req, msg_rsp)   \
-	M(PSW_MBOX_MSIX_CFG, 0x120F, psw_mbox_msix_cfg, psw_mbox_msix_cfg_req, msg_rsp)
+	M(PSW_MBOX_MSIX_CFG, 0x120F, psw_mbox_msix_cfg, psw_mbox_msix_cfg_req, msg_rsp)            \
+	M(PSW_EPFVF_MSIX_WRITE, 0x1210, psw_epfvf_msix_write, psw_epfvf_msix_write_req, msg_rsp)
 
 /* Messages initiated by AF (range 0xC00 - 0xDFF) */
 #define MBOX_UP_CGX_MESSAGES                                                   \
@@ -3751,6 +3752,15 @@ struct psw_mbox_msix_cfg_req {
 	uint16_t __io evf_id; /* Host VF ID */
 	uint16_t __io mbox_msix;
 	uint16_t __io rsvd[2];
+};
+
+struct psw_epfvf_msix_write_req {
+	struct mbox_msghdr hdr;
+	uint16_t __io evf_id; /* Host VF ID */
+	uint16_t __io rid;
+	uint32_t __io data;
+	uint8_t __io offset;
+	uint8_t __io rsvd[7];
 };
 
 #endif /* __ROC_MBOX_H__ */

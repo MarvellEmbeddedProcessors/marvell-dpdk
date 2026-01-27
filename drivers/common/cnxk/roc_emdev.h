@@ -168,6 +168,8 @@ struct roc_emdev_apinotif_handle {
 /* VIRTIO PCI NET/CRYPTO device config area */
 #define ROC_EMDEV_VIRTIO_PCI_DEV_CFG_LEN 64
 
+#define ROC_EMDEV_VIRTIO_MSIX_OFFSET 4096
+
 typedef int (*roc_emdev_apinotif_cb_t)(uint16_t epf_func, struct roc_emdev_apinotif_handle *desc,
 				       void *args);
 
@@ -210,6 +212,10 @@ int __roc_api roc_emdev_mbox_msix_cfg(struct roc_emdev *roc_emdev, uint16_t evf_
 				      uint16_t mbox_msix);
 void __roc_api roc_emdev_psw_mbox_int_trigger(struct roc_emdev *roc_emdev, uint16_t evf_id);
 uint16_t __roc_api roc_emdev_epf_func_get(struct roc_emdev *roc_emdev, uint16_t vf_id);
+int __roc_api roc_emdev_epfvf_msix_write(struct roc_emdev *roc_emdev, uint16_t evf_id,
+					 uint32_t offset, uint32_t data);
+int __roc_api roc_emdev_epfvf_msix_read(struct roc_emdev *roc_emdev, uint16_t evf_id,
+					uint32_t offset, uint32_t *data);
 
 /* Debug APIs */
 int __roc_api roc_emdev_psw_anq_desc_dump(FILE *file, void *data);

@@ -9,7 +9,6 @@
 /* VIRTIO PCI NOTIFY area BAR offset */
 #define ROC_EMDEV_VIRTIO_NOTIFY_AREA_OFF    2048
 #define ROC_EMDEV_VIRTIO_NOTIFY_AREA_STRIDE 8
-#define ROC_EMDEV_VIRTIO_MSIX_OFFSET	    4096
 #define ROC_EMDEV_VIRTIO_PBA_OFFSET	    12288
 
 #define MBOX_MSIX_VECS 4
@@ -51,7 +50,7 @@ const struct psw_fid_entry psw_fid_base[ROC_EMDEV_TYPE_MAX][PSW_FID_ENTRY_MAX] =
 		[PSW_VIRTIO_FID_MSIX] = {
 			.bar = ROC_EMDEV_VIRTIO_BAR,
 			.offset = ROC_EMDEV_VIRTIO_MSIX_OFFSET,
-			.psw_type = PSW_TYPES_MSIX,
+			.psw_type = PSW_TYPES_API,
 			.size = 0,
 			.write_en = 1,
 			.read_en = 1,
@@ -100,7 +99,7 @@ const struct psw_fid_entry psw_fid_base[ROC_EMDEV_TYPE_MAX][PSW_FID_ENTRY_MAX] =
 		[PSW_EVF_VIRTIO_FID_MSIX] = {
 			.bar = ROC_EMDEV_VIRTIO_BAR,
 			.offset = ROC_EMDEV_VIRTIO_MSIX_OFFSET,
-			.psw_type = PSW_TYPES_MSIX,
+			.psw_type = PSW_TYPES_API,
 			.size = 0,
 			.write_en = 1,
 			.read_en = 1,
@@ -309,6 +308,9 @@ psw_virtio_fid_table_setup(struct emdev *emdev)
 			size = entry->size;
 			break;
 		}
+		if (i == PSW_VIRTIO_FID_MSIX || i == PSW_EVF_VIRTIO_FID_MSIX)
+			size = (emdev->nb_inb_qs + MBOX_MSIX_VECS) * MSIX_VEC_SZ;
+
 		size = plt_align32pow2(size);
 		/* Check if size and base conflicts with previous entry */
 		if (i >= 1) {
@@ -478,7 +480,7 @@ emdev_psw_rsrc_alloc(struct emdev *emdev, uint16_t nb_inb_qs, uint16_t nb_outb_q
 		req->evf_id = epfvf->evf_id;
 		req->nb_inb_qs = nb_inb_qs;
 		req->nb_outb_qs = nb_outb_qs;
-		req->nb_mid = PLT_MAX(nb_inb_qs, nb_outb_qs);
+		req->nb_mid = PLT_MAX(nb_inb_qs, nb_outb_qs) + MBOX_MSIX_VECS;
 		req->rid_base = 0;
 
 		rc = mbox_process(mbox);
@@ -1060,4 +1062,85 @@ roc_emdev_psw_mbox_int_trigger(struct roc_emdev *roc_emdev, uint16_t evf_id)
 	wdata = epfvf->epf_func;
 
 	roc_atomic64_cas(wdata, 1, PLT_PTR_CAST(rbase + PSW_LF_OP_MBOXX(1)));
+}
+
+int
+roc_emdev_epfvf_msix_write(struct roc_emdev *roc_emdev, uint16_t evf_id, uint32_t offset,
+			   uint32_t data)
+{
+	struct emdev *emdev = roc_emdev_to_emdev_priv(roc_emdev);
+	uint16_t msix_vec = offset / MSIX_VEC_SZ;
+	struct dev *dev = &emdev->dev;
+	struct mbox *mbox = mbox_get(dev->mbox);
+	struct psw_epfvf_msix_write_req *req;
+	struct emdev_epfvf_msix *msix_tbl;
+	struct emdev_epfvf *epfvf;
+	int rc;
+
+	req = mbox_alloc_msg_psw_epfvf_msix_write(mbox);
+	if (req == NULL)
+		return -ENOMEM;
+
+	req->evf_id = evf_id;
+	req->rid = msix_vec;
+	req->offset = offset & 0xF;
+	req->data = data;
+
+	rc = mbox_process(mbox);
+	if (rc) {
+		plt_err("[0x%x] Failed to write msix data, rc=%d", emdev->epf_func, rc);
+		goto exit;
+	}
+
+	epfvf = &emdev->epfvfs[evf_id];
+	msix_tbl = &epfvf->msix_tbl[msix_vec];
+
+	switch (offset & 0xF) {
+	case 0x0:
+		msix_tbl->addr_lo = data;
+		break;
+	case 0x4:
+		msix_tbl->addr_hi = data;
+		break;
+	case 0x8:
+		msix_tbl->data = data;
+		break;
+	case 0xc:
+		msix_tbl->ctrl = data;
+		break;
+	}
+
+exit:
+	mbox_put(mbox);
+	return rc;
+}
+
+int
+roc_emdev_epfvf_msix_read(struct roc_emdev *roc_emdev, uint16_t evf_id, uint32_t offset,
+			  uint32_t *data)
+{
+	struct emdev *emdev = roc_emdev_to_emdev_priv(roc_emdev);
+	uint16_t msix_vec = offset / MSIX_VEC_SZ;
+	struct emdev_epfvf_msix *msix_tbl;
+	struct emdev_epfvf *epfvf;
+
+	epfvf = &emdev->epfvfs[evf_id];
+	msix_tbl = &epfvf->msix_tbl[msix_vec];
+
+	switch (offset & 0xF) {
+	case 0x0:
+		*data = msix_tbl->addr_lo;
+		break;
+	case 0x4:
+		*data = msix_tbl->addr_hi;
+		break;
+	case 0x8:
+		*data = msix_tbl->data;
+		break;
+	case 0xc:
+		*data = msix_tbl->ctrl;
+		break;
+	}
+
+	return 0;
 }

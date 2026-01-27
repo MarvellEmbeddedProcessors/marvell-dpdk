@@ -57,6 +57,13 @@ struct psw_hw_caps {
 	uint64_t fid_type_const[PSW_TYPE_COUNT];
 };
 
+struct emdev_epfvf_msix {
+	uint32_t addr_lo;
+	uint32_t addr_hi;
+	uint32_t data;
+	uint32_t ctrl;
+};
+
 struct emdev_epfvf {
 	/* Host EPFFUNC */
 	uint16_t evf_id;
@@ -74,6 +81,9 @@ struct emdev_epfvf {
 	uint16_t psw_lfid;
 	/* Number allocated GID resources for this function */
 	uint16_t nb_rids;
+
+#define ROC_EMDEV_MSIX_VECS_MAX 260
+	struct emdev_epfvf_msix msix_tbl[ROC_EMDEV_MSIX_VECS_MAX];
 };
 
 struct emdev {

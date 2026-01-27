@@ -208,6 +208,7 @@ virtio_queue_init(struct cnxk_emdev_virtio_pfvf *pfvf, struct cnxk_emdev_virtio_
 	vnet_q->q_sz = qconf->queue_size;
 	vnet_q->qid = qid;
 	vnet_q->epf_func = roc_emdev_epf_func_get(roc_emdev, vf_id);
+	vnet_q->chan_flags = vf_id;
 	vnet_q->sd_base = inbq->shib.q_base_addr;
 	vnet_q->pi_desc = BIT_ULL(15);
 	vnet_q->ci_desc = BIT_ULL(15);

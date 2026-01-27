@@ -90,7 +90,8 @@ cnxk_emdev_vnet_ctrl_deq_psw_dbl(struct cnxk_emdev_queue *queue,
 		*VNET_DESC_PTR_OFF(sd_base, off, 8) = dflags | desc_flag << 55 | desc_flag << 63;
 
 		/* Submit a DMA instruction */
-		cnxk_emdev_dma_enq_x1(dma_ptr, compl_ptr, 0, *VNET_DESC_PTR_OFF(sd_base, off, 0),
+		cnxk_emdev_dma_enq_x1(dma_ptr, compl_ptr, vnet_q->chan_flags,
+				      *VNET_DESC_PTR_OFF(sd_base, off, 0),
 				      rte_pktmbuf_mtod_offset(mbuf, rte_iova_t, tot_len), len);
 		tot_len += len;
 		dma_idx = cnxk_emdev_dma_next_idx(dma_idx);
@@ -454,7 +455,7 @@ cnxk_emdev_vnet_deq_psw_dbl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vn
 		compl_ptr = cnxk_emdev_dma_compl_addr(compl_base, dma_idx);
 		src = *VNET_DESC_PTR_OFF(sd_base, i, 0);
 		num = (d_idx > DPI_DMA_64B_MAX_NLST) ? DPI_DMA_64B_MAX_NLST : d_idx;
-		mdata = ((1 << num) - 1) << 14 | aura << 32;
+		mdata = ((1 << num) - 1) << 14 | aura << 32 | vnet_q->chan_flags;
 		num = (num << 4) | 1;
 		/* DMA can be up to 3 dest pointers */
 		cnxk_emdev_dma_enq_xn(dma_ptr, compl_ptr, mdata, &src, dsts, num, s_lens, d_lens);
@@ -470,7 +471,7 @@ cnxk_emdev_vnet_deq_psw_dbl(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vn
 			compl_ptr = cnxk_emdev_dma_compl_addr(compl_base, dma_idx);
 			src += s_lens[0];
 			num = (d_idx > DPI_DMA_64B_MAX_NLST) ? DPI_DMA_64B_MAX_NLST : d_idx;
-			mdata = ((1 << num) - 1) << 14 | aura << 32;
+			mdata = ((1 << num) - 1) << 14 | aura << 32 | vnet_q->chan_flags;
 			num = (num << 4) | 1;
 			cnxk_emdev_dma_enq_xn(dma_ptr, compl_ptr, mdata, &src, dsts, num,
 					      s_lens + 1, d_lens + DPI_DMA_64B_MAX_NLST);

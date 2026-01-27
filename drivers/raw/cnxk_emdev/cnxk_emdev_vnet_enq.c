@@ -167,7 +167,6 @@ emdev_vnet_ctrl_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue
 	uint64_t val, ack_desc;
 	uint16_t a_pi, a_ci;
 	uint16_t tmo_ms;
-	uint64_t mdata;
 
 	PLT_SET_USED(flags);
 
@@ -187,10 +186,9 @@ emdev_vnet_ctrl_enq(struct cnxk_emdev_queue *queue, struct cnxk_emdev_vnet_queue
 	/* DMA status to last descriptor */
 	dma_ptr = cnxk_emdev_dma_inst_addr(dma_base, dma_idx);
 	compl_ptr = cnxk_emdev_dma_compl_addr(compl_base, dma_idx);
-	mdata = 0x0ULL;
 
 	/* Submit a DMA instruction */
-	cnxk_emdev_dma_enq_x1(dma_ptr, compl_ptr, mdata, (uintptr_t)&event->status,
+	cnxk_emdev_dma_enq_x1(dma_ptr, compl_ptr, vnet_q->chan_flags, (uintptr_t)&event->status,
 			      *VNET_DESC_PTR_OFF(sd_base, ci_end, 0), 1);
 
 	/* Trigger DMA */

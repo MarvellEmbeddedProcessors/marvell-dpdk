@@ -409,6 +409,7 @@ INTERNAL {
 	roc_nix_rq_init;
 	roc_nix_rq_is_sso_enable;
 	roc_nix_rq_modify;
+	roc_nix_rq_multi_ena_dis;
 	roc_nix_rss_default_setup;
 	roc_nix_rss_flowkey_set;
 	roc_nix_rss_key_default_fill;

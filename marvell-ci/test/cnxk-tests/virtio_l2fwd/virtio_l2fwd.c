@@ -1711,9 +1711,7 @@ ctrl_cmd_dequeue(void)
 		event = rte_pktmbuf_mtod((struct rte_mbuf *)buf, struct rte_pmd_cnxk_emdev_event *);
 
 		status = virtio_ctrl_cmd_process(emdev_id, event);
-
-		*((uint8_t *)event->data) = (status) ? VIRTIO_NET_ERR : VIRTIO_NET_OK;
-		event->data_len = sizeof(uint8_t);
+		event->status = (status) ? VIRTIO_NET_ERR : VIRTIO_NET_OK;
 
 		context = (uint64_t)event->func_id << 8 | (uint64_t)event->qid << 16;
 		count = rte_rawdev_enqueue_buffers(emdev_id, &buf, 1, (void *)context);
@@ -1748,7 +1746,6 @@ print_stats(void)
 			}
 		}
 		ctrl_cmd_dequeue();
-		rte_delay_ms(1E3);
 	}
 }
 
@@ -2207,12 +2204,15 @@ setup_em_devices(void)
 			} else {
 				vnet_conf->reta_size = 0;
 				vnet_conf->hash_key_size = 0;
-				vnet_conf->mac[0] = 0x1;
-				vnet_conf->mac[1] = 0x2;
-				vnet_conf->mac[2] = 0x3;
-				vnet_conf->mac[3] = 0x4;
-				vnet_conf->mac[4] = 0x5;
+				vnet_conf->mac[0] = 0x2;
+				vnet_conf->mac[1] = 0x0;
+				vnet_conf->mac[2] = 0x0;
+				vnet_conf->mac[3] = 0x0;
+				vnet_conf->mac[4] = 0x0;
 				vnet_conf->mac[5] = func_id;
+				vnet_conf->link_info.status = RTE_ETH_LINK_UP;
+				vnet_conf->link_info.speed = 10000;
+				vnet_conf->link_info.duplex = 1;
 			}
 		}
 
@@ -2378,6 +2378,10 @@ setup_graph_workers(void)
 			qconf->emdev_deq[i].emdev_deq->emdev_id = emdev_id;
 			qconf->emdev_deq[i].emdev_deq->emdev_qid = qconf->emdev_deq[i].emdev_qid;
 			qconf->emdev_deq[i].emdev_deq->eth_next = 1;
+			if (virtio_map[emdev_id][0].type == VIRTIO_NEXT)
+				qconf->emdev_deq[i].emdev_deq->type = VIRTIO_NEXT;
+			else
+				qconf->emdev_deq[i].emdev_deq->type = ETHDEV_NEXT;
 
 			/* Assign same emdev qid if a node exists on this graph */
 			node_id = emdev_enq_nodes[emdev_id];

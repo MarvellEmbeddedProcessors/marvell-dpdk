@@ -30,6 +30,10 @@ typedef struct l2_emdev_deq_node_ctx {
 	uint16_t eth_next;
 	uint16_t emdev_id;
 	uint16_t emdev_qid;
+	uint8_t type;
+	uint64_t pkts;
+#define ETHDEV_NEXT 1
+#define VIRTIO_NEXT 2
 } l2_emdev_deq_node_ctx_t;
 
 typedef struct l2_emdev_enq_node_ctx {

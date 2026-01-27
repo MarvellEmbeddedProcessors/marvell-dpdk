@@ -11,11 +11,12 @@ l2_emdev_dequeue_inline(struct rte_graph *graph, struct rte_node *node,
 			l2_emdev_deq_node_ctx_t *ctx)
 {
 	struct rte_mbuf *mbufs[L2_EMDEV_DEQ_BURST_MAX];
-	uint16_t nb_pkts = 0, count;
+	uint16_t nb_pkts = 0, count, enq_cnt, enq_idx;
 	uint16_t idx = 0, i, curr_q, next_q;
 	uint16_t emdev_qid = ctx->emdev_qid;
 	uint16_t emdev_id = ctx->emdev_id;
 	uint16_t next_func, curr_func;
+	rte_edge_t next_node;
 	uint16_t max_pkts;
 
 	/* Do an enqueue flush to push previous pkts out.
@@ -31,7 +32,13 @@ l2_emdev_dequeue_inline(struct rte_graph *graph, struct rte_node *node,
 	if (unlikely(nb_pkts == 0))
 		return 0;
 
+	ctx->pkts += nb_pkts;
+	if ((ctx->pkts / 1000) != (ctx->pkts - nb_pkts) / 1000)
+		printf("%s: pkts: %lu\n", __func__, ctx->pkts);
+
 	count = 1;
+	enq_cnt = 1;
+	enq_idx = 0;
 	curr_q = (mbufs[idx])->hash.fdir.id / 2;
 	curr_func = (mbufs[idx])->port & 0xFF;
 	for (i = 1; i < nb_pkts; i++) {
@@ -42,21 +49,33 @@ l2_emdev_dequeue_inline(struct rte_graph *graph, struct rte_node *node,
 			l2_mbuf_tx_priv1(mbufs[idx])->nb_pkts = count;
 			l2_mbuf_tx_priv1(mbufs[idx])->tx_queue = curr_q;
 			if (next_func != curr_func) {
-				rte_node_enqueue(graph, node, ctx->eth_next + curr_func,
-						 (void **)&mbufs[idx], count);
+				if (ctx->type == VIRTIO_NEXT)
+					next_node = ctx->eth_next;
+				else
+					next_node = ctx->eth_next + curr_func;
+				rte_node_enqueue(graph, node, next_node,
+						 (void **)&mbufs[enq_idx], enq_cnt);
 				curr_func = next_func;
+				enq_idx += enq_cnt;
+				enq_cnt = 0;
 			}
-			curr_q = next_q;
-			idx = i;
 			count = 0;
+			idx = i;
+			curr_q = next_q;
 		}
 		count++;
+		enq_cnt++;
 	}
 
 	l2_mbuf_tx_priv1(mbufs[idx])->nb_pkts = count;
 	l2_mbuf_tx_priv1(mbufs[idx])->tx_queue = curr_q;
 
-	rte_node_enqueue(graph, node, ctx->eth_next + curr_func, (void **)&mbufs[idx], count);
+	if (ctx->type == VIRTIO_NEXT)
+		next_node = ctx->eth_next;
+	else
+		next_node = ctx->eth_next + curr_func;
+
+	rte_node_enqueue(graph, node, next_node, (void **)&mbufs[enq_idx], enq_cnt);
 
 	return nb_pkts;
 }

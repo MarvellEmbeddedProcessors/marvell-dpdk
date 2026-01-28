@@ -247,6 +247,7 @@ INTERNAL {
 	roc_mcs_stats_clear;
 	roc_mcs_tx_sc_sa_map_read;
 	roc_mcs_tx_sc_sa_map_write;
+	roc_nix_af_rx_flow_vec_ctrl_set;
 	roc_nix_bpf_alloc;
 	roc_nix_bpf_config;
 	roc_nix_bpf_connect;

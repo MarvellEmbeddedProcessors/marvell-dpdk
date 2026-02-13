@@ -100,6 +100,7 @@
 #define __plt_always_inline __rte_always_inline
 #define __plt_packed	    __rte_packed
 #define __plt_unused	    __rte_unused
+#define __plt_may_alias	    __rte_may_alias
 #define __roc_api	    __rte_internal
 #define plt_iova_t	    rte_iova_t
 

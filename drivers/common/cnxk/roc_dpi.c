@@ -275,6 +275,7 @@ dpi_lf_get_msixoffset(struct dev *dev, uint16_t *msixoff, uint16_t nb_lf)
 		msixoff[i] = rsp->dpilf_msixoff[i];
 
 exit:
+	mbox_put(mbox);
 	return rc;
 }
 

@@ -426,7 +426,7 @@ struct mbox_msghdr {
 	  msg_rsp)                                                                                 \
 	M(DPI_LF_CHAN_TBL_UPDATE, 0xc00b, dpi_lf_chan_tbl_update, dpi_lf_chan_tbl_update_req,      \
 	  msg_rsp)                                                                                 \
-	M(DPI_MSIX_OFFSET, 0xc011, dpi_msix_offset, msg_req, dpi_msix_offset_rsp)                  \
+	M(DPI_MSIX_OFFSET, 0xc00c, dpi_msix_offset, msg_req, dpi_msix_offset_rsp)                  \
 	/* PSW mbox IDs (range 0x1200 - 0x13FF) */                                                 \
 	M(PSW_ATTACH_RESOURCES, 0x1200, psw_attach_resources, psw_rsrc_attach_req, msg_rsp)        \
 	M(PSW_DETACH_RESOURCES, 0x1201, psw_detach_resources, psw_rsrc_detach_req, msg_rsp)        \

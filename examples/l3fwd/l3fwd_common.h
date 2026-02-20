@@ -86,7 +86,7 @@ send_packetsx4(struct lcore_conf *qconf, uint16_t port, struct rte_mbuf *m[],
 	 */
 
 	n = len + num;
-	n = (n > MAX_PKT_BURST) ? MAX_PKT_BURST - len : num;
+	n = (n > nb_pkt_per_burst) ? nb_pkt_per_burst - len : num;
 
 	j = 0;
 	switch (n % FWDSTEP) {
@@ -112,9 +112,9 @@ send_packetsx4(struct lcore_conf *qconf, uint16_t port, struct rte_mbuf *m[],
 	len += n;
 
 	/* enough pkts to be sent */
-	if (unlikely(len == MAX_PKT_BURST)) {
+	if (unlikely(len == nb_pkt_per_burst)) {
 
-		send_burst(qconf, MAX_PKT_BURST, port);
+		send_burst(qconf, nb_pkt_per_burst, port);
 
 		/* copy rest of the packets into the TX buffer. */
 		len = num - n;

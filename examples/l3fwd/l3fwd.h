@@ -152,8 +152,8 @@ send_single_packet(struct lcore_conf *qconf,
 	len++;
 
 	/* enough pkts to be sent */
-	if (unlikely(len == MAX_PKT_BURST)) {
-		send_burst(qconf, MAX_PKT_BURST, port);
+	if (unlikely(len == nb_pkt_per_burst)) {
+		send_burst(qconf, nb_pkt_per_burst, port);
 		len = 0;
 	}
 

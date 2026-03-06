@@ -65,6 +65,7 @@ drivers = [
         'vhost',
         'virtio',
         'vmxnet3',
+        'xgmac',
         'xsc',
         'zxdh',
 ]

@@ -12,6 +12,7 @@
 #include <rte_ether.h>
 #include <rte_flow.h>
 #include <rte_flow_driver.h>
+#include <rte_malloc.h>
 
 #include "xgmac_ethdev.h"
 #include "xgmac_flow.h"
@@ -278,6 +279,62 @@ xgmac_flow_compile_pattern(const struct rte_flow_item pattern[], struct xgmac_fl
 }
 
 static int
+xgmac_flow_compile_action(struct xgmac_dev *dev, const struct rte_flow_action actions[],
+			  struct xgmac_frp_action *action, struct rte_flow_error *error)
+{
+	const struct rte_flow_action *a;
+	bool terminal_set = false;
+
+	memset(action, 0, sizeof(*action));
+
+	if (actions == NULL)
+		return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ACTION_NUM, NULL,
+					  "NULL action list");
+
+	for (a = actions; a->type != RTE_FLOW_ACTION_TYPE_END; a++) {
+		if (a->type == RTE_FLOW_ACTION_TYPE_VOID)
+			continue;
+
+		if (terminal_set)
+			return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ACTION, a,
+						  "multiple terminal actions");
+
+		switch (a->type) {
+		case RTE_FLOW_ACTION_TYPE_QUEUE: {
+			const struct rte_flow_action_queue *q = a->conf;
+
+			if (q == NULL)
+				return rte_flow_error_set(error, EINVAL,
+							  RTE_FLOW_ERROR_TYPE_ACTION_CONF, a,
+							  "QUEUE conf is NULL");
+			if (q->index >= dev->hw_feat.rx_ch_cnt)
+				return rte_flow_error_set(error, EINVAL,
+							  RTE_FLOW_ERROR_TYPE_ACTION_CONF, a,
+							  "QUEUE index out of range");
+			action->accept_frame = true;
+			action->dma_ch_mask = (uint16_t)RTE_BIT32(q->index);
+			terminal_set = true;
+			break;
+		}
+		case RTE_FLOW_ACTION_TYPE_DROP:
+			action->reject_frame = true;
+			action->dma_ch_mask = 0;
+			terminal_set = true;
+			break;
+		default:
+			return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_ACTION, a,
+						  "action not supported");
+		}
+	}
+
+	if (!terminal_set)
+		return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ACTION_NUM, NULL,
+					  "no terminal action");
+
+	return 0;
+}
+
+static int
 xgmac_flow_validate_attr(const struct rte_flow_attr *attr, struct rte_flow_error *error)
 {
 	if (attr == NULL)
@@ -307,7 +364,7 @@ xgmac_flow_validate_attr(const struct rte_flow_attr *attr, struct rte_flow_error
 	return 0;
 }
 
-static __rte_unused void
+static void
 xgmac_flow_insert_sorted(struct xgmac_dev *dev, struct xgmac_flow *flow)
 {
 	struct xgmac_flow *cur;
@@ -329,12 +386,59 @@ xgmac_flow_insert_sorted(struct xgmac_dev *dev, struct xgmac_flow *flow)
 }
 
 static int
-xgmac_flow_validate(struct rte_eth_dev *eth_dev, const struct rte_flow_attr *attr,
-		    const struct rte_flow_item pattern[], const struct rte_flow_action actions[],
-		    struct rte_flow_error *error)
+xgmac_flow_reprogram_locked(struct xgmac_dev *dev, struct rte_flow_error *error)
 {
-	struct xgmac_dev *dev = eth_dev->data->dev_private;
-	struct xgmac_flow_pattern p;
+	struct xgmac_frp_flow_rule *rules;
+	struct xgmac_flow *f;
+	uint16_t nb = 0;
+	int ret;
+
+	TAILQ_FOREACH (f, &dev->flow_list, next)
+		nb++;
+
+	/* Empty list: turn the parser off so silicon returns to pre-FRP behaviour. */
+	if (nb == 0) {
+		ret = xgmac_frp_enable(dev, false);
+		if (ret)
+			return rte_flow_error_set(error, -ret, RTE_FLOW_ERROR_TYPE_UNSPECIFIED,
+						  NULL, "failed to disable FRP parser");
+		return 0;
+	}
+
+	rules = rte_calloc("xgmac_flow_rules", nb, sizeof(*rules), 0);
+	if (rules == NULL)
+		return rte_flow_error_set(error, ENOMEM, RTE_FLOW_ERROR_TYPE_UNSPECIFIED, NULL,
+					  "rule buffer allocation failed");
+
+	nb = 0;
+	TAILQ_FOREACH (f, &dev->flow_list, next) {
+		rules[nb].byte_offset = f->byte_offset;
+		rules[nb].match_value = f->buf;
+		rules[nb].match_mask = f->mask;
+		rules[nb].match_size = f->match_size;
+		rules[nb].action = f->action;
+		nb++;
+	}
+
+	ret = xgmac_frp_program_rules(dev, rules, nb);
+	rte_free(rules);
+	if (ret) {
+		/* HW table may be partially written; disable parser as fail-safe. */
+		(void)xgmac_frp_enable(dev, false);
+		return rte_flow_error_set(error, -ret, RTE_FLOW_ERROR_TYPE_UNSPECIFIED, NULL,
+					  "FRP rule programming failed");
+	}
+
+	return 0;
+}
+
+/* Single source of truth for what the driver accepts; both validate and create call this. */
+static int
+xgmac_flow_compile(struct xgmac_dev *dev, const struct rte_flow_attr *attr,
+		   const struct rte_flow_item pattern[], const struct rte_flow_action actions[],
+		   struct xgmac_flow_pattern *p, struct xgmac_frp_action *act,
+		   struct rte_flow_error *error)
+{
 	int ret;
 
 	ret = xgmac_flow_validate_attr(attr, error);
@@ -344,22 +448,29 @@ xgmac_flow_validate(struct rte_eth_dev *eth_dev, const struct rte_flow_attr *att
 	if (pattern == NULL)
 		return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM_NUM, NULL,
 					  "NULL pattern");
-	if (actions == NULL)
-		return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ACTION_NUM, NULL,
-					  "NULL action list");
 
-	ret = xgmac_flow_compile_pattern(pattern, &p, error);
+	ret = xgmac_flow_compile_pattern(pattern, p, error);
 	if (ret)
 		return ret;
 
 	/* Patterns must fit inside the HW parse window. */
-	if (p.match_size > dev->hw_feat.frp_parse_buf_size)
+	if (p->match_size > dev->hw_feat.frp_parse_buf_size)
 		return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_ITEM, NULL,
 					  "match span exceeds FRP parse window");
 
-	/* Action compilation lands in the next stepped commit. */
-	return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_ACTION, NULL,
-				  "actions not yet supported");
+	return xgmac_flow_compile_action(dev, actions, act, error);
+}
+
+static int
+xgmac_flow_validate(struct rte_eth_dev *eth_dev, const struct rte_flow_attr *attr,
+		    const struct rte_flow_item pattern[], const struct rte_flow_action actions[],
+		    struct rte_flow_error *error)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	struct xgmac_flow_pattern p;
+	struct xgmac_frp_action act;
+
+	return xgmac_flow_compile(dev, attr, pattern, actions, &p, &act, error);
 }
 
 static struct rte_flow *
@@ -367,33 +478,109 @@ xgmac_flow_create(struct rte_eth_dev *eth_dev, const struct rte_flow_attr *attr,
 		  const struct rte_flow_item pattern[], const struct rte_flow_action actions[],
 		  struct rte_flow_error *error)
 {
-	RTE_SET_USED(eth_dev);
-	RTE_SET_USED(attr);
-	RTE_SET_USED(pattern);
-	RTE_SET_USED(actions);
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	struct xgmac_flow_pattern p;
+	struct xgmac_frp_action act;
+	struct xgmac_flow *flow;
+	int ret;
 
-	rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_UNSPECIFIED, NULL,
-			   "flow create not yet implemented");
-	return NULL;
+	if (xgmac_flow_compile(dev, attr, pattern, actions, &p, &act, error))
+		return NULL;
+
+	flow = rte_zmalloc("xgmac_flow", sizeof(*flow), 0);
+	if (flow == NULL) {
+		rte_flow_error_set(error, ENOMEM, RTE_FLOW_ERROR_TYPE_UNSPECIFIED, NULL,
+				   "flow allocation failed");
+		return NULL;
+	}
+
+	flow->priority = attr->priority;
+	flow->byte_offset = 0;
+	flow->match_size = p.match_size;
+	memcpy(flow->buf, p.buf, p.match_size);
+	memcpy(flow->mask, p.mask, p.match_size);
+	flow->action = act;
+
+	rte_spinlock_lock(&dev->flow_lock);
+	xgmac_flow_insert_sorted(dev, flow);
+
+	ret = xgmac_flow_reprogram_locked(dev, error);
+	if (ret) {
+		struct rte_flow_error restore_err = {0};
+
+		TAILQ_REMOVE(&dev->flow_list, flow, next);
+		/* Restore the previous rules. */
+		xgmac_flow_reprogram_locked(dev, &restore_err);
+		rte_spinlock_unlock(&dev->flow_lock);
+		rte_free(flow);
+		return NULL;
+	}
+	rte_spinlock_unlock(&dev->flow_lock);
+
+	return (struct rte_flow *)flow;
 }
 
 static int
 xgmac_flow_destroy(struct rte_eth_dev *eth_dev, struct rte_flow *flow, struct rte_flow_error *error)
 {
-	RTE_SET_USED(eth_dev);
-	RTE_SET_USED(flow);
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	struct xgmac_flow *xf = (struct xgmac_flow *)flow;
+	struct xgmac_flow *cur;
+	int ret;
 
-	return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_HANDLE, NULL,
-				  "flow destroy not yet implemented");
+	if (xf == NULL)
+		return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_HANDLE, NULL,
+					  "NULL handle");
+
+	rte_spinlock_lock(&dev->flow_lock);
+	TAILQ_FOREACH (cur, &dev->flow_list, next) {
+		if (cur == xf)
+			break;
+	}
+	if (cur == NULL) {
+		rte_spinlock_unlock(&dev->flow_lock);
+		return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_HANDLE, flow,
+					  "unknown flow handle");
+	}
+
+	TAILQ_REMOVE(&dev->flow_list, xf, next);
+	ret = xgmac_flow_reprogram_locked(dev, error);
+	rte_spinlock_unlock(&dev->flow_lock);
+
+	rte_free(xf);
+	return ret;
 }
 
 static int
 xgmac_flow_flush(struct rte_eth_dev *eth_dev, struct rte_flow_error *error)
 {
-	RTE_SET_USED(eth_dev);
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	struct xgmac_flow *flow;
+	int ret;
 
-	return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_UNSPECIFIED, NULL,
-				  "flow flush not yet implemented");
+	rte_spinlock_lock(&dev->flow_lock);
+
+	ret = xgmac_frp_enable(dev, false);
+	if (ret) {
+		rte_spinlock_unlock(&dev->flow_lock);
+		return rte_flow_error_set(error, -ret, RTE_FLOW_ERROR_TYPE_UNSPECIFIED, NULL,
+					  "failed to disable FRP parser");
+	}
+
+	ret = xgmac_frp_table_flush(dev);
+	if (ret) {
+		rte_spinlock_unlock(&dev->flow_lock);
+		return rte_flow_error_set(error, -ret, RTE_FLOW_ERROR_TYPE_UNSPECIFIED, NULL,
+					  "failed to flush FRP table");
+	}
+
+	while ((flow = TAILQ_FIRST(&dev->flow_list)) != NULL) {
+		TAILQ_REMOVE(&dev->flow_list, flow, next);
+		rte_free(flow);
+	}
+
+	rte_spinlock_unlock(&dev->flow_lock);
+	return 0;
 }
 
 static int

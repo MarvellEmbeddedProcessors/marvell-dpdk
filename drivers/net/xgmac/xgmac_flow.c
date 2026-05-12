@@ -321,6 +321,12 @@ xgmac_flow_compile_action(struct xgmac_dev *dev, const struct rte_flow_action ac
 			action->dma_ch_mask = 0;
 			terminal_set = true;
 			break;
+		case RTE_FLOW_ACTION_TYPE_PASSTHRU:
+			action->accept_frame = true;
+			action->reject_frame = true;
+			action->dma_ch_mask = 0;
+			terminal_set = true;
+			break;
 		default:
 			return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_ACTION, a,
 						  "action not supported");

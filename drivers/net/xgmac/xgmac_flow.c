@@ -195,6 +195,186 @@ xgmac_flow_compile_vlan(const struct rte_flow_item *item, struct xgmac_flow_patt
 	return 0;
 }
 
+static int
+xgmac_flow_compile_ipv4(const struct rte_flow_item *item, struct xgmac_flow_pattern *p,
+			enum xgmac_flow_stage stage, struct rte_flow_error *error)
+{
+	const rte_be16_t etype_v = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
+	const rte_be16_t etype_m = rte_cpu_to_be_16(0xFFFF);
+	const struct rte_flow_item_ipv4 *spec = item->spec;
+	const struct rte_flow_item_ipv4 *mask = item->mask;
+	int ret;
+
+	RTE_SET_USED(stage);
+
+	/* Anchor the preceding L2 ether_type to IPv4. If ETH/VLAN already pinned it to a
+	 * different value the overlap check in xgmac_flow_pattern_lay() will reject the rule.
+	 */
+	ret = xgmac_flow_pattern_lay(p, p->l3_base_off - sizeof(rte_be16_t), &etype_v, &etype_m,
+				     sizeof(rte_be16_t), item, error);
+	if (ret)
+		return ret;
+
+	if (spec == NULL && mask == NULL)
+		return 0;
+
+	if (spec == NULL)
+		return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM_SPEC, item,
+					  "IPv4 mask without spec");
+
+	if (mask == NULL)
+		mask = &rte_flow_item_ipv4_mask;
+
+	/* L4 offset downstream assumes version=4, IHL=5 (i.e. version_ihl=0x45). */
+	if (mask->hdr.version_ihl != 0) {
+		const uint8_t expected = 0x45;
+
+		if ((spec->hdr.version_ihl & mask->hdr.version_ihl) !=
+		    (expected & mask->hdr.version_ihl))
+			return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_ITEM_MASK,
+						  item, "only IPv4 version=4, IHL=5 supported");
+
+		ret = xgmac_flow_pattern_lay(
+			p, p->l3_base_off + offsetof(struct rte_ipv4_hdr, version_ihl),
+			&spec->hdr.version_ihl, &mask->hdr.version_ihl, sizeof(uint8_t), item,
+			error);
+		if (ret)
+			return ret;
+	}
+
+	if (mask->hdr.total_length != 0 || mask->hdr.packet_id != 0 ||
+	    mask->hdr.time_to_live != 0 || mask->hdr.hdr_checksum != 0)
+		return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_ITEM_MASK, item,
+					  "matching IPv4 total_length/packet_id/ttl/hdr_checksum"
+					  " not supported");
+
+	if (mask->hdr.fragment_offset != 0) {
+		ret = xgmac_flow_pattern_lay(
+			p, p->l3_base_off + offsetof(struct rte_ipv4_hdr, fragment_offset),
+			&spec->hdr.fragment_offset, &mask->hdr.fragment_offset, sizeof(rte_be16_t),
+			item, error);
+		if (ret)
+			return ret;
+	}
+
+	if (mask->hdr.type_of_service != 0) {
+		ret = xgmac_flow_pattern_lay(
+			p, p->l3_base_off + offsetof(struct rte_ipv4_hdr, type_of_service),
+			&spec->hdr.type_of_service, &mask->hdr.type_of_service, sizeof(uint8_t),
+			item, error);
+		if (ret)
+			return ret;
+	}
+
+	if (mask->hdr.next_proto_id != 0) {
+		ret = xgmac_flow_pattern_lay(
+			p, p->l3_base_off + offsetof(struct rte_ipv4_hdr, next_proto_id),
+			&spec->hdr.next_proto_id, &mask->hdr.next_proto_id, sizeof(uint8_t), item,
+			error);
+		if (ret)
+			return ret;
+	}
+
+	if (mask->hdr.src_addr != 0) {
+		ret = xgmac_flow_pattern_lay(
+			p, p->l3_base_off + offsetof(struct rte_ipv4_hdr, src_addr),
+			&spec->hdr.src_addr, &mask->hdr.src_addr, sizeof(rte_be32_t), item, error);
+		if (ret)
+			return ret;
+	}
+
+	if (mask->hdr.dst_addr != 0) {
+		ret = xgmac_flow_pattern_lay(
+			p, p->l3_base_off + offsetof(struct rte_ipv4_hdr, dst_addr),
+			&spec->hdr.dst_addr, &mask->hdr.dst_addr, sizeof(rte_be32_t), item, error);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int
+xgmac_flow_compile_ipv6(const struct rte_flow_item *item, struct xgmac_flow_pattern *p,
+			enum xgmac_flow_stage stage, struct rte_flow_error *error)
+{
+	const rte_be16_t etype_v = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV6);
+	const rte_be16_t etype_m = rte_cpu_to_be_16(0xFFFF);
+	const struct rte_flow_item_ipv6 *spec = item->spec;
+	const struct rte_flow_item_ipv6 *mask = item->mask;
+	int ret;
+
+	RTE_SET_USED(stage);
+
+	ret = xgmac_flow_pattern_lay(p, p->l3_base_off - sizeof(rte_be16_t), &etype_v, &etype_m,
+				     sizeof(rte_be16_t), item, error);
+	if (ret)
+		return ret;
+
+	if (spec == NULL && mask == NULL)
+		return 0;
+
+	if (spec == NULL)
+		return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM_SPEC, item,
+					  "IPv6 mask without spec");
+
+	if (mask == NULL)
+		mask = &rte_flow_item_ipv6_mask;
+
+	if (mask->has_hop_ext || mask->has_route_ext || mask->has_frag_ext || mask->has_auth_ext ||
+	    mask->has_esp_ext || mask->has_dest_ext || mask->has_mobil_ext || mask->has_hip_ext ||
+	    mask->has_shim6_ext)
+		return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_ITEM, item,
+					  "matching IPv6 extension headers not supported");
+
+	if (mask->hdr.payload_len != 0 || mask->hdr.hop_limits != 0)
+		return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_ITEM_MASK, item,
+					  "matching IPv6 payload_len/hop_limits not supported");
+
+	/* vtc_flow holds [version:4 | traffic_class:8 | flow_label:20] in network order. */
+	if (mask->hdr.vtc_flow != 0) {
+		const rte_be32_t expected = rte_cpu_to_be_32(0x60000000); /* version=6 */
+		const rte_be32_t version_mask = rte_cpu_to_be_32(0xf0000000);
+
+		if ((spec->hdr.vtc_flow & mask->hdr.vtc_flow & version_mask) !=
+		    (expected & mask->hdr.vtc_flow & version_mask))
+			return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_ITEM_MASK,
+						  item, "only IPv6 version=6 supported");
+
+		ret = xgmac_flow_pattern_lay(
+			p, p->l3_base_off + offsetof(struct rte_ipv6_hdr, vtc_flow),
+			&spec->hdr.vtc_flow, &mask->hdr.vtc_flow, sizeof(rte_be32_t), item, error);
+		if (ret)
+			return ret;
+	}
+
+	if (mask->hdr.proto != 0) {
+		ret = xgmac_flow_pattern_lay(
+			p, p->l3_base_off + offsetof(struct rte_ipv6_hdr, proto), &spec->hdr.proto,
+			&mask->hdr.proto, sizeof(uint8_t), item, error);
+		if (ret)
+			return ret;
+	}
+
+	if (!rte_ipv6_addr_is_unspec(&mask->hdr.src_addr)) {
+		ret = xgmac_flow_pattern_lay(
+			p, p->l3_base_off + offsetof(struct rte_ipv6_hdr, src_addr),
+			&spec->hdr.src_addr, &mask->hdr.src_addr, RTE_IPV6_ADDR_SIZE, item, error);
+		if (ret)
+			return ret;
+	}
+
+	if (!rte_ipv6_addr_is_unspec(&mask->hdr.dst_addr)) {
+		ret = xgmac_flow_pattern_lay(
+			p, p->l3_base_off + offsetof(struct rte_ipv6_hdr, dst_addr),
+			&spec->hdr.dst_addr, &mask->hdr.dst_addr, RTE_IPV6_ADDR_SIZE, item, error);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 /* allowed_stages picks which input stages dispatch here; next_stage is the post-compile stage. */
 struct xgmac_flow_item_handler {
 	enum rte_flow_item_type type;
@@ -205,15 +385,22 @@ struct xgmac_flow_item_handler {
 };
 
 static const struct xgmac_flow_item_handler xgmac_flow_item_handlers[] = {
-	{ RTE_FLOW_ITEM_TYPE_ETH,
-	  XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L2),
-	  XGMAC_FLOW_STAGE_L2_VLAN_OUTER, xgmac_flow_compile_eth },
-	{ RTE_FLOW_ITEM_TYPE_VLAN,
-	  XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L2_VLAN_OUTER),
-	  XGMAC_FLOW_STAGE_L2_VLAN_INNER, xgmac_flow_compile_vlan },
-	{ RTE_FLOW_ITEM_TYPE_VLAN,
-	  XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L2_VLAN_INNER),
-	  XGMAC_FLOW_STAGE_L3, xgmac_flow_compile_vlan },
+	{RTE_FLOW_ITEM_TYPE_ETH, XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L2),
+	 XGMAC_FLOW_STAGE_L2_VLAN_OUTER, xgmac_flow_compile_eth},
+	{RTE_FLOW_ITEM_TYPE_VLAN, XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L2_VLAN_OUTER),
+	 XGMAC_FLOW_STAGE_L2_VLAN_INNER, xgmac_flow_compile_vlan},
+	{RTE_FLOW_ITEM_TYPE_VLAN, XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L2_VLAN_INNER),
+	 XGMAC_FLOW_STAGE_L3, xgmac_flow_compile_vlan},
+	{RTE_FLOW_ITEM_TYPE_IPV4,
+	 XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L2_VLAN_OUTER) |
+		 XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L2_VLAN_INNER) |
+		 XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L3),
+	 XGMAC_FLOW_STAGE_L4, xgmac_flow_compile_ipv4},
+	{RTE_FLOW_ITEM_TYPE_IPV6,
+	 XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L2_VLAN_OUTER) |
+		 XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L2_VLAN_INNER) |
+		 XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L3),
+	 XGMAC_FLOW_STAGE_L4, xgmac_flow_compile_ipv6},
 };
 
 static const struct xgmac_flow_item_handler *

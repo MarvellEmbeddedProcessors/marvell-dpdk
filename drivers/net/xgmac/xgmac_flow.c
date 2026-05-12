@@ -15,6 +15,8 @@
 #include <rte_flow_driver.h>
 #include <rte_ip.h>
 #include <rte_malloc.h>
+#include <rte_tcp.h>
+#include <rte_udp.h>
 
 #include "xgmac_ethdev.h"
 #include "xgmac_flow.h"
@@ -32,6 +34,8 @@ enum xgmac_flow_stage {
 
 struct xgmac_flow_pattern {
 	uint8_t l3_base_off; /* 14 untagged, 18 single-tag, 22 QinQ */
+	uint8_t l3_proto_off; /* byte offset of the L3 next-proto field */
+	uint8_t l4_base_off;  /* l3_base_off + fixed L3 header size */
 	uint8_t match_size;
 	uint8_t buf[XGMAC_FLOW_MATCH_BUF_SZ];
 	uint8_t mask[XGMAC_FLOW_MATCH_BUF_SZ];
@@ -215,6 +219,10 @@ xgmac_flow_compile_ipv4(const struct rte_flow_item *item, struct xgmac_flow_patt
 	if (ret)
 		return ret;
 
+	/* L4 offset in the UDP/TCP handlers assumes a fixed 20-byte IPv4 header. */
+	p->l3_proto_off = p->l3_base_off + offsetof(struct rte_ipv4_hdr, next_proto_id);
+	p->l4_base_off = p->l3_base_off + sizeof(struct rte_ipv4_hdr);
+
 	if (spec == NULL && mask == NULL)
 		return 0;
 
@@ -311,6 +319,10 @@ xgmac_flow_compile_ipv6(const struct rte_flow_item *item, struct xgmac_flow_patt
 	if (ret)
 		return ret;
 
+	/* L4 offset in the UDP/TCP handlers assumes a fixed 40-byte IPv6 header. */
+	p->l3_proto_off = p->l3_base_off + offsetof(struct rte_ipv6_hdr, proto);
+	p->l4_base_off = p->l3_base_off + sizeof(struct rte_ipv6_hdr);
+
 	if (spec == NULL && mask == NULL)
 		return 0;
 
@@ -375,6 +387,118 @@ xgmac_flow_compile_ipv6(const struct rte_flow_item *item, struct xgmac_flow_patt
 	return 0;
 }
 
+static int
+xgmac_flow_compile_udp(const struct rte_flow_item *item, struct xgmac_flow_pattern *p,
+		       enum xgmac_flow_stage stage, struct rte_flow_error *error)
+{
+	const uint8_t proto_v = IPPROTO_UDP;
+	const uint8_t proto_m = 0xFF;
+	const struct rte_flow_item_udp *spec = item->spec;
+	const struct rte_flow_item_udp *mask = item->mask;
+	int ret;
+
+	RTE_SET_USED(stage);
+
+	/* Require the preceding L3 header's next-protocol byte to declare UDP. */
+	ret = xgmac_flow_pattern_lay(p, p->l3_proto_off, &proto_v, &proto_m, sizeof(uint8_t), item,
+				     error);
+	if (ret)
+		return ret;
+
+	if (spec == NULL && mask == NULL)
+		return 0;
+
+	if (spec == NULL)
+		return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM_SPEC, item,
+					  "UDP mask without spec");
+
+	if (mask == NULL)
+		mask = &rte_flow_item_udp_mask;
+
+	if (mask->hdr.dgram_len != 0 || mask->hdr.dgram_cksum != 0)
+		return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_ITEM_MASK, item,
+					  "matching UDP dgram_len/dgram_cksum not supported");
+
+	if (mask->hdr.src_port != 0) {
+		ret = xgmac_flow_pattern_lay(
+			p, p->l4_base_off + offsetof(struct rte_udp_hdr, src_port),
+			&spec->hdr.src_port, &mask->hdr.src_port, sizeof(rte_be16_t), item, error);
+		if (ret)
+			return ret;
+	}
+
+	if (mask->hdr.dst_port != 0) {
+		ret = xgmac_flow_pattern_lay(
+			p, p->l4_base_off + offsetof(struct rte_udp_hdr, dst_port),
+			&spec->hdr.dst_port, &mask->hdr.dst_port, sizeof(rte_be16_t), item, error);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int
+xgmac_flow_compile_tcp(const struct rte_flow_item *item, struct xgmac_flow_pattern *p,
+		       enum xgmac_flow_stage stage, struct rte_flow_error *error)
+{
+	const uint8_t proto_v = IPPROTO_TCP;
+	const uint8_t proto_m = 0xFF;
+	const struct rte_flow_item_tcp *spec = item->spec;
+	const struct rte_flow_item_tcp *mask = item->mask;
+	int ret;
+
+	RTE_SET_USED(stage);
+
+	/* Require the preceding L3 header's next-protocol byte to declare TCP. */
+	ret = xgmac_flow_pattern_lay(p, p->l3_proto_off, &proto_v, &proto_m, sizeof(uint8_t), item,
+				     error);
+	if (ret)
+		return ret;
+
+	if (spec == NULL && mask == NULL)
+		return 0;
+
+	if (spec == NULL)
+		return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM_SPEC, item,
+					  "TCP mask without spec");
+
+	if (mask == NULL)
+		mask = &rte_flow_item_tcp_mask;
+
+	if (mask->hdr.sent_seq != 0 || mask->hdr.recv_ack != 0 || mask->hdr.data_off != 0 ||
+	    mask->hdr.rx_win != 0 || mask->hdr.cksum != 0 || mask->hdr.tcp_urp != 0)
+		return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_ITEM_MASK, item,
+					  "matching TCP sent_seq/recv_ack/data_off/rx_win"
+					  "/cksum/tcp_urp not supported");
+
+	if (mask->hdr.src_port != 0) {
+		ret = xgmac_flow_pattern_lay(
+			p, p->l4_base_off + offsetof(struct rte_tcp_hdr, src_port),
+			&spec->hdr.src_port, &mask->hdr.src_port, sizeof(rte_be16_t), item, error);
+		if (ret)
+			return ret;
+	}
+
+	if (mask->hdr.dst_port != 0) {
+		ret = xgmac_flow_pattern_lay(
+			p, p->l4_base_off + offsetof(struct rte_tcp_hdr, dst_port),
+			&spec->hdr.dst_port, &mask->hdr.dst_port, sizeof(rte_be16_t), item, error);
+		if (ret)
+			return ret;
+	}
+
+	if (mask->hdr.tcp_flags != 0) {
+		ret = xgmac_flow_pattern_lay(
+			p, p->l4_base_off + offsetof(struct rte_tcp_hdr, tcp_flags),
+			&spec->hdr.tcp_flags, &mask->hdr.tcp_flags, sizeof(uint8_t), item, error);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 /* allowed_stages picks which input stages dispatch here; next_stage is the post-compile stage. */
 struct xgmac_flow_item_handler {
 	enum rte_flow_item_type type;
@@ -401,6 +525,10 @@ static const struct xgmac_flow_item_handler xgmac_flow_item_handlers[] = {
 		 XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L2_VLAN_INNER) |
 		 XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L3),
 	 XGMAC_FLOW_STAGE_L4, xgmac_flow_compile_ipv6},
+	{RTE_FLOW_ITEM_TYPE_UDP, XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L4), XGMAC_FLOW_STAGE_DONE,
+	 xgmac_flow_compile_udp},
+	{RTE_FLOW_ITEM_TYPE_TCP, XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L4), XGMAC_FLOW_STAGE_DONE,
+	 xgmac_flow_compile_tcp},
 };
 
 static const struct xgmac_flow_item_handler *

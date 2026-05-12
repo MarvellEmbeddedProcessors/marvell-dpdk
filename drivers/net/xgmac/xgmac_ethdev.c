@@ -473,13 +473,32 @@ xgmac_tx_queue_free(struct xgmac_tx_queue *txq)
 	rte_free(txq);
 }
 
+static void
+xgmac_flow_resources_free(struct xgmac_dev *dev)
+{
+	struct xgmac_flow *flow;
+
+	rte_spinlock_lock(&dev->flow_lock);
+	while ((flow = TAILQ_FIRST(&dev->flow_list)) != NULL) {
+		TAILQ_REMOVE(&dev->flow_list, flow, next);
+		rte_free(flow);
+	}
+
+	dev->flow_isolated = 0;
+	dev->flow_next_seq = 0;
+	rte_spinlock_unlock(&dev->flow_lock);
+}
+
 static int
 xgmac_dev_close(struct rte_eth_dev *eth_dev)
 {
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
 	uint16_t i;
 
 	if (eth_dev->data->dev_started)
 		xgmac_dev_stop(eth_dev);
+
+	xgmac_flow_resources_free(dev);
 
 	for (i = 0; i < eth_dev->data->nb_rx_queues; i++) {
 		xgmac_rx_queue_free(eth_dev->data->rx_queues[i]);

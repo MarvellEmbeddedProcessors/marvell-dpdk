@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -12,6 +13,7 @@
 #include <rte_ether.h>
 #include <rte_flow.h>
 #include <rte_flow_driver.h>
+#include <rte_ip.h>
 #include <rte_malloc.h>
 
 #include "xgmac_ethdev.h"
@@ -661,6 +663,24 @@ xgmac_flow_isolate(struct rte_eth_dev *eth_dev, int set, struct rte_flow_error *
 
 	rte_spinlock_unlock(&dev->flow_lock);
 	return 0;
+}
+
+void
+xgmac_flow_restore(struct xgmac_dev *dev)
+{
+	struct rte_flow_error err = {0};
+	int ret;
+
+	if (!dev->hw_feat.frp)
+		return;
+
+	rte_spinlock_lock(&dev->flow_lock);
+	ret = xgmac_flow_reprogram_locked(dev, &err);
+	rte_spinlock_unlock(&dev->flow_lock);
+
+	if (ret)
+		XGMAC_LOG(WARNING, "failed to restore FRP flows on start: %s",
+			  err.message ? err.message : "");
 }
 
 static const struct rte_flow_ops xgmac_flow_ops = {

@@ -329,6 +329,9 @@ xgmac_dev_start(struct rte_eth_dev *eth_dev)
 	if (ret)
 		goto timestamp_disable;
 
+	/* Restore flows that were added before the device was started, if any. */
+	xgmac_flow_restore(dev);
+
 	xgmac_mmc_init(dev);
 
 	dev->rx_buf_size = 0;

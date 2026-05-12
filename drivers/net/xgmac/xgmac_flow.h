@@ -47,4 +47,7 @@ struct xgmac_flow {
 /* eth_dev_ops.flow_ops_get hook. */
 int xgmac_flow_ops_get(struct rte_eth_dev *eth_dev, const struct rte_flow_ops **ops);
 
+/* Replay the SW flow list onto the freshly-initialised FRP HW. */
+void xgmac_flow_restore(struct xgmac_dev *dev);
+
 #endif /* __XGMAC_FLOW_H__ */

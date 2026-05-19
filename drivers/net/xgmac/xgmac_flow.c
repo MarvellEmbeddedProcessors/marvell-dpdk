@@ -23,14 +23,23 @@
 
 enum xgmac_flow_stage {
 	XGMAC_FLOW_STAGE_L2 = 0,	/* expect ETH               */
-	XGMAC_FLOW_STAGE_L2_VLAN_OUTER,	/* ETH consumed             */
-	XGMAC_FLOW_STAGE_L2_VLAN_INNER,	/* ETH + 1 VLAN consumed    */
+	XGMAC_FLOW_STAGE_L2_VLAN_OUTER, /* ETH consumed             */
+	XGMAC_FLOW_STAGE_L2_VLAN_INNER, /* ETH + 1 VLAN consumed    */
 	XGMAC_FLOW_STAGE_L3,		/* L3 only (post-QinQ etc.) */
-	XGMAC_FLOW_STAGE_L4,
-	XGMAC_FLOW_STAGE_DONE,
+	XGMAC_FLOW_STAGE_L4,		/* L4 only                  */
+	XGMAC_FLOW_STAGE_SAME,		/* Keep the current stage (e.g. RAW) */
+	XGMAC_FLOW_STAGE_DONE,		/* Terminal stage */
 };
 
 #define XGMAC_FLOW_STAGE_BIT(s) ((uint32_t)1 << (s))
+
+/* Stage mask matching every "real" protocol stage. Used by stage-agnostic items like RAW. */
+#define XGMAC_FLOW_STAGE_ANY                                                                       \
+	(XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L2) |                                               \
+	 XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L2_VLAN_OUTER) |                                    \
+	 XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L2_VLAN_INNER) |                                    \
+	 XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L3) | XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L4) |   \
+	 XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_DONE))
 
 struct xgmac_flow_pattern {
 	uint8_t l3_base_off; /* 14 untagged, 18 single-tag, 22 QinQ */
@@ -499,6 +508,57 @@ xgmac_flow_compile_tcp(const struct rte_flow_item *item, struct xgmac_flow_patte
 	return 0;
 }
 
+static int
+xgmac_flow_compile_raw(const struct rte_flow_item *item, struct xgmac_flow_pattern *p,
+		       enum xgmac_flow_stage stage, struct rte_flow_error *error)
+{
+	const struct rte_flow_item_raw *spec = item->spec;
+	const struct rte_flow_item_raw *mask = item->mask;
+	uint8_t default_mask[XGMAC_FLOW_MATCH_BUF_SZ];
+	const uint8_t *pattern_mask;
+
+	RTE_SET_USED(stage);
+
+	if (spec == NULL)
+		return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM_SPEC, item,
+					  "RAW item requires spec");
+
+	/* FRP matches at fixed byte offsets only, no relative anchoring or search. */
+	if (spec->relative || spec->search || spec->limit != 0)
+		return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_ITEM_SPEC, item,
+					  "RAW relative/search/limit not supported");
+
+	if (spec->reserved != 0)
+		return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM_SPEC, item,
+					  "RAW reserved field must be zero");
+
+	if (spec->offset < 0)
+		return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_ITEM_SPEC, item,
+					  "RAW negative offset not supported");
+
+	if (spec->length == 0 || spec->pattern == NULL)
+		return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM_SPEC, item,
+					  "RAW length/pattern must be non-zero");
+
+	if (mask != NULL && mask->pattern != NULL) {
+		/* The mask buffer is read for spec->length bytes; it must be at least that long. */
+		if (mask->length < spec->length)
+			return rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM_MASK,
+						  item, "RAW mask shorter than pattern");
+		pattern_mask = mask->pattern;
+	} else {
+		memset(default_mask, 0xFF, sizeof(default_mask));
+		pattern_mask = default_mask;
+	}
+
+	if ((uint32_t)spec->offset + spec->length > XGMAC_FLOW_MATCH_BUF_SZ)
+		return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_ITEM, item,
+					  "RAW match span exceeds driver buffer");
+
+	return xgmac_flow_pattern_lay(p, (uint16_t)spec->offset, spec->pattern, pattern_mask,
+				      (uint16_t)spec->length, item, error);
+}
+
 /* allowed_stages picks which input stages dispatch here; next_stage is the post-compile stage. */
 struct xgmac_flow_item_handler {
 	enum rte_flow_item_type type;
@@ -529,6 +589,8 @@ static const struct xgmac_flow_item_handler xgmac_flow_item_handlers[] = {
 	 xgmac_flow_compile_udp},
 	{RTE_FLOW_ITEM_TYPE_TCP, XGMAC_FLOW_STAGE_BIT(XGMAC_FLOW_STAGE_L4), XGMAC_FLOW_STAGE_DONE,
 	 xgmac_flow_compile_tcp},
+	{RTE_FLOW_ITEM_TYPE_RAW, XGMAC_FLOW_STAGE_ANY, XGMAC_FLOW_STAGE_SAME,
+	 xgmac_flow_compile_raw},
 };
 
 static const struct xgmac_flow_item_handler *
@@ -589,7 +651,8 @@ xgmac_flow_compile_pattern(const struct rte_flow_item pattern[], struct xgmac_fl
 		ret = h->compile(item, p, stage, error);
 		if (ret)
 			return ret;
-		stage = h->next_stage;
+		if (h->next_stage != XGMAC_FLOW_STAGE_SAME)
+			stage = h->next_stage;
 	}
 
 	return 0;
@@ -800,6 +863,16 @@ xgmac_flow_compile(struct xgmac_dev *dev, const struct rte_flow_attr *attr,
 	ret = xgmac_flow_compile_pattern(pattern, p, error);
 	if (ret)
 		return ret;
+
+	/*
+	 * An empty pattern such as "eth / end" is a valid match-all; synthesise a
+	 * 1-byte zero-mask always-true match so it programs as a match-all rule.
+	 */
+	if (p->match_size == 0) {
+		p->buf[0] = 0;
+		p->mask[0] = 0;
+		p->match_size = 1;
+	}
 
 	/* Patterns must fit inside the HW parse window. */
 	if (p->match_size > dev->hw_feat.frp_parse_buf_size)

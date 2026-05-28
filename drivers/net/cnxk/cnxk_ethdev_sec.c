@@ -674,6 +674,39 @@ rte_pmd_cnxk_hw_inline_inb_cfg_set(uint16_t portid, struct rte_pmd_cnxk_ipsec_in
 	dev->nix.inb_cfg_param2 = cfg->param2;
 }
 
+RTE_EXPORT_EXPERIMENTAL_SYMBOL(rte_pmd_cnxk_nix_inl_ipsec_vlan_cfg, 25.11)
+int
+rte_pmd_cnxk_nix_inl_ipsec_vlan_cfg(uint16_t portid, uint8_t pcp_qsel[8])
+{
+	struct rte_eth_dev *eth_dev;
+	struct cnxk_eth_dev *dev;
+	int rc;
+
+	if (!pcp_qsel) {
+		plt_err("pcp_qsel array is NULL");
+		return -EINVAL;
+	}
+
+	if (!rte_eth_dev_is_valid_port(portid)) {
+		plt_err("Invalid port %u", portid);
+		return -EINVAL;
+	}
+
+	if (!roc_feature_nix_has_inl_multi_queue()) {
+		plt_err("Inline multi-queue feature not supported");
+		return -ENOTSUP;
+	}
+
+	eth_dev = &rte_eth_devices[portid];
+	dev = cnxk_eth_pmd_priv(eth_dev);
+
+	rc = roc_nix_inl_ipsec_vlan_cfg(&dev->nix, pcp_qsel);
+	if (rc)
+		plt_err("Failed to configure IPsec VLAN cfg: rc=%d", rc);
+
+	return rc;
+}
+
 static unsigned int
 cnxk_eth_sec_session_get_size(void *device __rte_unused)
 {
@@ -744,7 +777,7 @@ nix_inl_parse_devargs(struct rte_devargs *devargs,
 	uint32_t max_ipsec_rules = 0;
 	struct rte_kvargs *kvlist;
 	uint8_t custom_inb_sa = 0;
-	uint8_t nb_inl_inb_qs = 1;
+	uint32_t nb_inl_inb_qs = 1;
 	uint32_t nb_meta_bufs = 0;
 	uint32_t meta_buf_sz = 0;
 	uint8_t rx_inj_ena = 0;
@@ -777,7 +810,7 @@ nix_inl_parse_devargs(struct rte_devargs *devargs,
 	rte_kvargs_process(kvlist, CNXK_MAX_IPSEC_RULES, &parse_max_ipsec_rules, &max_ipsec_rules);
 	rte_kvargs_process(kvlist, CNXK_NIX_INL_RX_INJ_ENABLE, &parse_val_u8, &rx_inj_ena);
 	rte_kvargs_process(kvlist, CNXK_NIX_CUSTOM_INB_SA, &parse_val_u8, &custom_inb_sa);
-	rte_kvargs_process(kvlist, CNXK_NIX_NB_INL_INB_QS, &parse_val_u8, &nb_inl_inb_qs);
+	rte_kvargs_process(kvlist, CNXK_NIX_NB_INL_INB_QS, &parse_val_u32, &nb_inl_inb_qs);
 	rte_kvargs_process(kvlist, CNXK_NIX_INL_CPT_CQ_ENABLE, &parse_val_u8, &cpt_cq_enable);
 	rte_kvargs_free(kvlist);
 
@@ -795,8 +828,13 @@ null_devargs:
 	inl_dev->max_ipsec_rules = max_ipsec_rules;
 	if (roc_feature_nix_has_rx_inject())
 		inl_dev->rx_inj_ena = rx_inj_ena;
-	if (roc_feature_nix_has_inl_multi_queue())
+	if (roc_feature_nix_has_inl_multi_queue()) {
+		if (nb_inl_inb_qs > 16) {
+			plt_err("nb_inl_inb_qs=%u exceeds max supported (16)", nb_inl_inb_qs);
+			goto exit;
+		}
 		inl_dev->nb_inb_cptlfs = nb_inl_inb_qs;
+	}
 	inl_dev->custom_inb_sa = custom_inb_sa;
 	return 0;
 exit:

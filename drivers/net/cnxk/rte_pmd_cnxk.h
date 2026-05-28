@@ -47,6 +47,28 @@ enum rte_pmd_cnxk_sec_action_alg {
 	RTE_PMD_CNXK_SEC_ACTION_ALG4,
 };
 
+/** IPsec CPT queue selection algorithm.
+ * Determines how HW selects the CPT queue for inline IPsec.
+ */
+enum rte_pmd_cnxk_sec_ipsec_qsel {
+	/** Use default CPTQ (DEF_CPTQ from LF config) */
+	RTE_PMD_CNXK_SEC_IPSEC_QSEL_DEF_CPTQ = 0,
+	/** Use VTAG0 PCP for queue selection */
+	RTE_PMD_CNXK_SEC_IPSEC_QSEL_VTAG0_PCP = 1,
+	/** Use VTAG1 PCP for queue selection */
+	RTE_PMD_CNXK_SEC_IPSEC_QSEL_VTAG1_PCP = 2,
+	/** Use CPT queue index (ipsec_qidx) directly */
+	RTE_PMD_CNXK_SEC_IPSEC_QSEL_CPT_QUEUE = 3,
+	/** Inner IP DSCP, 1st configured map */
+	RTE_PMD_CNXK_SEC_IPSEC_QSEL_INNER_DSCP_MAP0 = 4,
+	/** Outer IP DSCP, 1st configured map */
+	RTE_PMD_CNXK_SEC_IPSEC_QSEL_OUTER_DSCP_MAP0 = 5,
+	/** Inner IP DSCP, 2nd configured map */
+	RTE_PMD_CNXK_SEC_IPSEC_QSEL_INNER_DSCP_MAP1 = 6,
+	/** Outer IP DSCP, 2nd configured map */
+	RTE_PMD_CNXK_SEC_IPSEC_QSEL_OUTER_DSCP_MAP1 = 7,
+};
+
 /** CPT queue type for obtaining queue hardware statistics. */
 enum rte_pmd_cnxk_cpt_q_stats_type {
 	/** Type to get Inline Device queue(s) statistics */
@@ -92,6 +114,8 @@ struct rte_pmd_cnxk_sec_action {
 	 * When false, use default IPsec profile (backward compatible).
 	 */
 	bool use_custom_profile;
+	/** IPsec CPT queue selection algorithm. */
+	enum rte_pmd_cnxk_sec_ipsec_qsel ipsec_qsel;
 };
 
 #define RTE_PMD_CNXK_CTX_MAX_CKEY_LEN	   32
@@ -1118,4 +1142,26 @@ int rte_pmd_cnxk_nix_inl_custom_profile_release(uint16_t portid,
  */
 __rte_experimental
 const char *rte_pmd_cnxk_model_str_get(void);
+
+/**
+ * Configure PCP-to-CPTQ mapping for inline IPsec queue selection.
+ *
+ * Programs NIX_AF_RX_IPSEC_VLAN_CFGX with the PCP-to-queue mapping and
+ * writes the allocated table index into VTAG_TYPE 0 and 1 registers'
+ * ipsec_qsel_alg field so HW can resolve the correct mapping table
+ * for both RTE_PMD_CNXK_SEC_IPSEC_QSEL_VTAG0_PCP and
+ * RTE_PMD_CNXK_SEC_IPSEC_QSEL_VTAG1_PCP.
+ *
+ * @param portid
+ *   Port identifier of the Ethernet device.
+ * @param pcp_qsel
+ *   Array of 8 bytes mapping PCP[0..7] to an inline inbound CPT queue index
+ *   (each value in the range 0..nb_inb_cptlfs-1).
+ *
+ * @return
+ *   0 on success, a negative errno value otherwise.
+ */
+__rte_experimental
+int rte_pmd_cnxk_nix_inl_ipsec_vlan_cfg(uint16_t portid, uint8_t pcp_qsel[8]);
+
 #endif /* _PMD_CNXK_H_ */

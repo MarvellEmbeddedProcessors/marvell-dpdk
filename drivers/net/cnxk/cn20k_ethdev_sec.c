@@ -920,9 +920,10 @@ cn20k_eth_sec_session_create(void *device, struct rte_security_session_conf *con
 		inb_sa_dptr->w1.s.cookie = ipsec->spi & spi_mask;
 
 		if (ipsec->options.stats == 1) {
-			/* Enable mib counters */
 			inb_sa_dptr->w0.s.count_mib_bytes = 1;
 			inb_sa_dptr->w0.s.count_mib_pkts = 1;
+			inb_sa_dptr->w0.s.count_glb_pkts = 1;
+			inb_sa_dptr->w0.s.count_glb_octets = 1;
 		}
 
 		/* Prepare session priv */
@@ -1190,9 +1191,10 @@ cn20k_eth_sec_session_update(void *device, struct rte_security_session *sess,
 		inb_sa_dptr->w1.s.cookie = inb_sa->w1.s.cookie;
 
 		if (ipsec->options.stats == 1) {
-			/* Enable mib counters */
 			inb_sa_dptr->w0.s.count_mib_bytes = 1;
 			inb_sa_dptr->w0.s.count_mib_pkts = 1;
+			inb_sa_dptr->w0.s.count_glb_pkts = 1;
+			inb_sa_dptr->w0.s.count_glb_octets = 1;
 		}
 
 		rc = roc_nix_inl_ctx_write(&dev->nix, inb_sa_dptr, eth_sec->sa, eth_sec->inb,

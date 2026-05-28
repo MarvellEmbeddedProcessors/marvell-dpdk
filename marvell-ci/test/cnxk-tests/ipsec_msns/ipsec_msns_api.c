@@ -64,6 +64,8 @@ enum test_mode {
 	CUSTOM_PROFILE_RTE_PMD_CNXK_API_TEST,
 	/* Custom profile with MSNS 1KB SA layout */
 	CUSTOM_PROFILE_RTE_PMD_CNXK_MSNS_TEST,
+	/* PCP-based CPT queue selection test (CN20K only) */
+	IPSEC_RTE_PMD_CNXK_PCP_QSEL_TEST,
 };
 
 static struct rte_mempool *mbufpool[RTE_MAX_ETHPORTS];
@@ -131,6 +133,7 @@ static struct lcore_cfg lcore_cfg[RTE_MAX_LCORE];
 static struct rte_flow *default_flow[RTE_MAX_ETHPORTS][RTE_PMD_CNXK_SEC_ACTION_ALG4 + 1];
 static struct rte_flow *default_flow_no_msns[RTE_MAX_ETHPORTS];
 static struct rte_flow *custom_flow[RTE_MAX_ETHPORTS];
+static struct rte_flow *pcp_qsel_flow[RTE_MAX_ETHPORTS];
 
 /* Example usage, max entries 4K */
 #define MAX_SA_SIZE (4 * 1024)
@@ -178,7 +181,8 @@ ipsec_test_mode_to_string(enum test_mode testmode)
 		return "CUSTOM_PROFILE_RTE_PMD_CNXK_API_TEST";
 	case CUSTOM_PROFILE_RTE_PMD_CNXK_MSNS_TEST:
 		return "CUSTOM_PROFILE_RTE_PMD_CNXK_MSNS_TEST";
-
+	case IPSEC_RTE_PMD_CNXK_PCP_QSEL_TEST:
+		return "IPSEC_RTE_PMD_CNXK_PCP_QSEL_TEST";
 	}
 	return NULL;
 }
@@ -617,6 +621,7 @@ print_usage(const char *name)
 		"\t\t\t1: IPSEC_RTE_PMD_CNXK_API_TEST\n"
 		"\t\t\t2: CUSTOM_PROFILE_RTE_PMD_CNXK_API_TEST\n"
 		"\t\t\t3: CUSTOM_PROFILE_RTE_PMD_CNXK_MSNS_TEST\n"
+		"\t\t\t4: IPSEC_RTE_PMD_CNXK_PCP_QSEL_TEST (CN20K)\n"
 		"\t[--portmask]	          Port mask to enable\n"
 		"\t[--nb-mbufs <count >]  MBUFs per packet pool\n"
 		"\t[--num-sas <count>]    Number of SA's to create\n"
@@ -2148,6 +2153,336 @@ destroy_default_flow(uint16_t port_id)
 }
 
 static int
+create_pcp_qsel_flow(uint16_t port_id, uint32_t spi, uint16_t sa_lo,
+		     uint16_t sa_hi)
+{
+	struct rte_pmd_cnxk_sec_action sec = {0};
+	struct rte_flow_item_esp mesp = {0};
+	struct rte_flow_item_esp esp = {0};
+	struct rte_flow_action action[2];
+	struct rte_flow_item pattern[2];
+	struct rte_flow_attr attr = {0};
+	struct rte_flow_error err;
+	struct rte_flow *flow;
+
+	pattern[0].type = RTE_FLOW_ITEM_TYPE_ESP;
+	pattern[0].spec = &esp;
+	pattern[0].mask = &mesp;
+	pattern[0].last = NULL;
+	pattern[1].type = RTE_FLOW_ITEM_TYPE_END;
+
+	sec.alg = RTE_PMD_CNXK_SEC_ACTION_ALG0;
+	sec.sa_xor = 1;
+	sec.sa_hi = sa_hi;
+	sec.sa_lo = sa_lo;
+	sec.ipsec_qsel = RTE_PMD_CNXK_SEC_IPSEC_QSEL_VTAG0_PCP;
+
+	action[0].type = RTE_FLOW_ACTION_TYPE_SECURITY;
+	action[0].conf = &sec;
+	action[1].type = RTE_FLOW_ACTION_TYPE_END;
+	action[1].conf = NULL;
+
+	esp.hdr.spi = RTE_BE32(spi);
+	mesp.hdr.spi = RTE_BE32(0xffffffff);
+	attr.ingress = 1;
+
+	flow = rte_flow_create(port_id, &attr, pattern, action, &err);
+	if (flow == NULL) {
+		printf("PCP qsel flow rule create failed\n");
+		return -1;
+	}
+
+	pcp_qsel_flow[port_id] = flow;
+	return 0;
+}
+
+static void
+destroy_pcp_qsel_flow(uint16_t port_id)
+{
+	struct rte_flow_error err;
+
+	if (!pcp_qsel_flow[port_id])
+		return;
+	rte_flow_destroy(port_id, pcp_qsel_flow[port_id], &err);
+	pcp_qsel_flow[port_id] = NULL;
+}
+
+#define VLAN_PCP_OFFSET 14
+
+static void
+set_vlan_pcp(struct ipsec_test_packet *pkt, uint8_t pcp)
+{
+	pkt->data[VLAN_PCP_OFFSET] = (pkt->data[VLAN_PCP_OFFSET] & 0x1f) | ((pcp & 0x7) << 5);
+}
+
+static int
+ut_ipsec_pcp_qsel_test(void)
+{
+	struct rte_security_session *out_ses = NULL, *in_ses = NULL;
+	struct rte_pmd_cnxk_cpt_q_stats stats_q0_before, stats_q1_before;
+	struct rte_pmd_cnxk_cpt_q_stats stats_q0_after, stats_q1_after;
+	uint32_t out_sa_index = 0, in_sa_index = 0;
+	struct rte_security_session_conf conf = {0};
+	struct rte_security_ctx *sec_ctx = NULL;
+	uint16_t lcore_id = rte_lcore_id();
+	struct ipsec_session_data sa_data;
+	struct ipsec_test_packet vlan_pkt;
+	uint16_t sa_hi = 0, sa_lo = 0;
+	unsigned int portid, nb_rx, j;
+	struct rte_mbuf *tx_pkts = NULL;
+	struct rte_mbuf *rx_pkts = NULL;
+	uint64_t q0_delta, q1_delta;
+	uint32_t spi, sa_index;
+	unsigned int nb_sent;
+	int ret = 0;
+
+	portid = lcore_cfg[lcore_id].portid;
+	sec_ctx = (struct rte_security_ctx *)rte_eth_dev_get_sec_ctx(portid);
+
+	out_sa_index =
+		cnxk_sa_index_alloc(portid, RTE_SECURITY_IPSEC_SA_DIR_EGRESS, 1);
+	in_sa_index =
+		cnxk_sa_index_alloc(portid, RTE_SECURITY_IPSEC_SA_DIR_INGRESS, 1);
+	sa_index = in_sa_index;
+	spi = (0x1 << 28 | in_sa_index);
+	sa_hi = (spi >> 16) & 0xffff;
+	sa_lo = 0x0;
+
+	printf("PCP QSEL: out_sa_index=%u in_sa_index=%u spi=0x%x\n",
+	       out_sa_index, in_sa_index, spi);
+
+	memcpy(&sa_data, sess_conf, sizeof(sa_data));
+	sa_data.ipsec_xform.spi = out_sa_index;
+	ret = create_inline_ipsec_session(&sa_data, portid, &out_ses,
+					  RTE_SECURITY_IPSEC_SA_DIR_EGRESS,
+					  RTE_SECURITY_IPSEC_TUNNEL_IPV4);
+	if (ret) {
+		printf("Failed to create outbound session\n");
+		goto out;
+	}
+	printf("Created Outbound session with sa_index = 0x%x\n",
+	       sa_data.ipsec_xform.spi);
+
+	sa_data.ipsec_xform.spi = spi;
+	sa_data.ipsec_xform.direction = RTE_SECURITY_IPSEC_SA_DIR_EGRESS;
+	conf.action_type = RTE_SECURITY_ACTION_TYPE_INLINE_PROTOCOL;
+	conf.protocol = RTE_SECURITY_PROTOCOL_IPSEC;
+	memcpy(&conf.ipsec, &sa_data.ipsec_xform,
+	       sizeof(struct rte_security_ipsec_xform));
+	conf.crypto_xform = &sa_data.xform.aead;
+	ret = rte_security_session_update(sec_ctx, out_ses, &conf);
+	if (ret) {
+		printf("Session update failed outbound\n");
+		goto out;
+	}
+	printf("Updated Outbound session with SPI = 0x%x\n", spi);
+
+	memcpy(&sa_data, sess_conf, sizeof(sa_data));
+	sa_data.ipsec_xform.spi = sa_index;
+	sa_data.ipsec_xform.options.stats = 1;
+	ret = create_inline_ipsec_session(&sa_data, portid, &in_ses,
+					  RTE_SECURITY_IPSEC_SA_DIR_INGRESS,
+					  RTE_SECURITY_IPSEC_TUNNEL_IPV4);
+	if (ret) {
+		printf("Failed to create inbound session\n");
+		goto out;
+	}
+	printf("Created Inbound session with sa_index = 0x%x\n",
+	       sa_data.ipsec_xform.spi);
+
+	sa_data.ipsec_xform.spi = spi;
+	sa_data.ipsec_xform.direction = RTE_SECURITY_IPSEC_SA_DIR_INGRESS;
+	memset(&conf, 0, sizeof(conf));
+	conf.action_type = RTE_SECURITY_ACTION_TYPE_INLINE_PROTOCOL;
+	conf.protocol = RTE_SECURITY_PROTOCOL_IPSEC;
+	memcpy(&conf.ipsec, &sa_data.ipsec_xform,
+	       sizeof(struct rte_security_ipsec_xform));
+	conf.crypto_xform = &sa_data.xform.aead;
+	conf.userdata = (void *)(uint64_t)1;
+	ret = rte_security_session_update(sec_ctx, in_ses, &conf);
+	if (ret) {
+		printf("Session update failed inbound\n");
+		goto out;
+	}
+	printf("Updated Inbound session with SPI = 0x%x\n", spi);
+
+	{
+		/* Logical queue index per PCP (0 = default). Logical q maps to
+		 * cpt_lf[inb_cpt_lf_id + q], i.e. CPT[q + 1] here.
+		 */
+		uint8_t pcp_qsel[8] = {1, 1, 1, 1, 2, 2, 2, 2};
+
+		ret = rte_pmd_cnxk_nix_inl_ipsec_vlan_cfg(portid, pcp_qsel);
+		if (ret) {
+			printf("Failed to configure PCP-to-CPTQ mapping: %d\n",
+			       ret);
+			goto out;
+		}
+		printf("PCP-to-CPTQ mapping configured (PCP 0-3->Q2, 4-7->Q3)\n");
+	}
+
+	ret = create_pcp_qsel_flow(portid, spi, sa_lo, sa_hi);
+	if (ret) {
+		printf("PCP qsel flow creation failed\n");
+		goto out;
+	}
+	printf("PCP qsel flow created successfully\n");
+
+	/* PCP=2 -> logical q1 -> expect CPT[2] */
+	memcpy(&vlan_pkt, &pkt_ipv4_vlan_plain, sizeof(vlan_pkt));
+	set_vlan_pcp(&vlan_pkt, 2);
+
+	ret = init_traffic(mbufpool[portid], &tx_pkts, &vlan_pkt);
+	if (ret) {
+		printf("Failed to init traffic for PCP=2\n");
+		goto out;
+	}
+
+	rte_security_set_pkt_metadata(sec_ctx, out_ses, tx_pkts, NULL);
+	tx_pkts->ol_flags |= RTE_MBUF_F_TX_SEC_OFFLOAD;
+	tx_pkts->l2_len = RTE_ETHER_HDR_LEN + 4;
+
+	rte_pmd_cnxk_cpt_q_stats_get(portid,
+		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q0_before, 2);
+	rte_pmd_cnxk_cpt_q_stats_get(portid,
+		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q1_before, 3);
+
+	nb_sent = rte_eth_tx_burst(portid, 0, &tx_pkts, 1);
+	printf("Sent %u pkts\n", nb_sent);
+	if (nb_sent != 1) {
+		printf("Failed to tx PCP=2 pkt\n");
+		ret = -1;
+		goto out;
+	}
+	tx_pkts = NULL;
+
+	rte_delay_ms(200);
+	nb_rx = 0;
+	for (j = 0; j < 10 && nb_rx < 1; j++) {
+		nb_rx += rte_eth_rx_burst(portid, 0, &rx_pkts, 1);
+		rte_delay_ms(100);
+	}
+	printf("Recv %u pkts\n", nb_rx);
+
+	rte_pmd_cnxk_cpt_q_stats_get(portid,
+		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q0_after, 2);
+	rte_pmd_cnxk_cpt_q_stats_get(portid,
+		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q1_after, 3);
+
+	q0_delta = stats_q0_after.dec_pkts - stats_q0_before.dec_pkts;
+	q1_delta = stats_q1_after.dec_pkts - stats_q1_before.dec_pkts;
+
+	printf("PCP=2: CPT[2] dec_pkts delta=%lu, CPT[3] dec_pkts delta=%lu, "
+	       "rx=%u\n", q0_delta, q1_delta, nb_rx);
+
+	if (nb_rx < 1) {
+		printf("PCP=2: No packets received\n");
+		ret = -1;
+		goto out;
+	}
+
+	if (q0_delta != 1) {
+		printf("PCP=2: Expected CPT[2] dec_pkts=1, got %lu\n",
+		       q0_delta);
+		ret = -1;
+		goto out;
+	}
+	if (q1_delta != 0) {
+		printf("PCP=2: Expected CPT[3] dec_pkts=0, got %lu\n",
+		       q1_delta);
+		ret = -1;
+		goto out;
+	}
+
+	rte_pktmbuf_free(rx_pkts);
+	rx_pkts = NULL;
+
+	/* PCP=6 -> logical q2 -> expect CPT[3] */
+	memcpy(&vlan_pkt, &pkt_ipv4_vlan_plain, sizeof(vlan_pkt));
+	set_vlan_pcp(&vlan_pkt, 6);
+
+	ret = init_traffic(mbufpool[portid], &tx_pkts, &vlan_pkt);
+	if (ret) {
+		printf("Failed to init traffic for PCP=6\n");
+		goto out;
+	}
+
+	rte_security_set_pkt_metadata(sec_ctx, out_ses, tx_pkts, NULL);
+	tx_pkts->ol_flags |= RTE_MBUF_F_TX_SEC_OFFLOAD;
+	tx_pkts->l2_len = RTE_ETHER_HDR_LEN + 4;
+
+	rte_pmd_cnxk_cpt_q_stats_get(portid,
+		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q0_before, 2);
+	rte_pmd_cnxk_cpt_q_stats_get(portid,
+		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q1_before, 3);
+
+	nb_sent = rte_eth_tx_burst(portid, 0, &tx_pkts, 1);
+	printf("Sent %u pkts (PCP=6)\n", nb_sent);
+	if (nb_sent != 1) {
+		printf("Failed to tx PCP=6 pkt\n");
+		ret = -1;
+		goto out;
+	}
+	tx_pkts = NULL;
+
+	rte_delay_ms(200);
+	nb_rx = 0;
+	for (j = 0; j < 10 && nb_rx < 1; j++) {
+		nb_rx += rte_eth_rx_burst(portid, 0, &rx_pkts, 1);
+		rte_delay_ms(100);
+	}
+	printf("Recv %u pkts (PCP=6)\n", nb_rx);
+
+	rte_pmd_cnxk_cpt_q_stats_get(portid,
+		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q0_after, 2);
+	rte_pmd_cnxk_cpt_q_stats_get(portid,
+		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q1_after, 3);
+
+	q0_delta = stats_q0_after.dec_pkts - stats_q0_before.dec_pkts;
+	q1_delta = stats_q1_after.dec_pkts - stats_q1_before.dec_pkts;
+
+	printf("PCP=6: CPT[2] dec_pkts delta=%lu, CPT[3] dec_pkts delta=%lu, "
+	       "rx=%u\n", q0_delta, q1_delta, nb_rx);
+
+	if (nb_rx < 1) {
+		printf("PCP=6: No packets received\n");
+		ret = -1;
+		goto out;
+	}
+
+	if (q1_delta != 1) {
+		printf("PCP=6: Expected CPT[3] dec_pkts=1, got %lu\n",
+		       q1_delta);
+		ret = -1;
+		goto out;
+	}
+	if (q0_delta != 0) {
+		printf("PCP=6: Expected CPT[2] dec_pkts=0, got %lu\n",
+		       q0_delta);
+		ret = -1;
+		goto out;
+	}
+
+	printf("PCP QSEL Test: PASS\n");
+
+out:
+	destroy_pcp_qsel_flow(portid);
+	cnxk_sa_index_free(portid, RTE_SECURITY_IPSEC_SA_DIR_EGRESS,
+			   out_sa_index, 1);
+	cnxk_sa_index_free(portid, RTE_SECURITY_IPSEC_SA_DIR_INGRESS,
+			   in_sa_index, 1);
+	if (out_ses)
+		rte_security_session_destroy(sec_ctx, out_ses);
+	if (in_ses)
+		rte_security_session_destroy(sec_ctx, in_ses);
+	if (tx_pkts)
+		rte_pktmbuf_free(tx_pkts);
+	if (rx_pkts)
+		rte_pktmbuf_free(rx_pkts);
+	return ret;
+}
+
+static int
 ipsec_msns_encap_decap(struct test_ipsec_vector *vector,
 		       enum rte_security_ipsec_tunnel_type tun_type, uint8_t alg)
 {
@@ -2827,6 +3162,13 @@ main(int argc, char **argv)
 		       ipsec_test_mode_to_string(testmode));
 		rc = pmd_cnxk_custom_msns_test();
 		app_info("Test %s: %s\n", ipsec_test_mode_to_string(testmode), rc ? "FAILED" : "PASS");
+		break;
+	case IPSEC_RTE_PMD_CNXK_PCP_QSEL_TEST:
+		printf("Model: %s Test Mode: %s\n", rte_pmd_cnxk_model_str_get(),
+		       ipsec_test_mode_to_string(testmode));
+		rc = ut_ipsec_pcp_qsel_test();
+		printf("Test %s: %s\n", ipsec_test_mode_to_string(testmode),
+		       rc ? "FAILED" : "PASS");
 		break;
 	}
 	ut_teardown();

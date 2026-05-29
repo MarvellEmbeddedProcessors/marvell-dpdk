@@ -14,5 +14,6 @@ deps += ['kvargs']
 sources = files(
         'platform_params.c',
         'platform.c',
+        'platform_irq.c',
 )
 driver_sdk_headers += files('bus_platform_driver.h')

@@ -84,12 +84,14 @@ static int
 dev_add(const char *dev_name)
 {
 	struct rte_platform_device *pdev, *tmp;
+	struct platform_device *pdata;
 	char path[PATH_MAX];
 	unsigned long val;
 
-	pdev = calloc(1, sizeof(*pdev));
-	if (pdev == NULL)
+	pdata = calloc(1, sizeof(*pdata));
+	if (pdata == NULL)
 		return -ENOMEM;
+	pdev = &pdata->pdev;
 
 	rte_strscpy(pdev->name, dev_name, sizeof(pdev->name));
 	pdev->device.name = pdev->name;
@@ -105,7 +107,7 @@ dev_add(const char *dev_name)
 			if (tmp->device.devargs != pdev->device.devargs)
 				rte_devargs_remove(pdev->device.devargs);
 
-			free(pdev);
+			free(pdata);
 			return -EEXIST;
 		}
 	}
@@ -317,6 +319,8 @@ out:
 static void
 device_cleanup(struct rte_platform_device *pdev)
 {
+	platform_teardown_intr_handle(pdev);
+	platform_release_irqs(pdev);
 	device_unmap_resources(pdev);
 	rte_vfio_release_device(PLATFORM_BUS_DEVICES_PATH, pdev->name, pdev->dev_fd);
 }
@@ -354,6 +358,18 @@ device_setup(struct rte_platform_device *pdev)
 	ret = device_map_resources(pdev, dev_info.num_regions);
 	if (ret) {
 		PLATFORM_LOG_LINE(ERR, "failed to setup platform resources");
+		goto out;
+	}
+
+	ret = platform_discover_irqs(pdev);
+	if (ret) {
+		PLATFORM_LOG_LINE(ERR, "failed to discover IRQs: %s", strerror(-ret));
+		goto out;
+	}
+
+	ret = platform_setup_intr_handle(pdev);
+	if (ret) {
+		PLATFORM_LOG_LINE(ERR, "failed to setup intr_handle: %s", strerror(-ret));
 		goto out;
 	}
 
@@ -539,7 +555,7 @@ platform_bus_unplug(struct rte_device *dev)
 	device_release_driver(pdev);
 	device_cleanup(pdev);
 	rte_devargs_remove(pdev->device.devargs);
-	free(pdev);
+	free(platform_dev(pdev));
 
 	return 0;
 }

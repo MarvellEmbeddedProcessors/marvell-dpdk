@@ -6,7 +6,11 @@ if is_windows
     subdir_done()
 endif
 
-sources = files('xgmac_ethdev.c')
+sources = files(
+        'xgmac_dev.c',
+        'xgmac_ethdev.c',
+)
+
 deps += ['bus_platform']
 
 require_iova_in_mbuf = false

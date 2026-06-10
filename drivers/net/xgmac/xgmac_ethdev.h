@@ -13,10 +13,58 @@ extern int xgmac_logtype;
 
 #define XGMAC_LOG(level, ...) RTE_LOG_LINE_PREFIX(level, XGMAC, "%s(): ", __func__, __VA_ARGS__)
 
+/* Base unit used to decode MAC_HW_Feature1.{TX,RX}FIFOSIZE into bytes. */
+#define XGMAC_FIFO_BASE_UNIT   128U
+#define XGMAC_FIFO_SIZE(_fsz)  (XGMAC_FIFO_BASE_UNIT << (_fsz))
+
+struct xgmac_hw_features {
+	uint32_t version;
+	uint16_t hash_table_size;
+
+	/* HW_Feature0 */
+	uint8_t rx_coe;
+	uint8_t tx_coe;
+	uint8_t ptp;
+	uint8_t eee;
+	uint8_t addn_mac;
+	uint8_t mmc;
+	uint8_t tunnel; /* VxLAN/NVGRE tunnel offload (incl. tunnel TSO) */
+
+	/* HW_Feature1 */
+	uint8_t dma_addr_width;
+	uint8_t rx_fifo_size;
+	uint8_t tx_fifo_size;
+	uint8_t tc_cnt;
+	uint8_t tso;
+	uint8_t rss;
+
+	/* HW_Feature2 */
+	uint8_t rx_q_cnt;
+	uint8_t tx_q_cnt;
+	uint8_t rx_ch_cnt;
+	uint8_t tx_ch_cnt;
+
+	/* HW_Feature3 */
+	uint8_t asp;
+	uint8_t dvlan;
+	uint8_t nrvf;
+};
+
 struct xgmac_dev {
 	void *csr_base;
 	size_t csr_size;
+	uint8_t link_down;
+	struct xgmac_hw_features hw_feat;
 };
+
+#define XGMAC_FIELD_SHIFT(_mask) \
+	(__builtin_ctz((uint32_t)(_mask)))
+
+#define XGMAC_FIELD_GET(_mask, _reg) \
+	(((_reg) & (_mask)) >> XGMAC_FIELD_SHIFT(_mask))
+
+#define XGMAC_FIELD_PREP(_mask, _val) \
+	(((_val) << XGMAC_FIELD_SHIFT(_mask)) & (_mask))
 
 static inline uint32_t
 xgmac_rd(struct xgmac_dev *dev, uint32_t offset)
@@ -28,6 +76,15 @@ static inline void
 xgmac_wr(struct xgmac_dev *dev, uint32_t offset, uint32_t val)
 {
 	rte_write32(val, (volatile uint8_t *)dev->csr_base + offset);
+}
+
+static inline uint64_t
+xgmac_rd64(struct xgmac_dev *dev, uint32_t lo_offset)
+{
+	uint32_t hi = xgmac_rd(dev, lo_offset + 4);
+	uint32_t lo = xgmac_rd(dev, lo_offset);
+
+	return ((uint64_t)hi << 32) | lo;
 }
 
 #endif /* __XGMAC_ETHDEV_H__ */

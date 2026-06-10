@@ -10,6 +10,7 @@
 #include "xgmac_dev.h"
 #include "xgmac_ethdev.h"
 #include "xgmac_regs.h"
+#include "xgmac_rxtx.h"
 
 void
 xgmac_mac_init(struct xgmac_dev *dev, uint16_t nb_rx_queues)
@@ -256,6 +257,26 @@ xgmac_bitrev32(uint32_t x)
 	return (x << 16) | (x >> 16);
 }
 
+static int
+xgmac_dma_ch_wait_stopped(struct xgmac_dev *dev, uint16_t q, uint32_t stop_mask,
+			  const char *name)
+{
+	uint64_t tmo_ms = XGMAC_TIMEOUT_MS;
+	uint32_t st;
+
+	do {
+		st = xgmac_rd(dev, XGMAC_DMA_CH_STATUS(q));
+		if (st & stop_mask)
+			return 0;
+		rte_delay_us_sleep(1000);
+		tmo_ms--;
+	} while (tmo_ms);
+
+	XGMAC_LOG(WARNING, "timeout waiting %s stop: q=%u status=0x%08x",
+		  name, q, st);
+	return -ETIMEDOUT;
+}
+
 int
 xgmac_mc_hash_filter_set(struct xgmac_dev *dev, struct rte_ether_addr *mc_addr_set,
 			 uint32_t nb_mc_addr)
@@ -294,6 +315,46 @@ xgmac_mc_hash_filter_set(struct xgmac_dev *dev, struct rte_ether_addr *mc_addr_s
 	else
 		val &= ~XGMAC_FILTER_HMC;
 	xgmac_wr(dev, XGMAC_PACKET_FILTER, val);
+
+	return 0;
+}
+
+#define XGMAC_DMA_OSR_LIMIT	0x3f
+#define XGMAC_TDPS		0x5
+#define XGMAC_RDPS		0x5
+int
+xgmac_dma_init(struct xgmac_dev *dev)
+{
+	uint64_t tmo_ms;
+	uint32_t val;
+
+	val = xgmac_rd(dev, XGMAC_DMA_MODE);
+	xgmac_wr(dev, XGMAC_DMA_MODE, val | XGMAC_SWR);
+
+	tmo_ms = XGMAC_TIMEOUT_MS;
+	do {
+		rte_delay_us_sleep(1000);
+		val = xgmac_rd(dev, XGMAC_DMA_MODE);
+		tmo_ms--;
+		if (!tmo_ms) {
+			XGMAC_LOG(ERR, "DMA software reset timeout");
+			return -EBUSY;
+		}
+	} while (val & XGMAC_SWR);
+
+	val = xgmac_rd(dev, XGMAC_DMA_SYSBUS_MODE);
+	val |= XGMAC_AAL;
+	val |= XGMAC_EAME;
+	val &= ~XGMAC_WR_OSR_LMT;
+	val |= XGMAC_FIELD_PREP(XGMAC_WR_OSR_LMT, XGMAC_DMA_OSR_LIMIT);
+	val &= ~XGMAC_RD_OSR_LMT;
+	val |= XGMAC_FIELD_PREP(XGMAC_RD_OSR_LMT, XGMAC_DMA_OSR_LIMIT);
+	val |= XGMAC_BLEN_32;
+	val |= XGMAC_UNDEF;
+	xgmac_wr(dev, XGMAC_DMA_SYSBUS_MODE, val);
+
+	xgmac_wr(dev, XGMAC_TX_EDMA_CTRL, XGMAC_TDPS);
+	xgmac_wr(dev, XGMAC_RX_EDMA_CTRL, XGMAC_RDPS);
 
 	return 0;
 }
@@ -365,4 +426,259 @@ xgmac_hw_features_get(struct xgmac_dev *dev)
 		  hw_feat->addn_mac + 1, hw_feat->hash_table_size, hw_feat->asp, hw_feat->dvlan,
 		  hw_feat->nrvf, hw_feat->dma_addr_width, hw_feat->tso, hw_feat->tunnel,
 		  hw_feat->rss);
+}
+
+static int
+xgmac_mtl_txq_flush(struct xgmac_dev *dev, uint16_t q)
+{
+	uint32_t reg = XGMAC_MTL_TXQ_OPMODE(q);
+	uint64_t tmo_ms;
+	uint32_t val;
+
+	val = xgmac_rd(dev, reg);
+	val |= XGMAC_FTQ;
+	xgmac_wr(dev, reg, val);
+
+	tmo_ms = XGMAC_TIMEOUT_MS;
+	do {
+		rte_delay_us_sleep(1000);
+		val = xgmac_rd(dev, reg);
+		if ((val & XGMAC_FTQ) == 0)
+			return 0;
+		tmo_ms--;
+		if (!tmo_ms)
+			break;
+	} while (1);
+
+	XGMAC_LOG(WARNING, "timed out waiting for Tx queue %u flush", q);
+	return -ETIMEDOUT;
+}
+
+void
+xgmac_dma_stop(struct xgmac_dev *dev)
+{
+	struct rte_eth_dev *eth_dev = dev->eth_dev;
+	uint16_t nb_rxq = RTE_MAX(1, eth_dev->data->nb_rx_queues);
+	uint16_t nb_txq = RTE_MAX(1, eth_dev->data->nb_tx_queues);
+	uint32_t val;
+	uint16_t q;
+
+	/* Disable MAC RX */
+	val = xgmac_rd(dev, XGMAC_RX_CONFIG);
+	xgmac_wr(dev, XGMAC_RX_CONFIG, val & ~XGMAC_CONFIG_RE);
+
+	/* Prepare each active Tx queue before disabling Tx engine. */
+	for (q = 0; q < nb_txq; q++) {
+		if (!eth_dev->data->tx_queues[q])
+			continue;
+
+		xgmac_txq_prepare_stop(dev, q);
+	}
+
+	/* Disable MAC TX after queues have drained. */
+	val = xgmac_rd(dev, XGMAC_TX_CONFIG);
+	xgmac_wr(dev, XGMAC_TX_CONFIG, val & ~XGMAC_CONFIG_TE);
+
+	for (q = 0; q < nb_rxq; q++) {
+		if (!eth_dev->data->rx_queues[q])
+			continue;
+
+		val = xgmac_rd(dev, XGMAC_DMA_CH_RX_CONTROL(q));
+		xgmac_wr(dev, XGMAC_DMA_CH_RX_CONTROL(q), val & ~XGMAC_RXSR);
+		xgmac_dma_ch_wait_stopped(dev, q, XGMAC_RS, "Rx DMA");
+	}
+	for (q = 0; q < nb_txq; q++) {
+		if (!eth_dev->data->tx_queues[q])
+			continue;
+
+		val = xgmac_rd(dev, XGMAC_DMA_CH_TX_CONTROL(q));
+		xgmac_wr(dev, XGMAC_DMA_CH_TX_CONTROL(q), val & ~XGMAC_TXST);
+		xgmac_dma_ch_wait_stopped(dev, q, XGMAC_TS, "Tx DMA");
+		xgmac_mtl_txq_flush(dev, q);
+	}
+}
+
+static inline void
+xgmac_txq_sw_ring_reset(struct xgmac_tx_queue *txq)
+{
+	uint16_t i;
+
+	if (!txq || !txq->sw_ring)
+		return;
+
+	for (i = 0; i < txq->nb_desc; i++) {
+		if (txq->sw_ring[i]) {
+			rte_pktmbuf_free(txq->sw_ring[i]);
+			txq->sw_ring[i] = NULL;
+		}
+	}
+}
+
+#define XGMAC_DMA_PBL_DEFAULT  32
+
+/* Init a single Rx queue's descriptors and program its DMA channel.
+ * Sets RxPBL, RBSZ, PBLx8, INT_EN before descriptor ring.
+ */
+static int
+xgmac_rx_desc_init_one(struct xgmac_dev *dev, struct xgmac_rx_queue *rxq)
+{
+	uint32_t rxpbl = XGMAC_DMA_PBL_DEFAULT;
+	volatile union xgmac_rx_desc *desc;
+	uint16_t q = rxq->queue_id;
+	struct rte_mbuf *mbuf;
+	uint32_t val, rbufsz;
+	uint16_t i;
+
+	val = xgmac_rd(dev, XGMAC_DMA_CH_CONTROL(q));
+	val |= XGMAC_PBLx8;
+	xgmac_wr(dev, XGMAC_DMA_CH_CONTROL(q), val);
+	xgmac_wr(dev, XGMAC_DMA_CH_INT_EN(q), XGMAC_DMA_INT_DEFAULT_EN);
+
+	rbufsz = rte_pktmbuf_data_room_size(rxq->mb_pool) - RTE_PKTMBUF_HEADROOM;
+	rbufsz = (rbufsz + 7) & ~7; /* align to 8 bytes */
+	rxq->buf_size = rbufsz;
+	if (rxq->buf_size > dev->rx_buf_size)
+		dev->rx_buf_size = rxq->buf_size;
+	val = xgmac_rd(dev, XGMAC_DMA_CH_RX_CONTROL(q));
+	val &= ~XGMAC_RxPBL;
+	val |= XGMAC_FIELD_PREP(XGMAC_RxPBL, rxpbl);
+	val &= ~XGMAC_RBSZ;
+	val |= XGMAC_FIELD_PREP(XGMAC_RBSZ, rbufsz);
+	xgmac_wr(dev, XGMAC_DMA_CH_RX_CONTROL(q), val);
+
+	for (i = 0; i < rxq->nb_desc; i++) {
+		mbuf = rte_mbuf_raw_alloc(rxq->mb_pool);
+		if (!mbuf) {
+			XGMAC_LOG(ERR, "rx mbuf alloc failed q=%u i=%u", q, i);
+			return -ENOMEM;
+		}
+		rxq->sw_ring[i] = mbuf;
+		desc = &rxq->desc[i];
+		mbuf->next = NULL;
+		mbuf->data_off = RTE_PKTMBUF_HEADROOM;
+		mbuf->nb_segs = 1;
+		mbuf->port = rxq->port_id;
+		desc->read.baddr = rte_mbuf_data_iova_default(mbuf);
+		desc->read.rdes2 = 0;
+		desc->read.rdes3 = XGMAC_RDES3_OWN;
+		rte_wmb();
+	}
+
+	xgmac_wr(dev, XGMAC_DMA_CH_RxDESC_RING_LEN(q), rxq->nb_desc - 1);
+	xgmac_wr(dev, XGMAC_DMA_CH_RxDESC_HADDR(q), xgmac_high32(rxq->ring_phys_addr));
+	xgmac_wr(dev, XGMAC_DMA_CH_RxDESC_LADDR(q), xgmac_low32(rxq->ring_phys_addr));
+	xgmac_wr(dev, XGMAC_DMA_CH_RxDESC_TAIL_LPTR(q),
+		 xgmac_low32(rxq->ring_phys_addr +
+			     (rxq->nb_desc - 1) * sizeof(union xgmac_rx_desc)));
+	return 0;
+}
+
+int
+xgmac_txq_prepare_stop(struct xgmac_dev *dev, uint16_t q)
+{
+	uint64_t tmo_ms;
+	uint32_t status;
+	uint32_t trcsts;
+
+	tmo_ms = XGMAC_TIMEOUT_MS;
+	do {
+		rte_delay_us_sleep(1000);
+		status = xgmac_rd(dev, XGMAC_MTL_TXQ_DEBUG(q));
+		trcsts = (status & XGMAC_MTL_TQDR_TRCSTS) >> 1;
+		if (trcsts != XGMAC_MTL_TRCSTS_WRITE &&
+		    (status & XGMAC_MTL_TQDR_TXQSTS) == 0)
+			return 0;
+		tmo_ms--;
+		if (!tmo_ms)
+			break;
+	} while (1);
+
+	XGMAC_LOG(WARNING, "timed out waiting for Tx queue %u to empty", q);
+	return -ETIMEDOUT;
+}
+
+/* Init a single Tx queue's descriptor ring and program its DMA channel.
+ * Sets TxPBL, OSP, PBLx8 before descriptor ring.
+ */
+static void
+xgmac_tx_desc_init_one(struct xgmac_dev *dev, struct xgmac_tx_queue *txq)
+{
+	uint32_t txpbl = XGMAC_DMA_PBL_DEFAULT;
+	uint16_t q = txq->queue_id;
+	uint32_t val;
+
+	/* Prevent mbuf leaks across restart/reinit paths. */
+	xgmac_txq_sw_ring_reset(txq);
+
+	val = xgmac_rd(dev, XGMAC_DMA_CH_CONTROL(q));
+	val |= XGMAC_PBLx8;
+	xgmac_wr(dev, XGMAC_DMA_CH_CONTROL(q), val);
+	xgmac_wr(dev, XGMAC_DMA_CH_INT_EN(q), XGMAC_DMA_INT_DEFAULT_EN);
+
+	val = xgmac_rd(dev, XGMAC_DMA_CH_TX_CONTROL(q));
+	val &= ~XGMAC_TxPBL;
+	val |= XGMAC_FIELD_PREP(XGMAC_TxPBL, txpbl);
+	xgmac_wr(dev, XGMAC_DMA_CH_TX_CONTROL(q), val | XGMAC_OSP);
+
+	txq->cur = 0;
+	txq->dirty = 0;
+
+	xgmac_wr(dev, XGMAC_DMA_CH_TxDESC_RING_LEN(q), txq->nb_desc - 1);
+	xgmac_wr(dev, XGMAC_DMA_CH_TxDESC_HADDR(q), xgmac_high32(txq->ring_phys_addr));
+	xgmac_wr(dev, XGMAC_DMA_CH_TxDESC_LADDR(q), xgmac_low32(txq->ring_phys_addr));
+}
+
+int
+xgmac_rxq_start(struct xgmac_dev *dev, struct xgmac_rx_queue *rxq)
+{
+	uint16_t q = rxq->queue_id;
+	uint32_t val;
+	int ret;
+
+	ret = xgmac_rx_desc_init_one(dev, rxq);
+	if (ret)
+		return ret;
+
+	val = xgmac_rd(dev, XGMAC_DMA_CH_RX_CONTROL(q));
+	xgmac_wr(dev, XGMAC_DMA_CH_RX_CONTROL(q), val | XGMAC_RXSR);
+
+	return 0;
+}
+
+void
+xgmac_rxq_stop(struct xgmac_dev *dev, struct xgmac_rx_queue *rxq)
+{
+	uint16_t q = rxq->queue_id;
+	uint32_t val;
+
+	val = xgmac_rd(dev, XGMAC_DMA_CH_RX_CONTROL(q));
+	xgmac_wr(dev, XGMAC_DMA_CH_RX_CONTROL(q), val & ~XGMAC_RXSR);
+}
+
+void
+xgmac_txq_start(struct xgmac_dev *dev, struct xgmac_tx_queue *txq)
+{
+	uint16_t q = txq->queue_id;
+	uint32_t val;
+
+	xgmac_tx_desc_init_one(dev, txq);
+
+	val = xgmac_rd(dev, XGMAC_DMA_CH_TX_CONTROL(q));
+	xgmac_wr(dev, XGMAC_DMA_CH_TX_CONTROL(q), val | XGMAC_TXST);
+}
+
+void
+xgmac_txq_stop(struct xgmac_dev *dev, struct xgmac_tx_queue *txq)
+{
+	uint16_t q = txq->queue_id;
+	uint32_t val;
+
+	xgmac_txq_prepare_stop(dev, q);
+
+	val = xgmac_rd(dev, XGMAC_DMA_CH_TX_CONTROL(q));
+	xgmac_wr(dev, XGMAC_DMA_CH_TX_CONTROL(q), val & ~XGMAC_TXST);
+
+	xgmac_txq_sw_ring_reset(txq);
+	txq->cur = 0;
+	txq->dirty = 0;
 }

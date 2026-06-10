@@ -5,19 +5,38 @@
  */
 
 #include <bus_platform_driver.h>
+#include <errno.h>
 #include <ethdev_driver.h>
 #include <rte_ether.h>
 #include <rte_ethdev.h>
 #include <rte_malloc.h>
+#include <rte_memzone.h>
 
 #include "xgmac_dev.h"
 #include "xgmac_ethdev.h"
 #include "xgmac_regs.h"
+#include "xgmac_rxtx.h"
 
 #define XGMAC_PMD_NAME "net_xgmac"
 #define PLATFORM_DEVICES_PATH "/sys/bus/platform/devices"
+#define XGMAC_DMA_RING_BOUNDARY ((unsigned int)RTE_PGSIZE_4G)
 
 RTE_LOG_REGISTER_DEFAULT(xgmac_logtype, INFO);
+
+static const struct rte_memzone *
+xgmac_dma_zone_reserve_bounded(const struct rte_eth_dev *eth_dev, const char *ring_name,
+			       uint16_t queue_id, size_t size, unsigned int align,
+			       int socket_id)
+{
+	char z_name[RTE_MEMZONE_NAMESIZE];
+
+	snprintf(z_name, sizeof(z_name), "eth_p%d_q%d_%s",
+		 eth_dev->data->port_id, queue_id, ring_name);
+
+	return rte_memzone_reserve_bounded(z_name, size, socket_id,
+					    RTE_MEMZONE_IOVA_CONTIG, align,
+					    XGMAC_DMA_RING_BOUNDARY);
+}
 
 static int
 xgmac_dev_configure(struct rte_eth_dev *eth_dev)
@@ -45,21 +64,445 @@ xgmac_dev_configure(struct rte_eth_dev *eth_dev)
 }
 
 static int
-xgmac_dev_start(struct rte_eth_dev *eth_dev __rte_unused)
+xgmac_rx_queue_start(struct rte_eth_dev *eth_dev, uint16_t rx_queue_id)
 {
-	return -ENOTSUP;
-}
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	struct xgmac_rx_queue *rxq;
+	int ret;
 
-static int
-xgmac_dev_stop(struct rte_eth_dev *eth_dev __rte_unused)
-{
+	if (rx_queue_id >= eth_dev->data->nb_rx_queues)
+		return -EINVAL;
+
+	rxq = eth_dev->data->rx_queues[rx_queue_id];
+	if (rxq == NULL)
+		return -EINVAL;
+
+	if (eth_dev->data->rx_queue_state[rx_queue_id] == RTE_ETH_QUEUE_STATE_STARTED)
+		return 0;
+
+	ret = xgmac_rxq_start(dev, rxq);
+	if (ret)
+		return ret;
+
+	eth_dev->data->rx_queue_state[rx_queue_id] = RTE_ETH_QUEUE_STATE_STARTED;
+
 	return 0;
 }
 
 static int
-xgmac_dev_close(struct rte_eth_dev *eth_dev __rte_unused)
+xgmac_rx_queue_stop(struct rte_eth_dev *eth_dev, uint16_t rx_queue_id)
 {
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	struct xgmac_rx_queue *rxq;
+
+	if (rx_queue_id >= eth_dev->data->nb_rx_queues)
+		return -EINVAL;
+	rxq = eth_dev->data->rx_queues[rx_queue_id];
+	if (rxq == NULL)
+		return -EINVAL;
+	if (eth_dev->data->rx_queue_state[rx_queue_id] == RTE_ETH_QUEUE_STATE_STOPPED)
+		return 0;
+
+	xgmac_rxq_stop(dev, rxq);
+	eth_dev->data->rx_queue_state[rx_queue_id] = RTE_ETH_QUEUE_STATE_STOPPED;
+
 	return 0;
+}
+
+static int
+xgmac_tx_queue_start(struct rte_eth_dev *eth_dev, uint16_t tx_queue_id)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	struct xgmac_tx_queue *txq;
+
+	if (tx_queue_id >= eth_dev->data->nb_tx_queues)
+		return -EINVAL;
+	txq = eth_dev->data->tx_queues[tx_queue_id];
+	if (txq == NULL)
+		return -EINVAL;
+	if (eth_dev->data->tx_queue_state[tx_queue_id] == RTE_ETH_QUEUE_STATE_STARTED)
+		return 0;
+
+	xgmac_txq_start(dev, txq);
+	eth_dev->data->tx_queue_state[tx_queue_id] = RTE_ETH_QUEUE_STATE_STARTED;
+
+	return 0;
+}
+
+static int
+xgmac_tx_queue_stop(struct rte_eth_dev *eth_dev, uint16_t tx_queue_id)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	struct xgmac_tx_queue *txq;
+
+	if (tx_queue_id >= eth_dev->data->nb_tx_queues)
+		return -EINVAL;
+	txq = eth_dev->data->tx_queues[tx_queue_id];
+	if (txq == NULL)
+		return -EINVAL;
+	if (eth_dev->data->tx_queue_state[tx_queue_id] == RTE_ETH_QUEUE_STATE_STOPPED)
+		return 0;
+
+	xgmac_txq_stop(dev, txq);
+	eth_dev->data->tx_queue_state[tx_queue_id] = RTE_ETH_QUEUE_STATE_STOPPED;
+
+	return 0;
+}
+
+static int
+xgmac_dev_start(struct rte_eth_dev *eth_dev)
+{
+	uint16_t nb_rx_queues = eth_dev->data->nb_rx_queues;
+	uint16_t nb_tx_queues = eth_dev->data->nb_tx_queues;
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	uint32_t val;
+	uint16_t q;
+	int ret;
+
+	for (q = 0; q < nb_rx_queues; q++) {
+		if (eth_dev->data->rx_queues[q] == NULL) {
+			XGMAC_LOG(ERR, "Rx queue %u was not set up", q);
+			return -EINVAL;
+		}
+	}
+	for (q = 0; q < nb_tx_queues; q++) {
+		if (eth_dev->data->tx_queues[q] == NULL) {
+			XGMAC_LOG(ERR, "Tx queue %u was not set up", q);
+			return -EINVAL;
+		}
+	}
+	ret = xgmac_dma_init(dev);
+	if (ret)
+		return ret;
+
+	xgmac_mac_init(dev, nb_rx_queues);
+	xgmac_mac_mtu_set(dev, eth_dev->data->mtu);
+	xgmac_mtl_init(dev, nb_tx_queues, nb_rx_queues);
+
+	dev->rx_buf_size = 0;
+	for (q = 0; q < nb_rx_queues; q++) {
+		struct xgmac_rx_queue *rxq = eth_dev->data->rx_queues[q];
+
+		/* Deferred queues will be started later using rte_eth_dev_rx_queue_start(). */
+		if (rxq->deferred_start) {
+			eth_dev->data->rx_queue_state[q] = RTE_ETH_QUEUE_STATE_STOPPED;
+			continue;
+		}
+		ret = xgmac_rx_queue_start(eth_dev, q);
+		if (ret)
+			goto stop_queues;
+	}
+
+	for (q = 0; q < nb_tx_queues; q++) {
+		struct xgmac_tx_queue *txq = eth_dev->data->tx_queues[q];
+
+		/* Deferred queues will be started later using rte_eth_dev_tx_queue_start(). */
+		if (txq->deferred_start) {
+			eth_dev->data->tx_queue_state[q] = RTE_ETH_QUEUE_STATE_STOPPED;
+			continue;
+		}
+		ret = xgmac_tx_queue_start(eth_dev, q);
+		if (ret)
+			goto stop_queues;
+	}
+
+	val = xgmac_rd(dev, XGMAC_TX_CONFIG);
+	xgmac_wr(dev, XGMAC_TX_CONFIG, val | XGMAC_CONFIG_TE);
+
+	val = xgmac_rd(dev, XGMAC_RX_CONFIG);
+	xgmac_wr(dev, XGMAC_RX_CONFIG, val | XGMAC_CONFIG_RE);
+
+	eth_dev->data->dev_started = 1;
+
+	return 0;
+
+stop_queues:
+	for (q = 0; q < nb_rx_queues; q++) {
+		if (eth_dev->data->rx_queue_state[q] == RTE_ETH_QUEUE_STATE_STARTED)
+			xgmac_rx_queue_stop(eth_dev, q);
+	}
+	for (q = 0; q < nb_tx_queues; q++) {
+		if (eth_dev->data->tx_queue_state[q] == RTE_ETH_QUEUE_STATE_STARTED)
+			xgmac_tx_queue_stop(eth_dev, q);
+	}
+
+	return ret;
+}
+
+static int
+xgmac_dev_stop(struct rte_eth_dev *eth_dev)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	uint16_t q;
+
+	if (!eth_dev->data->dev_started)
+		return 0;
+
+	for (q = 0; q < eth_dev->data->nb_rx_queues; q++) {
+		if (eth_dev->data->rx_queues[q] == NULL)
+			continue;
+		xgmac_rx_queue_stop(eth_dev, q);
+	}
+	for (q = 0; q < eth_dev->data->nb_tx_queues; q++) {
+		if (eth_dev->data->tx_queues[q] == NULL)
+			continue;
+		xgmac_tx_queue_stop(eth_dev, q);
+	}
+	xgmac_dma_stop(dev);
+	eth_dev->data->dev_started = 0;
+
+	return 0;
+}
+
+static void
+xgmac_rx_queue_free(struct xgmac_rx_queue *rxq)
+{
+	uint16_t i;
+
+	if (!rxq)
+		return;
+
+	if (rxq->sw_ring) {
+		for (i = 0; i < rxq->nb_desc; i++) {
+			if (rxq->sw_ring[i])
+				rte_pktmbuf_free(rxq->sw_ring[i]);
+		}
+		rte_free(rxq->sw_ring);
+	}
+	if (rxq->mz)
+		rte_memzone_free(rxq->mz);
+	rte_free(rxq);
+}
+
+static void
+xgmac_tx_queue_free(struct xgmac_tx_queue *txq)
+{
+	uint16_t i;
+
+	if (!txq)
+		return;
+
+	if (txq->sw_ring) {
+		for (i = 0; i < txq->nb_desc; i++) {
+			if (txq->sw_ring[i])
+				rte_pktmbuf_free(txq->sw_ring[i]);
+		}
+		rte_free(txq->sw_ring);
+	}
+	if (txq->mz)
+		rte_memzone_free(txq->mz);
+	rte_free(txq);
+}
+
+static int
+xgmac_dev_close(struct rte_eth_dev *eth_dev)
+{
+	uint16_t i;
+
+	if (eth_dev->data->dev_started)
+		xgmac_dev_stop(eth_dev);
+
+	for (i = 0; i < eth_dev->data->nb_rx_queues; i++) {
+		xgmac_rx_queue_free(eth_dev->data->rx_queues[i]);
+		eth_dev->data->rx_queues[i] = NULL;
+	}
+	for (i = 0; i < eth_dev->data->nb_tx_queues; i++) {
+		xgmac_tx_queue_free(eth_dev->data->tx_queues[i]);
+		eth_dev->data->tx_queues[i] = NULL;
+	}
+	return 0;
+}
+
+static int
+xgmac_rx_queue_setup(struct rte_eth_dev *dev, uint16_t rx_queue_id,
+		     uint16_t nb_rx_desc, unsigned int socket_id,
+		     const struct rte_eth_rxconf *rx_conf __rte_unused,
+		     struct rte_mempool *mb_pool)
+{
+	struct xgmac_rx_queue *rxq;
+	const struct rte_memzone *mz;
+	size_t size;
+
+	if (nb_rx_desc < XGMAC_MIN_RING_DESC || nb_rx_desc > XGMAC_MAX_RING_DESC ||
+	    !rte_is_power_of_2(nb_rx_desc))
+		return -EINVAL;
+
+	if (dev->data->dev_started)
+		return -EBUSY;
+
+	if (dev->data->rx_queues[rx_queue_id]) {
+		xgmac_rx_queue_free(dev->data->rx_queues[rx_queue_id]);
+		dev->data->rx_queues[rx_queue_id] = NULL;
+		dev->data->rx_queue_state[rx_queue_id] = RTE_ETH_QUEUE_STATE_STOPPED;
+	}
+
+	rxq = rte_zmalloc_socket("xgmac_rxq", sizeof(*rxq), RTE_CACHE_LINE_SIZE, socket_id);
+	if (!rxq)
+		return -ENOMEM;
+
+	rxq->nb_desc = nb_rx_desc;
+	rxq->queue_id = rx_queue_id;
+	rxq->port_id = dev->data->port_id;
+	rxq->mb_pool = mb_pool;
+	rxq->cur = 0;
+	rxq->dirty = 0;
+
+	if (dev->data->dev_conf.rxmode.offloads & RTE_ETH_RX_OFFLOAD_KEEP_CRC)
+		rxq->crc_adj = RTE_ETHER_CRC_LEN;
+	else
+		rxq->crc_adj = 0;
+
+	rxq->offloads = rx_conf->offloads | dev->data->dev_conf.rxmode.offloads;
+	rxq->deferred_start = rx_conf->rx_deferred_start;
+
+	size = nb_rx_desc * sizeof(union xgmac_rx_desc);
+	mz = xgmac_dma_zone_reserve_bounded(dev, "rx_ring", rx_queue_id, size,
+					    XGMAC_DESC_ALIGN, socket_id);
+	if (!mz) {
+		XGMAC_LOG(ERR, "rx_ring dma zone reserve bounded failed");
+		rte_free(rxq);
+		return -ENOMEM;
+	}
+	rxq->ring_phys_addr = mz->iova;
+	rxq->mz = mz;
+	memset(mz->addr, 0, size);
+	rxq->desc = mz->addr;
+
+	size = nb_rx_desc * sizeof(struct rte_mbuf *);
+	rxq->sw_ring = rte_zmalloc_socket("xgmac_rx_sw", size, RTE_CACHE_LINE_SIZE, socket_id);
+	if (!rxq->sw_ring) {
+		XGMAC_LOG(ERR, "rx sw_ring alloc failed");
+		rte_memzone_free(mz);
+		rte_free(rxq);
+		return -ENOMEM;
+	}
+
+	dev->data->rx_queues[rx_queue_id] = rxq;
+	return 0;
+}
+
+static void
+xgmac_rx_queue_release(struct rte_eth_dev *dev, uint16_t rx_queue_id)
+{
+	struct xgmac_rx_queue *rxq = dev->data->rx_queues[rx_queue_id];
+
+	if (dev->data->dev_started) {
+		XGMAC_LOG(ERR, "cannot release rx queue %u while device is started",
+			  rx_queue_id);
+		return;
+	}
+	xgmac_rx_queue_free(rxq);
+	dev->data->rx_queues[rx_queue_id] = NULL;
+	dev->data->rx_queue_state[rx_queue_id] = RTE_ETH_QUEUE_STATE_STOPPED;
+}
+
+static int
+xgmac_tx_queue_setup(struct rte_eth_dev *dev, uint16_t tx_queue_id,
+		     uint16_t nb_tx_desc, unsigned int socket_id,
+		     const struct rte_eth_txconf *tx_conf __rte_unused)
+{
+	struct xgmac_tx_queue *txq;
+	const struct rte_memzone *mz;
+	size_t size;
+
+	if (nb_tx_desc < XGMAC_MIN_RING_DESC || nb_tx_desc > XGMAC_MAX_RING_DESC ||
+	    !rte_is_power_of_2(nb_tx_desc))
+		return -EINVAL;
+
+	if (dev->data->dev_started)
+		return -EBUSY;
+
+	if (dev->data->tx_queues[tx_queue_id]) {
+		xgmac_tx_queue_free(dev->data->tx_queues[tx_queue_id]);
+		dev->data->tx_queues[tx_queue_id] = NULL;
+		dev->data->tx_queue_state[tx_queue_id] = RTE_ETH_QUEUE_STATE_STOPPED;
+	}
+	txq = rte_zmalloc_socket("xgmac_txq", sizeof(*txq), RTE_CACHE_LINE_SIZE, socket_id);
+	if (!txq)
+		return -ENOMEM;
+
+	txq->nb_desc = nb_tx_desc;
+	txq->queue_id = tx_queue_id;
+	txq->port_id = dev->data->port_id;
+	txq->cur = 0;
+	txq->dirty = 0;
+	txq->offloads = tx_conf->offloads | dev->data->dev_conf.txmode.offloads;
+	txq->deferred_start = tx_conf->tx_deferred_start;
+
+	size = nb_tx_desc * sizeof(union xgmac_tx_desc);
+	mz = xgmac_dma_zone_reserve_bounded(dev, "tx_ring", tx_queue_id, size,
+					    XGMAC_DESC_ALIGN, socket_id);
+	if (!mz) {
+		XGMAC_LOG(ERR, "tx_ring dma zone reserve bounded failed");
+		rte_free(txq);
+		return -ENOMEM;
+	}
+	txq->ring_phys_addr = mz->iova;
+	txq->mz = mz;
+	memset(mz->addr, 0, size);
+	txq->desc = mz->addr;
+
+	size = nb_tx_desc * sizeof(struct rte_mbuf *);
+	txq->sw_ring = rte_zmalloc_socket("xgmac_tx_sw", size, RTE_CACHE_LINE_SIZE, socket_id);
+	if (!txq->sw_ring) {
+		XGMAC_LOG(ERR, "tx sw_ring alloc failed");
+		rte_memzone_free(mz);
+		rte_free(txq);
+		return -ENOMEM;
+	}
+
+	dev->data->tx_queues[tx_queue_id] = txq;
+	return 0;
+}
+
+static void
+xgmac_tx_queue_release(struct rte_eth_dev *dev, uint16_t tx_queue_id)
+{
+	struct xgmac_tx_queue *txq = dev->data->tx_queues[tx_queue_id];
+
+	if (dev->data->dev_started) {
+		XGMAC_LOG(ERR, "cannot release tx queue %u while device is started",
+			  tx_queue_id);
+		return;
+	}
+	xgmac_tx_queue_free(txq);
+	dev->data->tx_queues[tx_queue_id] = NULL;
+	dev->data->tx_queue_state[tx_queue_id] = RTE_ETH_QUEUE_STATE_STOPPED;
+}
+
+static void
+xgmac_rxq_info_get(struct rte_eth_dev *eth_dev, uint16_t rx_queue_id,
+		   struct rte_eth_rxq_info *qinfo)
+{
+	struct xgmac_rx_queue *rxq = eth_dev->data->rx_queues[rx_queue_id];
+
+	if (rxq == NULL || qinfo == NULL)
+		return;
+
+	qinfo->mp = rxq->mb_pool;
+	qinfo->nb_desc = rxq->nb_desc;
+	qinfo->rx_buf_size = rxq->buf_size;
+	qinfo->scattered_rx = eth_dev->data->scattered_rx;
+	qinfo->queue_state = eth_dev->data->rx_queue_state[rx_queue_id];
+	qinfo->conf.rx_free_thresh = rxq->rx_free_thresh;
+	qinfo->conf.offloads = rxq->offloads;
+	qinfo->conf.rx_deferred_start = rxq->deferred_start;
+}
+
+static void
+xgmac_txq_info_get(struct rte_eth_dev *eth_dev, uint16_t tx_queue_id,
+		   struct rte_eth_txq_info *qinfo)
+{
+	struct xgmac_tx_queue *txq = eth_dev->data->tx_queues[tx_queue_id];
+
+	if (txq == NULL || qinfo == NULL)
+		return;
+
+	qinfo->nb_desc = txq->nb_desc;
+	qinfo->queue_state = eth_dev->data->tx_queue_state[tx_queue_id];
+	qinfo->conf.tx_free_thresh = txq->free_thresh;
+	qinfo->conf.offloads = txq->offloads;
+	qinfo->conf.tx_deferred_start = txq->deferred_start;
 }
 
 static int
@@ -241,6 +684,16 @@ static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.promiscuous_disable = xgmac_promiscuous_disable,
 	.allmulticast_enable = xgmac_allmulticast_enable,
 	.allmulticast_disable = xgmac_allmulticast_disable,
+	.rx_queue_setup = xgmac_rx_queue_setup,
+	.rx_queue_release = xgmac_rx_queue_release,
+	.rx_queue_start = xgmac_rx_queue_start,
+	.rx_queue_stop = xgmac_rx_queue_stop,
+	.tx_queue_setup = xgmac_tx_queue_setup,
+	.tx_queue_release = xgmac_tx_queue_release,
+	.tx_queue_start = xgmac_tx_queue_start,
+	.tx_queue_stop = xgmac_tx_queue_stop,
+	.rxq_info_get = xgmac_rxq_info_get,
+	.txq_info_get = xgmac_txq_info_get,
 };
 
 /* Check if platform device is Synopsys XGMAC by reading device tree compatible. */
@@ -313,6 +766,7 @@ xgmac_platform_probe(struct rte_platform_device *pdev)
 	dev = eth_dev->data->dev_private;
 	dev->csr_base = pdev->resource[0].mem.addr;
 	dev->csr_size = pdev->resource[0].mem.len;
+	dev->pdev = pdev;
 
 	xgmac_hw_features_get(dev);
 	ver = dev->hw_feat.version;

@@ -5,6 +5,7 @@
 #ifndef __XGMAC_ETHDEV_H__
 #define __XGMAC_ETHDEV_H__
 
+#include <ethdev_driver.h>
 #include <rte_io.h>
 #include <rte_log.h>
 
@@ -16,6 +17,8 @@ extern int xgmac_logtype;
 /* Base unit used to decode MAC_HW_Feature1.{TX,RX}FIFOSIZE into bytes. */
 #define XGMAC_FIFO_BASE_UNIT   128U
 #define XGMAC_FIFO_SIZE(_fsz)  (XGMAC_FIFO_BASE_UNIT << (_fsz))
+
+#define XGMAC_TIMEOUT_MS 5000
 
 struct xgmac_hw_features {
 	uint32_t version;
@@ -51,9 +54,12 @@ struct xgmac_hw_features {
 };
 
 struct xgmac_dev {
+	const struct rte_platform_device *pdev;
 	void *csr_base;
+	struct rte_eth_dev *eth_dev;
 	size_t csr_size;
 	uint8_t link_down;
+	uint16_t rx_buf_size;
 	struct xgmac_hw_features hw_feat;
 };
 
@@ -65,6 +71,16 @@ struct xgmac_dev {
 
 #define XGMAC_FIELD_PREP(_mask, _val) \
 	(((_val) << XGMAC_FIELD_SHIFT(_mask)) & (_mask))
+
+static inline uint32_t xgmac_low32(uint64_t addr)
+{
+	return (uint32_t)(addr);
+}
+
+static inline uint32_t xgmac_high32(uint64_t addr)
+{
+	return (uint32_t)(addr >> 32);
+}
 
 static inline uint32_t
 xgmac_rd(struct xgmac_dev *dev, uint32_t offset)

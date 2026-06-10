@@ -10,6 +10,8 @@
 #include <rte_io.h>
 
 struct xgmac_dev;
+struct xgmac_rx_queue;
+struct xgmac_tx_queue;
 
 /* MAC core helpers. */
 void xgmac_mac_init(struct xgmac_dev *dev, uint16_t nb_rx_queues);
@@ -25,5 +27,17 @@ void xgmac_hw_features_get(struct xgmac_dev *dev);
 
 /* MTL block helpers. */
 void xgmac_mtl_init(struct xgmac_dev *dev, uint16_t nb_tx_queues, uint16_t nb_rx_queues);
+
+/* DMA block helpers */
+int xgmac_dma_init(struct xgmac_dev *dev);
+void xgmac_dma_stop(struct xgmac_dev *dev);
+
+int xgmac_txq_prepare_stop(struct xgmac_dev *dev, uint16_t q);
+
+/* Per-queue bring-up / tear-down. */
+int xgmac_rxq_start(struct xgmac_dev *dev, struct xgmac_rx_queue *rxq);
+void xgmac_rxq_stop(struct xgmac_dev *dev, struct xgmac_rx_queue *rxq);
+void xgmac_txq_start(struct xgmac_dev *dev, struct xgmac_tx_queue *txq);
+void xgmac_txq_stop(struct xgmac_dev *dev, struct xgmac_tx_queue *txq);
 
 #endif /* __XGMAC_DEV_H__ */

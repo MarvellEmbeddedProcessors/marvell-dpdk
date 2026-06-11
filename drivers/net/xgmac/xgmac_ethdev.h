@@ -48,6 +48,7 @@ extern int xgmac_logtype;
 
 /* XGMAC architectural maximum number of queues (same for Rx/Tx). */
 #define XGMAC_MAX_QUEUES	8
+#define XGMAC_HASH_TABLE_REGS 8
 
 struct xgmac_pfc_rxq_cfg {
 	uint8_t  enabled;
@@ -157,6 +158,10 @@ struct xgmac_dev {
 	uint64_t rx_tstamp;
 	uint8_t rss_key[XGMAC_RSS_HASH_KEY_SIZE];
 	uint32_t rss_table[XGMAC_RSS_MAX_TABLE_SIZE];
+	uint32_t uc_hash_table[XGMAC_HASH_TABLE_REGS];
+	uint32_t mc_hash_table[XGMAC_HASH_TABLE_REGS];
+	uint32_t uc_hash_count;
+	uint8_t uc_hash_all;
 	uint8_t dcb_enable;
 	uint8_t dcb_nb_tcs;
 	uint8_t dcb_tc[RTE_ETH_DCB_NUM_USER_PRIORITIES];

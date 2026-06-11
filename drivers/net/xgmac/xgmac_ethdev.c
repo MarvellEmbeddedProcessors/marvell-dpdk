@@ -309,6 +309,7 @@ xgmac_dev_start(struct rte_eth_dev *eth_dev)
 	xgmac_pfc_queue_apply(dev, nb_tx_queues, nb_rx_queues);
 	xgmac_vlan_insert_cfg(dev);
 	xgmac_vlan_strip_cfg(dev);
+	xgmac_hash_table_replay(dev);
 
 	ret = xgmac_rss_configure(dev);
 	if (ret)
@@ -773,6 +774,7 @@ xgmac_dev_infos_get(struct rte_eth_dev *eth_dev, struct rte_eth_dev_info *info)
 	info->max_rx_queues = dev->hw_feat.rx_q_cnt;
 	info->max_tx_queues = dev->hw_feat.tx_q_cnt;
 	info->max_mac_addrs = dev->hw_feat.addn_mac + 1;
+	info->max_hash_mac_addrs = dev->hw_feat.hash_table_size;
 	info->speed_capa = RTE_ETH_LINK_SPEED_10G;
 	info->max_rx_pktlen = XGMAC_JUMBO_LEN;
 	info->min_mtu = RTE_ETHER_MIN_MTU;
@@ -1153,6 +1155,40 @@ xgmac_set_mc_addr_list(struct rte_eth_dev *eth_dev, struct rte_ether_addr *mc_ad
 	}
 
 	XGMAC_LOG(DEBUG, "MC addr list: %u addrs", nb_mc_addr);
+	return 0;
+}
+
+static int
+xgmac_dev_uc_hash_table_set(struct rte_eth_dev *eth_dev, struct rte_ether_addr *mac_addr,
+			    uint8_t on)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	int ret;
+
+	ret = xgmac_uc_hash_table_set(dev, mac_addr, on != 0);
+	if (ret) {
+		XGMAC_LOG(ERR, "Failed to %s UC hash entry", on ? "set" : "clear");
+		return ret;
+	}
+
+	XGMAC_LOG(DEBUG, "UC hash %s: " RTE_ETHER_ADDR_PRT_FMT, on ? "set" : "clear",
+		  RTE_ETHER_ADDR_BYTES(mac_addr));
+	return 0;
+}
+
+static int
+xgmac_dev_uc_all_hash_table_set(struct rte_eth_dev *eth_dev, uint8_t on)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	int ret;
+
+	ret = xgmac_uc_all_hash_table_set(dev, on != 0);
+	if (ret) {
+		XGMAC_LOG(ERR, "Failed to %s all UC hash entries", on ? "set" : "clear");
+		return ret;
+	}
+
+	XGMAC_LOG(DEBUG, "UC hash all %s", on ? "set" : "clear");
 	return 0;
 }
 
@@ -1678,6 +1714,8 @@ static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.mac_addr_add = xgmac_mac_addr_add,
 	.mac_addr_remove = xgmac_mac_addr_remove,
 	.set_mc_addr_list = xgmac_set_mc_addr_list,
+	.uc_hash_table_set = xgmac_dev_uc_hash_table_set,
+	.uc_all_hash_table_set = xgmac_dev_uc_all_hash_table_set,
 	.promiscuous_enable = xgmac_promiscuous_enable,
 	.promiscuous_disable = xgmac_promiscuous_disable,
 	.allmulticast_enable = xgmac_allmulticast_enable,
@@ -1799,6 +1837,15 @@ xgmac_eth_dev_init(struct rte_eth_dev *eth_dev)
 	}
 
 	xgmac_mac_addr_read(dev, 0, &eth_dev->data->mac_addrs[0]);
+
+	if (dev->hw_feat.hash_table_size > 0) {
+		eth_dev->data->hash_mac_addrs = rte_zmalloc(pdev->name,
+			dev->hw_feat.hash_table_size * sizeof(struct rte_ether_addr), 0);
+		if (eth_dev->data->hash_mac_addrs == NULL) {
+			XGMAC_LOG(ERR, "%s: failed to allocate hash_mac_addrs", pdev->name);
+			return -ENOMEM;
+		}
+	}
 
 	eth_dev->dev_ops = &xgmac_eth_dev_ops;
 	eth_dev->rx_descriptor_status = xgmac_rx_descriptor_status_op;

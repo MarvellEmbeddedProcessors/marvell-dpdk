@@ -67,6 +67,9 @@ void xgmac_vlan_insert_cfg(struct xgmac_dev *dev);
 void xgmac_vlan_strip_cfg(struct xgmac_dev *dev);
 int xgmac_mc_hash_filter_set(struct xgmac_dev *dev, struct rte_ether_addr *mc_addr_set,
 			     uint32_t nb_mc_addr);
+int xgmac_uc_hash_table_set(struct xgmac_dev *dev, struct rte_ether_addr *addr, bool add);
+int xgmac_uc_all_hash_table_set(struct xgmac_dev *dev, bool add);
+void xgmac_hash_table_replay(struct xgmac_dev *dev);
 void xgmac_hw_features_get(struct xgmac_dev *dev);
 
 /* MTL block helpers. */

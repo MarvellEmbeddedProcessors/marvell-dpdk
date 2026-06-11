@@ -544,13 +544,47 @@ xgmac_dma_ch_wait_stopped(struct xgmac_dev *dev, uint16_t q, uint32_t stop_mask,
 	return -ETIMEDOUT;
 }
 
+static uint32_t
+xgmac_num_hash_regs(struct xgmac_dev *dev)
+{
+	/* Number of MAC_Hash_Table_Reg(#i) registers backing the configured table. */
+	uint32_t num_hash_regs = dev->hw_feat.hash_table_size / 32;
+
+	if (num_hash_regs > XGMAC_MAX_HASH_TABLE)
+		num_hash_regs = XGMAC_MAX_HASH_TABLE;
+	return num_hash_regs;
+}
+
+static uint32_t
+xgmac_hash_bucket(struct xgmac_dev *dev, const uint8_t *addr)
+{
+	/* Map a MAC address to its hash-table bucket index. */
+	uint32_t hash_bits = rte_log2_u32(dev->hw_feat.hash_table_size);
+	uint32_t crc = xgmac_bitrev32(~xgmac_crc32_le(addr, RTE_ETHER_ADDR_LEN));
+
+	return crc >> (32 - hash_bits);
+}
+
+static void
+xgmac_hash_table_write(struct xgmac_dev *dev)
+{
+	uint32_t num_hash_regs = xgmac_num_hash_regs(dev);
+	uint32_t i;
+
+	/*
+	 * The unicast (HUC) and multicast (HMC) filters share one physical hash
+	 * table. Write the bitwise OR of the two shadows so updating one class
+	 * never clears the other's buckets.
+	 */
+	for (i = 0; i < num_hash_regs; i++)
+		xgmac_wr(dev, XGMAC_HASH_TABLE(i), dev->uc_hash_table[i] | dev->mc_hash_table[i]);
+}
+
 int
 xgmac_mc_hash_filter_set(struct xgmac_dev *dev, struct rte_ether_addr *mc_addr_set,
 			 uint32_t nb_mc_addr)
 {
-	uint32_t mc_filter[XGMAC_MAX_HASH_TABLE];
-	uint32_t hash_bits, num_hash_regs;
-	uint32_t val, crc, hash_idx;
+	uint32_t val, hash_idx;
 	uint32_t i;
 
 	if (dev->hw_feat.hash_table_size == 0) {
@@ -559,22 +593,14 @@ xgmac_mc_hash_filter_set(struct xgmac_dev *dev, struct rte_ether_addr *mc_addr_s
 		return 0;
 	}
 
-	hash_bits = rte_log2_u32(dev->hw_feat.hash_table_size);
-	num_hash_regs = dev->hw_feat.hash_table_size / 32;
-	if (num_hash_regs > XGMAC_MAX_HASH_TABLE)
-		num_hash_regs = XGMAC_MAX_HASH_TABLE;
-
-	memset(mc_filter, 0, sizeof(mc_filter));
+	memset(dev->mc_hash_table, 0, sizeof(dev->mc_hash_table));
 
 	for (i = 0; i < nb_mc_addr; i++) {
-		crc = xgmac_bitrev32(
-			~xgmac_crc32_le(mc_addr_set[i].addr_bytes, RTE_ETHER_ADDR_LEN));
-		hash_idx = crc >> (32 - hash_bits);
-		mc_filter[hash_idx >> 5] |= RTE_BIT32(hash_idx & 0x1f);
+		hash_idx = xgmac_hash_bucket(dev, mc_addr_set[i].addr_bytes);
+		dev->mc_hash_table[hash_idx >> 5] |= RTE_BIT32(hash_idx & 0x1f);
 	}
 
-	for (i = 0; i < num_hash_regs; i++)
-		xgmac_wr(dev, XGMAC_HASH_TABLE(i), mc_filter[i]);
+	xgmac_hash_table_write(dev);
 
 	val = xgmac_rd(dev, XGMAC_PACKET_FILTER);
 	if (nb_mc_addr > 0)
@@ -584,6 +610,91 @@ xgmac_mc_hash_filter_set(struct xgmac_dev *dev, struct rte_ether_addr *mc_addr_s
 	xgmac_wr(dev, XGMAC_PACKET_FILTER, val);
 
 	return 0;
+}
+
+int
+xgmac_uc_hash_table_set(struct xgmac_dev *dev, struct rte_ether_addr *addr, bool add)
+{
+	uint32_t val, hash_idx, word, mask;
+
+	if (dev->hw_feat.hash_table_size == 0)
+		return -ENOTSUP;
+
+	hash_idx = xgmac_hash_bucket(dev, addr->addr_bytes);
+	word = hash_idx >> 5;
+	mask = RTE_BIT32(hash_idx & 0x1f);
+
+	if (add) {
+		dev->uc_hash_table[word] |= mask;
+		dev->uc_hash_count++;
+	} else {
+		dev->uc_hash_table[word] &= ~mask;
+		if (dev->uc_hash_count > 0)
+			dev->uc_hash_count--;
+	}
+
+	xgmac_hash_table_write(dev);
+
+	val = xgmac_rd(dev, XGMAC_PACKET_FILTER);
+	if (dev->uc_hash_count > 0 || dev->uc_hash_all)
+		val |= XGMAC_FILTER_HUC;
+	else
+		val &= ~XGMAC_FILTER_HUC;
+	xgmac_wr(dev, XGMAC_PACKET_FILTER, val);
+
+	return 0;
+}
+
+int
+xgmac_uc_all_hash_table_set(struct xgmac_dev *dev, bool add)
+{
+	uint32_t num_hash_regs = xgmac_num_hash_regs(dev);
+	uint32_t val, i;
+
+	if (dev->hw_feat.hash_table_size == 0)
+		return -ENOTSUP;
+
+	for (i = 0; i < num_hash_regs; i++)
+		dev->uc_hash_table[i] = add ? ~0u : 0u;
+	dev->uc_hash_count = 0;
+	dev->uc_hash_all = add;
+
+	xgmac_hash_table_write(dev);
+
+	val = xgmac_rd(dev, XGMAC_PACKET_FILTER);
+	if (add)
+		val |= XGMAC_FILTER_HUC;
+	else
+		val &= ~XGMAC_FILTER_HUC;
+	xgmac_wr(dev, XGMAC_PACKET_FILTER, val);
+
+	return 0;
+}
+
+void
+xgmac_hash_table_replay(struct xgmac_dev *dev)
+{
+	uint32_t num_hash_regs = xgmac_num_hash_regs(dev);
+	uint32_t val, mc_any = 0, i;
+
+	if (dev->hw_feat.hash_table_size == 0)
+		return;
+
+	for (i = 0; i < num_hash_regs; i++)
+		mc_any |= dev->mc_hash_table[i];
+
+	xgmac_hash_table_write(dev);
+
+	val = xgmac_rd(dev, XGMAC_PACKET_FILTER);
+	if (dev->uc_hash_count > 0 || dev->uc_hash_all)
+		val |= XGMAC_FILTER_HUC;
+	else
+		val &= ~XGMAC_FILTER_HUC;
+	if (mc_any != 0)
+		val |= XGMAC_FILTER_HMC;
+	else
+		val &= ~XGMAC_FILTER_HMC;
+	xgmac_wr(dev, XGMAC_PACKET_FILTER, val);
 }
 
 #define XGMAC_DMA_OSR_LIMIT	0x3f

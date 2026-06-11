@@ -7,13 +7,14 @@
 #define XGMAC_MAX_RING_DESC	     4096
 #define XGMAC_MIN_RING_DESC	     32
 #define XGMAC_DESC_ALIGN	     128
+#define XGMAC_DEFAULT_RX_FREE_THRESH 32
 
 struct rte_memzone;
 
 struct xgmac_rx_desc_read {
 	/* RDES0/RDES1: buffer address (SW programmed, little-endian) */
 	uint64_t baddr;
-	/* RDES2: header length and control bits */
+	/* RDES2: payload / buffer 2 address pointer (0 = skip buffer 2) */
 	uint32_t rdes2;
 	/* RDES3: ownership/control in read format */
 	uint32_t rdes3;
@@ -40,6 +41,7 @@ struct xgmac_rx_queue {
 	struct rte_mbuf **sw_ring;
 	uint64_t cur;
 	uint64_t dirty;
+	uint64_t nb_bytes;
 	uint16_t nb_desc;
 	uint16_t port_id;
 	uint16_t crc_adj;
@@ -47,11 +49,16 @@ struct xgmac_rx_queue {
 	uint16_t rx_free_thresh;
 	uint16_t queue_id;
 	uint16_t pad0;
+	uint64_t nb_pkts;
 
 	/* Per-burst refill, feature paths, stats. */
 	struct xgmac_dev *dev;
 	struct rte_mempool *mb_pool;
 	uint64_t ring_phys_addr;
+	uint64_t errors;
+	uint64_t rx_mbuf_alloc_failed;
+	struct rte_mbuf *pkt_first_seg;
+	struct rte_mbuf *pkt_last_seg;
 
 	/* setup-only fields. */
 	const struct rte_memzone *mz;
@@ -87,10 +94,14 @@ struct xgmac_tx_queue {
 	struct rte_mbuf **sw_ring;
 	uint64_t cur;
 	uint64_t dirty;
+	uint64_t nb_pkts;
+	uint64_t nb_bytes;
 	uint16_t nb_desc;
 	uint16_t queue_id;
 	uint16_t port_id;
 	uint16_t free_thresh;
+
+	uint64_t errors;
 
 	/* setup-only fields. */
 	uint64_t ring_phys_addr;
@@ -98,5 +109,22 @@ struct xgmac_tx_queue {
 	uint64_t offloads;
 	uint8_t deferred_start;
 };
+
+/* RX offload flags */
+#define XGMAC_RX_OFFLOAD_NONE 0
+#define XGMAC_RX_SCATTER_F    RTE_BIT32(0)
+
+#define XGMAC_RX_FASTPATH_MODES                                                                    \
+	R(no_offload, XGMAC_RX_OFFLOAD_NONE)                                                       \
+	R(scatter, XGMAC_RX_SCATTER_F)
+
+#define R(name, flags)                                                                             \
+	uint16_t xgmac_recv_pkts_##name(void *rx_queue, struct rte_mbuf **rx_pkts,                 \
+					uint16_t nb_pkts);
+XGMAC_RX_FASTPATH_MODES
+#undef R
+
+void xgmac_rx_offload_update(struct rte_eth_dev *eth_dev);
+void xgmac_rxq_release_mbufs(struct xgmac_rx_queue *rxq);
 
 #endif /* __XGMAC_RXTX_H__ */

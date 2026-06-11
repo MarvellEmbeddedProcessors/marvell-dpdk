@@ -529,6 +529,8 @@ xgmac_rx_desc_init_one(struct xgmac_dev *dev, struct xgmac_rx_queue *rxq)
 	uint32_t val, rbufsz;
 	uint16_t i;
 
+	xgmac_rxq_release_mbufs(rxq);
+
 	val = xgmac_rd(dev, XGMAC_DMA_CH_CONTROL(q));
 	val |= XGMAC_PBLx8;
 	xgmac_wr(dev, XGMAC_DMA_CH_CONTROL(q), val);
@@ -550,6 +552,7 @@ xgmac_rx_desc_init_one(struct xgmac_dev *dev, struct xgmac_rx_queue *rxq)
 		mbuf = rte_mbuf_raw_alloc(rxq->mb_pool);
 		if (!mbuf) {
 			XGMAC_LOG(ERR, "rx mbuf alloc failed q=%u i=%u", q, i);
+			xgmac_rxq_release_mbufs(rxq);
 			return -ENOMEM;
 		}
 		rxq->sw_ring[i] = mbuf;
@@ -653,6 +656,9 @@ xgmac_rxq_stop(struct xgmac_dev *dev, struct xgmac_rx_queue *rxq)
 
 	val = xgmac_rd(dev, XGMAC_DMA_CH_RX_CONTROL(q));
 	xgmac_wr(dev, XGMAC_DMA_CH_RX_CONTROL(q), val & ~XGMAC_RXSR);
+	xgmac_dma_ch_wait_stopped(dev, q, XGMAC_RS, "Rx DMA");
+
+	xgmac_rxq_release_mbufs(rxq);
 }
 
 void

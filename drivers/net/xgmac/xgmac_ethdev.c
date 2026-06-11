@@ -86,6 +86,9 @@ xgmac_rx_queue_start(struct rte_eth_dev *eth_dev, uint16_t rx_queue_id)
 
 	eth_dev->data->rx_queue_state[rx_queue_id] = RTE_ETH_QUEUE_STATE_STARTED;
 
+	if (eth_dev->data->dev_started)
+		xgmac_rx_offload_update(eth_dev);
+
 	return 0;
 }
 
@@ -213,6 +216,7 @@ xgmac_dev_start(struct rte_eth_dev *eth_dev)
 	xgmac_wr(dev, XGMAC_RX_CONFIG, val | XGMAC_CONFIG_RE);
 
 	eth_dev->data->dev_started = 1;
+	xgmac_rx_offload_update(eth_dev);
 
 	return 0;
 
@@ -257,18 +261,13 @@ xgmac_dev_stop(struct rte_eth_dev *eth_dev)
 static void
 xgmac_rx_queue_free(struct xgmac_rx_queue *rxq)
 {
-	uint16_t i;
-
 	if (!rxq)
 		return;
 
-	if (rxq->sw_ring) {
-		for (i = 0; i < rxq->nb_desc; i++) {
-			if (rxq->sw_ring[i])
-				rte_pktmbuf_free(rxq->sw_ring[i]);
-		}
+	xgmac_rxq_release_mbufs(rxq);
+
+	if (rxq->sw_ring)
 		rte_free(rxq->sw_ring);
-	}
 	if (rxq->mz)
 		rte_memzone_free(rxq->mz);
 	rte_free(rxq);
@@ -316,16 +315,27 @@ xgmac_dev_close(struct rte_eth_dev *eth_dev)
 static int
 xgmac_rx_queue_setup(struct rte_eth_dev *dev, uint16_t rx_queue_id,
 		     uint16_t nb_rx_desc, unsigned int socket_id,
-		     const struct rte_eth_rxconf *rx_conf __rte_unused,
+		     const struct rte_eth_rxconf *rx_conf,
 		     struct rte_mempool *mb_pool)
 {
 	struct xgmac_rx_queue *rxq;
 	const struct rte_memzone *mz;
+	uint16_t rx_free_thresh;
 	size_t size;
 
 	if (nb_rx_desc < XGMAC_MIN_RING_DESC || nb_rx_desc > XGMAC_MAX_RING_DESC ||
 	    !rte_is_power_of_2(nb_rx_desc))
 		return -EINVAL;
+
+	rx_free_thresh =
+		rx_conf->rx_free_thresh ? rx_conf->rx_free_thresh : XGMAC_DEFAULT_RX_FREE_THRESH;
+
+	if (rx_free_thresh >= nb_rx_desc || rx_free_thresh > XGMAC_DEFAULT_RX_FREE_THRESH ||
+	    nb_rx_desc % rx_free_thresh != 0) {
+		XGMAC_LOG(ERR, "rx_free_thresh %u invalid for nb_rx_desc %u", rx_free_thresh,
+			  nb_rx_desc);
+		return -EINVAL;
+	}
 
 	if (dev->data->dev_started)
 		return -EBUSY;
@@ -340,7 +350,9 @@ xgmac_rx_queue_setup(struct rte_eth_dev *dev, uint16_t rx_queue_id,
 	if (!rxq)
 		return -ENOMEM;
 
+	rxq->dev = dev->data->dev_private;
 	rxq->nb_desc = nb_rx_desc;
+	rxq->rx_free_thresh = rx_free_thresh;
 	rxq->queue_id = rx_queue_id;
 	rxq->port_id = dev->data->port_id;
 	rxq->mb_pool = mb_pool;
@@ -517,7 +529,8 @@ xgmac_dev_infos_get(struct rte_eth_dev *eth_dev, struct rte_eth_dev_info *info)
 	info->max_rx_pktlen = XGMAC_JUMBO_LEN;
 	info->min_mtu = RTE_ETHER_MIN_MTU;
 	info->max_mtu = XGMAC_JUMBO_LEN - RTE_ETHER_HDR_LEN - RTE_ETHER_CRC_LEN;
-	info->rx_offload_capa = 0;
+	info->default_rxconf.rx_free_thresh = XGMAC_DEFAULT_RX_FREE_THRESH;
+	info->rx_offload_capa = RTE_ETH_RX_OFFLOAD_SCATTER;
 	info->tx_offload_capa = 0;
 
 	return 0;
@@ -578,6 +591,75 @@ static int
 xgmac_allmulticast_disable(struct rte_eth_dev *eth_dev)
 {
 	xgmac_mac_allmulticast_set(eth_dev->data->dev_private, false);
+
+	return 0;
+}
+
+static int
+xgmac_stats_get(struct rte_eth_dev *eth_dev, struct rte_eth_stats *stats,
+		struct eth_queue_stats *qstats)
+{
+	struct xgmac_rx_queue *rxq;
+	struct xgmac_tx_queue *txq;
+	uint16_t i;
+
+	memset(stats, 0, sizeof(*stats));
+
+	for (i = 0; i < eth_dev->data->nb_rx_queues; i++) {
+		rxq = eth_dev->data->rx_queues[i];
+		if (!rxq)
+			continue;
+		stats->ipackets += rxq->nb_pkts;
+		stats->ibytes += rxq->nb_bytes;
+		stats->ierrors += rxq->errors;
+		stats->rx_nombuf += rxq->rx_mbuf_alloc_failed;
+		if (qstats != NULL && i < RTE_ETHDEV_QUEUE_STAT_CNTRS) {
+			qstats->q_ipackets[i] = rxq->nb_pkts;
+			qstats->q_ibytes[i] = rxq->nb_bytes;
+			qstats->q_errors[i] = rxq->errors;
+		}
+	}
+	for (i = 0; i < eth_dev->data->nb_tx_queues; i++) {
+		txq = eth_dev->data->tx_queues[i];
+		if (!txq)
+			continue;
+		stats->opackets += txq->nb_pkts;
+		stats->obytes += txq->nb_bytes;
+		stats->oerrors += txq->errors;
+		if (qstats != NULL && i < RTE_ETHDEV_QUEUE_STAT_CNTRS) {
+			qstats->q_opackets[i] = txq->nb_pkts;
+			qstats->q_obytes[i] = txq->nb_bytes;
+		}
+	}
+
+	return 0;
+}
+
+static int
+xgmac_stats_reset(struct rte_eth_dev *eth_dev)
+{
+	struct xgmac_rx_queue *rxq;
+	struct xgmac_tx_queue *txq;
+	uint16_t i;
+
+	for (i = 0; i < eth_dev->data->nb_rx_queues; i++) {
+		rxq = eth_dev->data->rx_queues[i];
+		if (rxq) {
+			rxq->nb_pkts = 0;
+			rxq->nb_bytes = 0;
+			rxq->errors = 0;
+			rxq->rx_mbuf_alloc_failed = 0;
+		}
+	}
+
+	for (i = 0; i < eth_dev->data->nb_tx_queues; i++) {
+		txq = eth_dev->data->tx_queues[i];
+		if (txq) {
+			txq->nb_pkts = 0;
+			txq->nb_bytes = 0;
+			txq->errors = 0;
+		}
+	}
 
 	return 0;
 }
@@ -675,6 +757,8 @@ static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.dev_set_link_up = xgmac_dev_set_link_up,
 	.dev_set_link_down = xgmac_dev_set_link_down,
 	.link_update = xgmac_link_update,
+	.stats_get = xgmac_stats_get,
+	.stats_reset = xgmac_stats_reset,
 	.mtu_set = xgmac_mtu_set,
 	.mac_addr_set = xgmac_mac_addr_set,
 	.mac_addr_add = xgmac_mac_addr_add,
@@ -786,6 +870,7 @@ xgmac_platform_probe(struct rte_platform_device *pdev)
 
 	eth_dev->device = &pdev->device;
 	eth_dev->dev_ops = &xgmac_eth_dev_ops;
+	eth_dev->rx_pkt_burst = xgmac_recv_pkts_no_offload;
 	rte_eth_dev_probing_finish(eth_dev);
 
 	XGMAC_LOG(INFO, "%s: probed", pdev->name);

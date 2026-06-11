@@ -9,6 +9,7 @@ endif
 sources = files(
         'xgmac_dev.c',
         'xgmac_ethdev.c',
+        'xgmac_rx.c',
 )
 
 deps += ['bus_platform']

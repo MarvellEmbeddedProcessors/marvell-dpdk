@@ -81,13 +81,15 @@ xgmac_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts,
 	struct xgmac_tx_queue *txq = tx_queue;
 	struct rte_eth_dev *eth_dev = &rte_eth_devices[txq->port_id];
 	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	bool vlan_insert, qinq_insert, emit_vlan_ctx;
+	uint16_t avail, nsegs, desc_needed, j;
+	uint32_t tdes3, seg_tdes3, seg_tdes2;
 	volatile union xgmac_tx_desc *desc;
 	uint16_t nb_desc = txq->nb_desc;
 	struct rte_mbuf *mbuf, *seg;
 	uint16_t sent = 0, idx = 0;
-	uint32_t tdes3, seg_tdes3;
-	uint16_t avail, nsegs, j;
 	uint64_t cur = txq->cur;
+	uint16_t outer_tci;
 
 	if (unlikely(nb_pkts == 0))
 		return nb_pkts;
@@ -104,25 +106,62 @@ xgmac_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts,
 	while (sent < nb_pkts && avail > 0) {
 		mbuf = tx_pkts[sent];
 		nsegs = mbuf->nb_segs;
+		vlan_insert = (flags & XGMAC_TX_OFFLOAD_VLAN) &&
+			      (mbuf->ol_flags & (RTE_MBUF_F_TX_VLAN | RTE_MBUF_F_TX_QINQ));
+		qinq_insert = vlan_insert && (mbuf->ol_flags & RTE_MBUF_F_TX_QINQ);
+		outer_tci = qinq_insert ? mbuf->vlan_tci_outer : mbuf->vlan_tci;
+		emit_vlan_ctx = false;
+		if (vlan_insert) {
+			/* Per HW behavior, inner VLAN control must be refreshed per packet. */
+			if (qinq_insert) {
+				emit_vlan_ctx = true;
+			} else if (!txq->vlan_ctx_valid ||
+				   txq->vlan_ctx_qinq != (uint8_t)qinq_insert ||
+				   txq->vlan_ctx_outer_tci != outer_tci) {
+				emit_vlan_ctx = true;
+			}
+		}
+		desc_needed = nsegs + (emit_vlan_ctx ? 1 : 0);
 
 		if (nsegs == 0 || (!allow_mseg && nsegs != 1)) {
 			txq->errors++;
 			break;
 		}
-		if ((flags & XGMAC_TX_OFFLOAD_ANY) &&
-		    unlikely(mbuf->ol_flags & RTE_MBUF_F_TX_OFFLOAD_MASK)) {
-			txq->errors++;
-			break;
-		}
-		if (nsegs > avail)
+		if (desc_needed > avail)
 			break;
 
 		idx = cur & (nb_desc - 1);
+		if (emit_vlan_ctx) {
+			desc = &txq->desc[idx];
+			desc->read.baddr = 0;
+			desc->read.tdes2 = 0;
+			seg_tdes3 = XGMAC_TDES3_CTXT | XGMAC_TDES3_VLTV |
+				    XGMAC_FIELD_PREP(XGMAC_TDES3_VT, outer_tci);
+			if (qinq_insert) {
+				desc->read.tdes2 |= XGMAC_FIELD_PREP(XGMAC_TDES2_IVT,
+								     mbuf->vlan_tci);
+				seg_tdes3 |= XGMAC_TDES3_IVLTV |
+					     XGMAC_FIELD_PREP(XGMAC_TDES3_IVTIR,
+							      XGMAC_TDES3_IVTIR_INSERT);
+			}
+			desc->read.tdes3 = seg_tdes3;
+			txq->sw_ring[idx] = NULL;
+			txq->vlan_ctx_valid = 1;
+			txq->vlan_ctx_qinq = (uint8_t)qinq_insert;
+			txq->vlan_ctx_outer_tci = outer_tci;
+			txq->vlan_ctx_inner_tci = qinq_insert ? mbuf->vlan_tci : 0;
+			idx = DESC_OFF_ADD(idx, 1, nb_desc);
+		}
+
 		seg = mbuf;
 		for (j = 0; j < nsegs; j++) {
 			desc = &txq->desc[idx];
 			desc->read.baddr = rte_mbuf_data_iova(seg);
-			desc->read.tdes2 = XGMAC_FIELD_PREP(XGMAC_TDES2_B1L, seg->data_len);
+			seg_tdes2 = XGMAC_FIELD_PREP(XGMAC_TDES2_B1L, seg->data_len);
+			if (j == 0 && vlan_insert)
+				seg_tdes2 |= XGMAC_FIELD_PREP(XGMAC_TDES2_VTIR,
+							      XGMAC_TDES2_VTIR_INSERT);
+			desc->read.tdes2 = seg_tdes2;
 			seg_tdes3 = 0;
 			if (j == 0) {
 				seg_tdes3 = XGMAC_FIELD_PREP(XGMAC_TDES3_FL, mbuf->pkt_len);
@@ -139,7 +178,7 @@ xgmac_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts,
 
 		rte_wmb();
 		idx = cur & (nb_desc - 1);
-		for (j = 0; j < nsegs; j++) {
+		for (j = 0; j < desc_needed; j++) {
 			desc = &txq->desc[idx];
 			tdes3 = desc->read.tdes3;
 			desc->read.tdes3 = tdes3 | XGMAC_TDES3_OWN;
@@ -147,8 +186,8 @@ xgmac_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts,
 		}
 
 		txq->nb_bytes += mbuf->pkt_len;
-		cur = DESC_OFF_ADD(cur, nsegs, nb_desc);
-		avail -= nsegs;
+		cur = DESC_OFF_ADD(cur, desc_needed, nb_desc);
+		avail -= desc_needed;
 		sent++;
 	}
 	txq->nb_pkts += sent;

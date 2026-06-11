@@ -21,6 +21,7 @@ void xgmac_mac_addr_clear(struct xgmac_dev *dev, uint32_t index);
 void xgmac_mac_promiscuous_set(struct xgmac_dev *dev, bool enable);
 void xgmac_mac_allmulticast_set(struct xgmac_dev *dev, bool enable);
 void xgmac_mac_mtu_set(struct xgmac_dev *dev, uint16_t mtu);
+void xgmac_vlan_insert_cfg(struct xgmac_dev *dev);
 int xgmac_mc_hash_filter_set(struct xgmac_dev *dev, struct rte_ether_addr *mc_addr_set,
 			     uint32_t nb_mc_addr);
 void xgmac_hw_features_get(struct xgmac_dev *dev);

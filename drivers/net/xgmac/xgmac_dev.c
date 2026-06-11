@@ -43,6 +43,26 @@ xgmac_mac_init(struct xgmac_dev *dev, uint16_t nb_rx_queues)
 		  xgmac_rd(dev, XGMAC_PACKET_FILTER));
 }
 
+void
+xgmac_vlan_insert_cfg(struct xgmac_dev *dev)
+{
+	uint32_t val;
+
+	val = xgmac_rd(dev, XGMAC_VLAN_INCL(0));
+	val |= XGMAC_VLAN_VLTI;
+	val &= ~(XGMAC_VLAN_CSVL | XGMAC_VLAN_VLC);
+	if (dev->vlan_outer_svlan)
+		val |= XGMAC_VLAN_CSVL;
+	xgmac_wr(dev, XGMAC_VLAN_INCL(0), val);
+
+	val = xgmac_rd(dev, XGMAC_INNER_VLAN_INCL);
+	val |= XGMAC_VLAN_VLTI;
+	val &= ~(XGMAC_VLAN_CSVL | XGMAC_VLAN_VLC);
+	if (dev->vlan_inner_svlan)
+		val |= XGMAC_VLAN_CSVL;
+	xgmac_wr(dev, XGMAC_INNER_VLAN_INCL, val);
+}
+
 static void
 xgmac_rx_flow_control_config(struct xgmac_dev *dev, uint16_t queue, uint32_t fifo_per_q)
 {
@@ -644,6 +664,10 @@ xgmac_tx_desc_init_one(struct xgmac_dev *dev, struct xgmac_tx_queue *txq)
 
 	txq->cur = 0;
 	txq->dirty = 0;
+	txq->vlan_ctx_valid = 0;
+	txq->vlan_ctx_qinq = 0;
+	txq->vlan_ctx_outer_tci = 0;
+	txq->vlan_ctx_inner_tci = 0;
 
 	xgmac_wr(dev, XGMAC_DMA_CH_TxDESC_RING_LEN(q), txq->nb_desc - 1);
 	xgmac_wr(dev, XGMAC_DMA_CH_TxDESC_HADDR(q), xgmac_high32(txq->ring_phys_addr));

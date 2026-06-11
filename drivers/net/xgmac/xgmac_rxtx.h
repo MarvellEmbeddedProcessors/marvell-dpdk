@@ -102,6 +102,10 @@ struct xgmac_tx_queue {
 	uint16_t queue_id;
 	uint16_t port_id;
 	uint16_t free_thresh;
+	uint16_t vlan_ctx_outer_tci;
+	uint16_t vlan_ctx_inner_tci;
+	uint8_t vlan_ctx_qinq;
+	uint8_t vlan_ctx_valid;
 
 	uint64_t errors;
 

@@ -78,6 +78,10 @@ struct xgmac_dev {
 	struct rte_eth_dev *eth_dev;
 	size_t csr_size;
 	uint8_t link_down;
+	uint8_t vlan_outer_svlan;
+	uint8_t vlan_inner_svlan;
+	uint16_t vlan_outer_tpid;
+	uint16_t vlan_inner_tpid;
 	uint16_t rx_buf_size;
 	uint16_t tx_offload_flags;
 	struct xgmac_hw_features hw_feat;

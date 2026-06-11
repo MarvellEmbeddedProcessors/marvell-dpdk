@@ -79,6 +79,11 @@ xgmac_dev_configure(struct rte_eth_dev *eth_dev)
 		XGMAC_LOG(ERR, "MQ mode %u not supported", conf->rxmode.mq_mode);
 		return -EINVAL;
 	}
+	if ((conf->txmode.offloads & RTE_ETH_TX_OFFLOAD_QINQ_INSERT) &&
+	    !dev->hw_feat.dvlan) {
+		XGMAC_LOG(ERR, "QinQ insert offload requested but HW does not support double VLAN");
+		return -ENOTSUP;
+	}
 
 	return xgmac_tx_offload_update(eth_dev);
 }
@@ -201,6 +206,7 @@ xgmac_dev_start(struct rte_eth_dev *eth_dev)
 	xgmac_mac_init(dev, nb_rx_queues);
 	xgmac_mac_mtu_set(dev, eth_dev->data->mtu);
 	xgmac_mtl_init(dev, nb_tx_queues, nb_rx_queues);
+	xgmac_vlan_insert_cfg(dev);
 
 	ret = xgmac_rss_configure(dev);
 	if (ret)
@@ -283,6 +289,22 @@ xgmac_dev_stop(struct rte_eth_dev *eth_dev)
 	eth_dev->data->dev_started = 0;
 
 	return 0;
+}
+
+static inline bool
+xgmac_vlan_type_is_svlan(uint16_t tpid)
+{
+	return tpid == RTE_ETHER_TYPE_QINQ ||
+	       tpid == RTE_ETHER_TYPE_QINQ1 ||
+	       tpid == RTE_ETHER_TYPE_QINQ2 ||
+	       tpid == RTE_ETHER_TYPE_QINQ3;
+}
+
+static inline bool
+xgmac_vlan_type_combo_valid(const struct xgmac_dev *dev)
+{
+	/* XGMAC does not support outer C-VLAN + inner S-VLAN sequence. */
+	return !(!dev->vlan_outer_svlan && dev->vlan_inner_svlan);
 }
 
 static void
@@ -473,6 +495,10 @@ xgmac_tx_queue_setup(struct rte_eth_dev *dev, uint16_t tx_queue_id,
 	txq->dirty = 0;
 	txq->offloads = tx_conf->offloads | dev->data->dev_conf.txmode.offloads;
 	txq->deferred_start = tx_conf->tx_deferred_start;
+	txq->vlan_ctx_valid = 0;
+	txq->vlan_ctx_qinq = 0;
+	txq->vlan_ctx_outer_tci = 0;
+	txq->vlan_ctx_inner_tci = 0;
 
 	size = nb_tx_desc * sizeof(union xgmac_tx_desc);
 	mz = xgmac_dma_zone_reserve_bounded(dev, "tx_ring", tx_queue_id, size,
@@ -567,7 +593,10 @@ xgmac_dev_infos_get(struct rte_eth_dev *eth_dev, struct rte_eth_dev_info *info)
 	info->default_rxconf.rx_free_thresh = XGMAC_DEFAULT_RX_FREE_THRESH;
 	info->default_txconf.tx_free_thresh = XGMAC_DEFAULT_TX_FREE_THRESH;
 	info->rx_offload_capa = RTE_ETH_RX_OFFLOAD_SCATTER | RTE_ETH_RX_OFFLOAD_RSS_HASH;
-	info->tx_offload_capa = RTE_ETH_TX_OFFLOAD_MULTI_SEGS;
+	info->tx_offload_capa = RTE_ETH_TX_OFFLOAD_MULTI_SEGS |
+				RTE_ETH_TX_OFFLOAD_VLAN_INSERT;
+	if (dev->hw_feat.dvlan)
+		info->tx_offload_capa |= RTE_ETH_TX_OFFLOAD_QINQ_INSERT;
 
 	if (dev->hw_feat.rss) {
 		info->reta_size =
@@ -903,6 +932,50 @@ xgmac_dev_rss_hash_conf_get(struct rte_eth_dev *eth_dev, struct rte_eth_rss_conf
 
 	rss_conf->rss_key_len = XGMAC_RSS_HASH_KEY_SIZE;
 	rss_conf->rss_hf = dev->rss_hf;
+	return 0;
+}
+
+static int
+xgmac_vlan_offload_set(struct rte_eth_dev *eth_dev, int mask __rte_unused)
+{
+	return xgmac_tx_offload_update(eth_dev);
+}
+
+static int
+xgmac_vlan_tpid_set(struct rte_eth_dev *eth_dev, enum rte_vlan_type type, uint16_t tpid)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	uint8_t old_outer_svlan, old_inner_svlan;
+	uint16_t old_outer_tpid, old_inner_tpid;
+
+	old_outer_svlan = dev->vlan_outer_svlan;
+	old_inner_svlan = dev->vlan_inner_svlan;
+	old_outer_tpid = dev->vlan_outer_tpid;
+	old_inner_tpid = dev->vlan_inner_tpid;
+
+	switch (type) {
+	case RTE_ETH_VLAN_TYPE_OUTER:
+		dev->vlan_outer_tpid = tpid;
+		dev->vlan_outer_svlan = xgmac_vlan_type_is_svlan(tpid);
+		break;
+	case RTE_ETH_VLAN_TYPE_INNER:
+		if (!dev->hw_feat.dvlan)
+			return -ENOTSUP;
+		dev->vlan_inner_tpid = tpid;
+		dev->vlan_inner_svlan = xgmac_vlan_type_is_svlan(tpid);
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	if (!xgmac_vlan_type_combo_valid(dev)) {
+		dev->vlan_outer_svlan = old_outer_svlan;
+		dev->vlan_inner_svlan = old_inner_svlan;
+		dev->vlan_outer_tpid = old_outer_tpid;
+		dev->vlan_inner_tpid = old_inner_tpid;
+		return -EINVAL;
+	}
+	xgmac_vlan_insert_cfg(dev);
 
 	return 0;
 }
@@ -927,6 +1000,8 @@ static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.promiscuous_disable = xgmac_promiscuous_disable,
 	.allmulticast_enable = xgmac_allmulticast_enable,
 	.allmulticast_disable = xgmac_allmulticast_disable,
+	.vlan_offload_set = xgmac_vlan_offload_set,
+	.vlan_tpid_set = xgmac_vlan_tpid_set,
 	.rx_queue_setup = xgmac_rx_queue_setup,
 	.rx_queue_release = xgmac_rx_queue_release,
 	.rx_queue_start = xgmac_rx_queue_start,
@@ -1015,6 +1090,10 @@ xgmac_platform_probe(struct rte_platform_device *pdev)
 	dev->csr_size = pdev->resource[0].mem.len;
 	dev->pdev = pdev;
 	dev->tx_offload_flags = XGMAC_TX_OFFLOAD_NONE;
+	dev->vlan_outer_tpid = RTE_ETHER_TYPE_VLAN;
+	dev->vlan_inner_tpid = RTE_ETHER_TYPE_VLAN;
+	dev->vlan_outer_svlan = 0;
+	dev->vlan_inner_svlan = 0;
 
 	xgmac_hw_features_get(dev);
 	ver = dev->hw_feat.version;

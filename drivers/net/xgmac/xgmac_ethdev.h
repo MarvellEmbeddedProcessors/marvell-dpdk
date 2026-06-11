@@ -19,6 +19,15 @@ extern int xgmac_logtype;
 #define XGMAC_FIFO_SIZE(_fsz)  (XGMAC_FIFO_BASE_UNIT << (_fsz))
 
 #define XGMAC_TIMEOUT_MS 5000
+#define XGMAC_TX_OFFLOAD_NONE 0x0
+#define XGMAC_TX_OFFLOAD_CKSUM 0x1
+#define XGMAC_TX_OFFLOAD_VLAN  0x2
+#define XGMAC_TX_OFFLOAD_TSO   0x4
+#define XGMAC_TX_MULTI_SEG     0x8
+#define XGMAC_TX_OFFLOAD_ANY   (XGMAC_TX_OFFLOAD_CKSUM | \
+				XGMAC_TX_OFFLOAD_VLAN | \
+				XGMAC_TX_OFFLOAD_TSO)
+#define XGMAC_TX_MODE_MAX      16
 
 struct xgmac_hw_features {
 	uint32_t version;
@@ -60,6 +69,7 @@ struct xgmac_dev {
 	size_t csr_size;
 	uint8_t link_down;
 	uint16_t rx_buf_size;
+	uint16_t tx_offload_flags;
 	struct xgmac_hw_features hw_feat;
 };
 

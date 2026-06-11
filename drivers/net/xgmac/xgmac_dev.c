@@ -320,11 +320,25 @@ xgmac_mc_hash_filter_set(struct xgmac_dev *dev, struct rte_ether_addr *mc_addr_s
 }
 
 #define XGMAC_DMA_OSR_LIMIT	0x3f
-#define XGMAC_TDPS		0x5
-#define XGMAC_RDPS		0x5
+
+static inline uint32_t
+xgmac_edma_ch_mask(uint16_t nb_q)
+{
+	if (nb_q == 0)
+		nb_q = 1;
+	if (nb_q >= 30)
+		return RTE_GENMASK32(29, 0);
+
+	return RTE_BIT32(nb_q) - 1;
+}
+
 int
 xgmac_dma_init(struct xgmac_dev *dev)
 {
+	struct rte_eth_dev *eth_dev = dev->eth_dev;
+	uint16_t nb_txq = eth_dev->data->nb_tx_queues;
+	uint16_t nb_rxq = eth_dev->data->nb_rx_queues;
+	uint32_t tx_mask, rx_mask;
 	uint64_t tmo_ms;
 	uint32_t val;
 
@@ -353,8 +367,12 @@ xgmac_dma_init(struct xgmac_dev *dev)
 	val |= XGMAC_UNDEF;
 	xgmac_wr(dev, XGMAC_DMA_SYSBUS_MODE, val);
 
-	xgmac_wr(dev, XGMAC_TX_EDMA_CTRL, XGMAC_TDPS);
-	xgmac_wr(dev, XGMAC_RX_EDMA_CTRL, XGMAC_RDPS);
+	tx_mask = xgmac_edma_ch_mask(nb_txq);
+	rx_mask = xgmac_edma_ch_mask(nb_rxq);
+	xgmac_wr(dev, XGMAC_TX_EDMA_CTRL, tx_mask);
+	xgmac_wr(dev, XGMAC_RX_EDMA_CTRL, rx_mask);
+
+	XGMAC_LOG(INFO, "EDMA channel mask: tx=0x%x rx=0x%x", tx_mask, rx_mask);
 
 	return 0;
 }

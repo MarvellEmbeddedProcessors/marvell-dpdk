@@ -8,6 +8,7 @@
 #define XGMAC_MIN_RING_DESC	     32
 #define XGMAC_DESC_ALIGN	     128
 #define XGMAC_DEFAULT_RX_FREE_THRESH 32
+#define XGMAC_DEFAULT_TX_FREE_THRESH 32
 
 struct rte_memzone;
 
@@ -35,6 +36,7 @@ union xgmac_rx_desc {
 };
 
 struct xgmac_dev;
+struct rte_eth_dev;
 
 struct xgmac_rx_queue {
 	volatile union xgmac_rx_desc *desc;
@@ -109,6 +111,47 @@ struct xgmac_tx_queue {
 	uint64_t offloads;
 	uint8_t deferred_start;
 };
+
+/* XGMAC TX fastpath mode combinations */
+#define XGMAC_TX_F_NONE XGMAC_TX_OFFLOAD_NONE
+#define XGMAC_TX_F_CSUM XGMAC_TX_OFFLOAD_CKSUM
+#define XGMAC_TX_F_VLAN XGMAC_TX_OFFLOAD_VLAN
+#define XGMAC_TX_F_TSO  XGMAC_TX_OFFLOAD_TSO
+#define XGMAC_TX_F_MSEG XGMAC_TX_MULTI_SEG
+
+#define XGMAC_TX_FASTPATH_MODES \
+	E(none, XGMAC_TX_F_NONE) \
+	E(csum, XGMAC_TX_F_CSUM) \
+	E(vlan, XGMAC_TX_F_VLAN) \
+	E(csum_vlan, (XGMAC_TX_F_CSUM | XGMAC_TX_F_VLAN)) \
+	E(tso, XGMAC_TX_F_TSO) \
+	E(csum_tso, (XGMAC_TX_F_CSUM | XGMAC_TX_F_TSO)) \
+	E(vlan_tso, (XGMAC_TX_F_VLAN | XGMAC_TX_F_TSO)) \
+	E(csum_vlan_tso, (XGMAC_TX_F_CSUM | XGMAC_TX_F_VLAN | XGMAC_TX_F_TSO)) \
+	E(mseg, XGMAC_TX_F_MSEG) \
+	E(csum_mseg, (XGMAC_TX_F_CSUM | XGMAC_TX_F_MSEG)) \
+	E(vlan_mseg, (XGMAC_TX_F_VLAN | XGMAC_TX_F_MSEG)) \
+	E(csum_vlan_mseg, (XGMAC_TX_F_CSUM | XGMAC_TX_F_VLAN | XGMAC_TX_F_MSEG)) \
+	E(tso_mseg, (XGMAC_TX_F_TSO | XGMAC_TX_F_MSEG)) \
+	E(csum_tso_mseg, (XGMAC_TX_F_CSUM | XGMAC_TX_F_TSO | XGMAC_TX_F_MSEG)) \
+	E(vlan_tso_mseg, (XGMAC_TX_F_VLAN | XGMAC_TX_F_TSO | XGMAC_TX_F_MSEG)) \
+	E(csum_vlan_tso_mseg, (XGMAC_TX_F_CSUM | XGMAC_TX_F_VLAN | XGMAC_TX_F_TSO | \
+			       XGMAC_TX_F_MSEG))
+
+#define DESC_OFF_ADD(a, b, q_sz)  ((a + b) & (q_sz - 1))
+#define DESC_OFF_DIFF(a, b, q_sz) ((a - b + q_sz) & (q_sz - 1))
+
+static __rte_always_inline uint16_t
+xgmac_desc_avail(uint16_t cur, uint16_t dirty, uint16_t nb_desc)
+{
+	uint16_t used;
+
+	used = DESC_OFF_DIFF(cur, dirty, nb_desc);
+	return (nb_desc - 1) - used;
+}
+
+extern const eth_tx_burst_t xgmac_eth_tx_burst[XGMAC_TX_MODE_MAX];
+int xgmac_tx_offload_update(struct rte_eth_dev *eth_dev);
 
 /* RX offload flags */
 #define XGMAC_RX_OFFLOAD_NONE 0

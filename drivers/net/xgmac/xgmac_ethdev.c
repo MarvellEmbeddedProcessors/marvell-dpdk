@@ -38,6 +38,18 @@ xgmac_dma_zone_reserve_bounded(const struct rte_eth_dev *eth_dev, const char *ri
 					    XGMAC_DMA_RING_BOUNDARY);
 }
 
+static const struct rte_eth_desc_lim xgmac_rx_desc_lim = {
+	.nb_max = XGMAC_MAX_RING_DESC,
+	.nb_min = XGMAC_MIN_RING_DESC,
+	.nb_align = 8,
+};
+
+static const struct rte_eth_desc_lim xgmac_tx_desc_lim = {
+	.nb_max = XGMAC_MAX_RING_DESC,
+	.nb_min = XGMAC_MIN_RING_DESC,
+	.nb_align = 8,
+};
+
 static int
 xgmac_dev_configure(struct rte_eth_dev *eth_dev)
 {
@@ -60,7 +72,7 @@ xgmac_dev_configure(struct rte_eth_dev *eth_dev)
 		return -EINVAL;
 	}
 
-	return 0;
+	return xgmac_tx_offload_update(eth_dev);
 }
 
 static int
@@ -217,6 +229,7 @@ xgmac_dev_start(struct rte_eth_dev *eth_dev)
 
 	eth_dev->data->dev_started = 1;
 	xgmac_rx_offload_update(eth_dev);
+	xgmac_tx_offload_update(eth_dev);
 
 	return 0;
 
@@ -411,7 +424,7 @@ xgmac_rx_queue_release(struct rte_eth_dev *dev, uint16_t rx_queue_id)
 static int
 xgmac_tx_queue_setup(struct rte_eth_dev *dev, uint16_t tx_queue_id,
 		     uint16_t nb_tx_desc, unsigned int socket_id,
-		     const struct rte_eth_txconf *tx_conf __rte_unused)
+		     const struct rte_eth_txconf *tx_conf)
 {
 	struct xgmac_tx_queue *txq;
 	const struct rte_memzone *mz;
@@ -436,6 +449,12 @@ xgmac_tx_queue_setup(struct rte_eth_dev *dev, uint16_t tx_queue_id,
 	txq->nb_desc = nb_tx_desc;
 	txq->queue_id = tx_queue_id;
 	txq->port_id = dev->data->port_id;
+	txq->free_thresh = tx_conf->tx_free_thresh ?
+		tx_conf->tx_free_thresh : XGMAC_DEFAULT_TX_FREE_THRESH;
+	if (txq->free_thresh > txq->nb_desc)
+		txq->free_thresh = (txq->nb_desc >> 1);
+	if (txq->free_thresh == 0)
+		txq->free_thresh = 1;
 	txq->cur = 0;
 	txq->dirty = 0;
 	txq->offloads = tx_conf->offloads | dev->data->dev_conf.txmode.offloads;
@@ -529,9 +548,12 @@ xgmac_dev_infos_get(struct rte_eth_dev *eth_dev, struct rte_eth_dev_info *info)
 	info->max_rx_pktlen = XGMAC_JUMBO_LEN;
 	info->min_mtu = RTE_ETHER_MIN_MTU;
 	info->max_mtu = XGMAC_JUMBO_LEN - RTE_ETHER_HDR_LEN - RTE_ETHER_CRC_LEN;
+	info->rx_desc_lim = xgmac_rx_desc_lim;
+	info->tx_desc_lim = xgmac_tx_desc_lim;
 	info->default_rxconf.rx_free_thresh = XGMAC_DEFAULT_RX_FREE_THRESH;
+	info->default_txconf.tx_free_thresh = XGMAC_DEFAULT_TX_FREE_THRESH;
 	info->rx_offload_capa = RTE_ETH_RX_OFFLOAD_SCATTER;
-	info->tx_offload_capa = 0;
+	info->tx_offload_capa = RTE_ETH_TX_OFFLOAD_MULTI_SEGS;
 
 	return 0;
 }
@@ -851,6 +873,7 @@ xgmac_platform_probe(struct rte_platform_device *pdev)
 	dev->csr_base = pdev->resource[0].mem.addr;
 	dev->csr_size = pdev->resource[0].mem.len;
 	dev->pdev = pdev;
+	dev->tx_offload_flags = XGMAC_TX_OFFLOAD_NONE;
 
 	xgmac_hw_features_get(dev);
 	ver = dev->hw_feat.version;
@@ -871,6 +894,8 @@ xgmac_platform_probe(struct rte_platform_device *pdev)
 	eth_dev->device = &pdev->device;
 	eth_dev->dev_ops = &xgmac_eth_dev_ops;
 	eth_dev->rx_pkt_burst = xgmac_recv_pkts_no_offload;
+
+	xgmac_tx_offload_update(eth_dev);
 	rte_eth_dev_probing_finish(eth_dev);
 
 	XGMAC_LOG(INFO, "%s: probed", pdev->name);

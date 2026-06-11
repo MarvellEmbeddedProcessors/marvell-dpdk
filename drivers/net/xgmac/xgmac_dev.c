@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include <rte_ether.h>
+#include <rte_random.h>
 
 #include "xgmac_dev.h"
 #include "xgmac_ethdev.h"
@@ -705,4 +706,201 @@ xgmac_txq_stop(struct xgmac_dev *dev, struct xgmac_tx_queue *txq)
 	xgmac_txq_sw_ring_reset(txq);
 	txq->cur = 0;
 	txq->dirty = 0;
+}
+
+static int
+xgmac_wait_rss_idle(struct xgmac_dev *dev)
+{
+	unsigned int retries = 1000;
+
+	while (retries--) {
+		if (!(xgmac_rd(dev, XGMAC_RSS_ADDR) & XGMAC_RSS_ADDR_OB))
+			return 0;
+
+		rte_delay_us(100);
+	}
+
+	return -EBUSY;
+}
+
+static int
+xgmac_write_rss_reg(struct xgmac_dev *dev, unsigned int type, unsigned int index, uint32_t val)
+{
+	if (xgmac_wait_rss_idle(dev))
+		return -EBUSY;
+
+	xgmac_wr(dev, XGMAC_RSS_DATA, val);
+
+	xgmac_wr(dev, XGMAC_RSS_ADDR,
+		 XGMAC_FIELD_PREP(XGMAC_RSS_ADDR_RSSIA, index) |
+			 XGMAC_FIELD_PREP(XGMAC_RSS_ADDR_ADDRT, type) | XGMAC_RSS_ADDR_OB);
+
+	return xgmac_wait_rss_idle(dev);
+}
+
+int
+xgmac_write_rss_hash_key(struct xgmac_dev *dev)
+{
+	unsigned int key_regs = XGMAC_RSS_HASH_KEY_SIZE / sizeof(uint32_t);
+	uint32_t *key = (uint32_t *)dev->rss_key;
+	int ret;
+
+	while (key_regs--) {
+		ret = xgmac_write_rss_reg(dev, XGMAC_RSS_HASH_KEY_TYPE, key_regs, *key++);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+int
+xgmac_write_rss_lookup_table(struct xgmac_dev *dev)
+{
+	unsigned int i;
+	int ret;
+
+	for (i = 0; i < dev->rss_table_size; i++) {
+		ret = xgmac_write_rss_reg(dev, XGMAC_RSS_LOOKUP_TABLE_TYPE, i, dev->rss_table[i]);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static uint16_t
+xgmac_rss_table_size_get(struct xgmac_dev *dev)
+{
+	uint32_t val, rsslsz;
+	uint16_t size;
+
+	val = xgmac_rd(dev, XGMAC_RSS_CTRL);
+	rsslsz = XGMAC_FIELD_GET(XGMAC_RSS_CTRL_RSSLSZ, val);
+	size = RTE_MIN(16u << rsslsz, (unsigned int)XGMAC_RSS_MAX_TABLE_SIZE);
+
+	XGMAC_LOG(INFO, "RSS RETA size: %u entries (RSSLSZ=%u)", size, rsslsz);
+	return size;
+}
+
+static void
+xgmac_rss_options_set(struct xgmac_dev *dev)
+{
+	uint64_t rss_hf = dev->rss_hf;
+
+	dev->rss_options = 0;
+
+	if (rss_hf & (RTE_ETH_RSS_IPV4 | RTE_ETH_RSS_IPV6))
+		dev->rss_options |= XGMAC_IP2TE;
+	if (rss_hf & (RTE_ETH_RSS_NONFRAG_IPV4_TCP | RTE_ETH_RSS_NONFRAG_IPV6_TCP))
+		dev->rss_options |= XGMAC_TCP4TE;
+	if (rss_hf & (RTE_ETH_RSS_NONFRAG_IPV4_UDP | RTE_ETH_RSS_NONFRAG_IPV6_UDP))
+		dev->rss_options |= XGMAC_UDP4TE;
+}
+
+static int
+xgmac_rss_enable(struct xgmac_dev *dev)
+{
+	int ret;
+
+	ret = xgmac_write_rss_hash_key(dev);
+	if (ret) {
+		XGMAC_LOG(ERR, "RSS hash key write failed: %d", ret);
+		return ret;
+	}
+
+	ret = xgmac_write_rss_lookup_table(dev);
+	if (ret) {
+		XGMAC_LOG(ERR, "RSS lookup table write failed: %d", ret);
+		return ret;
+	}
+
+	xgmac_wr(dev, XGMAC_RSS_CTRL, dev->rss_options | XGMAC_RSSE);
+	XGMAC_LOG(DEBUG, "RSS_CTRL after program: 0x%08x (options=0x%x)",
+		  xgmac_rd(dev, XGMAC_RSS_CTRL), dev->rss_options);
+
+	return 0;
+}
+
+static void
+xgmac_rss_set_dynamic_mtl_mapping(struct xgmac_dev *dev, uint16_t nb_rx_queues)
+{
+	static const uint32_t rxq_dma_map_regs[] = {
+		XGMAC_MTL_RXQ_DMA_MAP0,
+		XGMAC_MTL_RXQ_DMA_MAP1,
+		XGMAC_MTL_RXQ_DMA_MAP2,
+		XGMAC_MTL_RXQ_DMA_MAP3,
+	};
+	const uint16_t queues_per_reg = 4;
+	uint32_t reg_val = 0;
+	uint16_t i;
+
+	for (i = 0; i < nb_rx_queues; i++) {
+		uint16_t reg = i / queues_per_reg;
+		uint16_t pos = i % queues_per_reg;
+
+		if (pos == 0)
+			reg_val = xgmac_rd(dev, rxq_dma_map_regs[reg]);
+
+		reg_val |= 0x80u << (pos * 8);
+
+		if (pos == queues_per_reg - 1 || i == nb_rx_queues - 1)
+			xgmac_wr(dev, rxq_dma_map_regs[reg], reg_val);
+	}
+}
+
+int
+xgmac_rss_configure(struct xgmac_dev *dev)
+{
+	struct rte_eth_dev *eth_dev = dev->eth_dev;
+	uint16_t nb_rx_queues = eth_dev->data->nb_rx_queues;
+	struct rte_eth_rss_conf *rss_conf;
+	uint32_t i;
+	int ret;
+
+	if (!dev->rss_enable) {
+		uint32_t val = xgmac_rd(dev, XGMAC_RSS_CTRL);
+
+		xgmac_wr(dev, XGMAC_RSS_CTRL, val & ~XGMAC_RSSE);
+		return 0;
+	}
+
+	if (!dev->rss_table_size)
+		dev->rss_table_size = xgmac_rss_table_size_get(dev);
+
+	rss_conf = &eth_dev->data->dev_conf.rx_adv_conf.rss_conf;
+
+	if (rss_conf->rss_key != NULL && rss_conf->rss_key_len == XGMAC_RSS_HASH_KEY_SIZE) {
+		memcpy(dev->rss_key, rss_conf->rss_key, XGMAC_RSS_HASH_KEY_SIZE);
+	} else {
+		uint32_t *key = (uint32_t *)dev->rss_key;
+
+		for (i = 0; i < XGMAC_RSS_HASH_KEY_SIZE / sizeof(uint32_t); i++)
+			key[i] = (uint32_t)rte_rand();
+	}
+
+	for (i = 0; i < dev->rss_table_size; i++)
+		dev->rss_table[i] = i % nb_rx_queues;
+
+	if (rss_conf->rss_hf)
+		dev->rss_hf = rss_conf->rss_hf & XGMAC_RSS_OFFLOAD;
+	else
+		dev->rss_hf = XGMAC_RSS_OFFLOAD;
+
+	xgmac_rss_options_set(dev);
+
+	ret = xgmac_rss_enable(dev);
+	if (ret) {
+		XGMAC_LOG(ERR, "Failed to enable RSS");
+		return ret;
+	}
+
+	xgmac_rss_set_dynamic_mtl_mapping(dev, nb_rx_queues);
+
+	XGMAC_LOG(INFO, "RSS enabled: queues=%u reta_size=%u hf=0x%" PRIx64
+		  " RSS_CTRL=0x%x MTL_MAP0=0x%x",
+		  nb_rx_queues, dev->rss_table_size, dev->rss_hf,
+		  xgmac_rd(dev, XGMAC_RSS_CTRL),
+		  xgmac_rd(dev, XGMAC_MTL_RXQ_DMA_MAP0));
+	return 0;
 }

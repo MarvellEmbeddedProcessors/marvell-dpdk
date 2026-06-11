@@ -168,7 +168,12 @@ xgmac_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts, con
 			first_seg->pkt_len = pkt_len;
 			first_seg->port = port_id;
 
+			if ((flags & XGMAC_RX_RSS_HASH_F) && (rdes3 & XGMAC_RDES3_RSV)) {
+				first_seg->hash.rss = desc->write.rdes1;
+				first_seg->ol_flags |= RTE_MBUF_F_RX_RSS_HASH;
+			}
 			nb_bytes += pkt_len;
+
 			rx_pkts[nb_rx++] = first_seg;
 			first_seg = NULL;
 			last_seg = NULL;
@@ -179,6 +184,10 @@ xgmac_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts, con
 			mbuf->port = port_id;
 			mbuf->nb_segs = 1;
 
+			if ((flags & XGMAC_RX_RSS_HASH_F) && (rdes3 & XGMAC_RDES3_RSV)) {
+				mbuf->hash.rss = desc->write.rdes1;
+				mbuf->ol_flags |= RTE_MBUF_F_RX_RSS_HASH;
+			}
 			nb_bytes += pkt_len;
 			rx_pkts[nb_rx++] = mbuf;
 		}
@@ -227,6 +236,9 @@ xgmac_rx_offload_update(struct rte_eth_dev *eth_dev)
 	if ((eth_dev->data->dev_conf.rxmode.offloads & RTE_ETH_RX_OFFLOAD_SCATTER) ||
 	    max_pkt_len > dev->rx_buf_size)
 		f |= XGMAC_RX_SCATTER_F;
+
+	if (dev->rss_enable)
+		f |= XGMAC_RX_RSS_HASH_F;
 
 	eth_dev->data->scattered_rx = !!(f & XGMAC_RX_SCATTER_F);
 	eth_dev->rx_pkt_burst = rx_burst[f];

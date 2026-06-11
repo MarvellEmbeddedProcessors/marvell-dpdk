@@ -67,7 +67,15 @@ xgmac_dev_configure(struct rte_eth_dev *eth_dev)
 		return -EINVAL;
 	}
 
-	if (conf->rxmode.mq_mode != RTE_ETH_MQ_RX_NONE) {
+	if (conf->rxmode.mq_mode == RTE_ETH_MQ_RX_RSS) {
+		if (!dev->hw_feat.rss) {
+			XGMAC_LOG(ERR, "RSS not supported by HW");
+			return -EINVAL;
+		}
+		dev->rss_enable = 1;
+	} else if (conf->rxmode.mq_mode == RTE_ETH_MQ_RX_NONE) {
+		dev->rss_enable = 0;
+	} else {
 		XGMAC_LOG(ERR, "MQ mode %u not supported", conf->rxmode.mq_mode);
 		return -EINVAL;
 	}
@@ -194,6 +202,10 @@ xgmac_dev_start(struct rte_eth_dev *eth_dev)
 	xgmac_mac_mtu_set(dev, eth_dev->data->mtu);
 	xgmac_mtl_init(dev, nb_tx_queues, nb_rx_queues);
 
+	ret = xgmac_rss_configure(dev);
+	if (ret)
+		goto dma_stop;
+
 	dev->rx_buf_size = 0;
 	for (q = 0; q < nb_rx_queues; q++) {
 		struct xgmac_rx_queue *rxq = eth_dev->data->rx_queues[q];
@@ -242,6 +254,8 @@ stop_queues:
 		if (eth_dev->data->tx_queue_state[q] == RTE_ETH_QUEUE_STATE_STARTED)
 			xgmac_tx_queue_stop(eth_dev, q);
 	}
+dma_stop:
+	xgmac_dma_stop(dev);
 
 	return ret;
 }
@@ -552,8 +566,15 @@ xgmac_dev_infos_get(struct rte_eth_dev *eth_dev, struct rte_eth_dev_info *info)
 	info->tx_desc_lim = xgmac_tx_desc_lim;
 	info->default_rxconf.rx_free_thresh = XGMAC_DEFAULT_RX_FREE_THRESH;
 	info->default_txconf.tx_free_thresh = XGMAC_DEFAULT_TX_FREE_THRESH;
-	info->rx_offload_capa = RTE_ETH_RX_OFFLOAD_SCATTER;
+	info->rx_offload_capa = RTE_ETH_RX_OFFLOAD_SCATTER | RTE_ETH_RX_OFFLOAD_RSS_HASH;
 	info->tx_offload_capa = RTE_ETH_TX_OFFLOAD_MULTI_SEGS;
+
+	if (dev->hw_feat.rss) {
+		info->reta_size =
+			dev->rss_table_size ? dev->rss_table_size : XGMAC_RSS_MAX_TABLE_SIZE;
+		info->hash_key_size = XGMAC_RSS_HASH_KEY_SIZE;
+		info->flow_type_rss_offloads = XGMAC_RSS_OFFLOAD;
+	}
 
 	return 0;
 }
@@ -770,6 +791,122 @@ xgmac_set_mc_addr_list(struct rte_eth_dev *eth_dev, struct rte_ether_addr *mc_ad
 	return 0;
 }
 
+static int
+xgmac_dev_rss_reta_update(struct rte_eth_dev *eth_dev, struct rte_eth_rss_reta_entry64 *reta_conf,
+			  uint16_t reta_size)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	unsigned int i, idx, shift;
+
+	if (!dev->rss_enable) {
+		XGMAC_LOG(ERR, "RSS not enabled");
+		return -ENOTSUP;
+	}
+
+	if (reta_size == 0 || reta_size > dev->rss_table_size) {
+		XGMAC_LOG(ERR, "reta_size %u is not supported (max %u)", reta_size,
+			  dev->rss_table_size);
+		return -EINVAL;
+	}
+
+	for (i = 0; i < reta_size; i++) {
+		idx = i / RTE_ETH_RETA_GROUP_SIZE;
+		shift = i % RTE_ETH_RETA_GROUP_SIZE;
+
+		if (reta_conf[idx].mask & (1ULL << shift))
+			dev->rss_table[i] = reta_conf[idx].reta[shift];
+	}
+
+	return xgmac_write_rss_lookup_table(dev);
+}
+
+static int
+xgmac_dev_rss_reta_query(struct rte_eth_dev *eth_dev, struct rte_eth_rss_reta_entry64 *reta_conf,
+			 uint16_t reta_size)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	unsigned int i, idx, shift;
+
+	if (!dev->rss_enable) {
+		XGMAC_LOG(ERR, "RSS not enabled");
+		return -ENOTSUP;
+	}
+
+	if (reta_size == 0 || reta_size > dev->rss_table_size) {
+		XGMAC_LOG(ERR, "reta_size %u is not supported (max %u)", reta_size,
+			  dev->rss_table_size);
+		return -EINVAL;
+	}
+
+	for (i = 0; i < reta_size; i++) {
+		idx = i / RTE_ETH_RETA_GROUP_SIZE;
+		shift = i % RTE_ETH_RETA_GROUP_SIZE;
+
+		if (reta_conf[idx].mask & (1ULL << shift))
+			reta_conf[idx].reta[shift] = dev->rss_table[i];
+	}
+
+	return 0;
+}
+
+static int
+xgmac_dev_rss_hash_update(struct rte_eth_dev *eth_dev, struct rte_eth_rss_conf *rss_conf)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	int ret;
+
+	if (!dev->rss_enable) {
+		XGMAC_LOG(ERR, "RSS not enabled");
+		return -ENOTSUP;
+	}
+
+	if (rss_conf == NULL)
+		return -EINVAL;
+
+	if (rss_conf->rss_key != NULL && rss_conf->rss_key_len == XGMAC_RSS_HASH_KEY_SIZE) {
+		memcpy(dev->rss_key, rss_conf->rss_key, XGMAC_RSS_HASH_KEY_SIZE);
+		ret = xgmac_write_rss_hash_key(dev);
+		if (ret)
+			return ret;
+	}
+
+	dev->rss_hf = rss_conf->rss_hf & XGMAC_RSS_OFFLOAD;
+
+	dev->rss_options = 0;
+	if (dev->rss_hf & (RTE_ETH_RSS_IPV4 | RTE_ETH_RSS_IPV6))
+		dev->rss_options |= XGMAC_IP2TE;
+	if (dev->rss_hf & (RTE_ETH_RSS_NONFRAG_IPV4_TCP | RTE_ETH_RSS_NONFRAG_IPV6_TCP))
+		dev->rss_options |= XGMAC_TCP4TE;
+	if (dev->rss_hf & (RTE_ETH_RSS_NONFRAG_IPV4_UDP | RTE_ETH_RSS_NONFRAG_IPV6_UDP))
+		dev->rss_options |= XGMAC_UDP4TE;
+
+	xgmac_wr(dev, XGMAC_RSS_CTRL, dev->rss_options | XGMAC_RSSE);
+
+	return 0;
+}
+
+static int
+xgmac_dev_rss_hash_conf_get(struct rte_eth_dev *eth_dev, struct rte_eth_rss_conf *rss_conf)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+
+	if (!dev->rss_enable) {
+		XGMAC_LOG(ERR, "RSS not enabled");
+		return -ENOTSUP;
+	}
+
+	if (rss_conf == NULL)
+		return -EINVAL;
+
+	if (rss_conf->rss_key != NULL && rss_conf->rss_key_len >= XGMAC_RSS_HASH_KEY_SIZE)
+		memcpy(rss_conf->rss_key, dev->rss_key, XGMAC_RSS_HASH_KEY_SIZE);
+
+	rss_conf->rss_key_len = XGMAC_RSS_HASH_KEY_SIZE;
+	rss_conf->rss_hf = dev->rss_hf;
+
+	return 0;
+}
+
 static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.dev_configure = xgmac_dev_configure,
 	.dev_start = xgmac_dev_start,
@@ -800,6 +937,10 @@ static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.tx_queue_stop = xgmac_tx_queue_stop,
 	.rxq_info_get = xgmac_rxq_info_get,
 	.txq_info_get = xgmac_txq_info_get,
+	.reta_update = xgmac_dev_rss_reta_update,
+	.reta_query = xgmac_dev_rss_reta_query,
+	.rss_hash_update = xgmac_dev_rss_hash_update,
+	.rss_hash_conf_get = xgmac_dev_rss_hash_conf_get,
 };
 
 /* Check if platform device is Synopsys XGMAC by reading device tree compatible. */

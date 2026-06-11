@@ -156,10 +156,13 @@ int xgmac_tx_offload_update(struct rte_eth_dev *eth_dev);
 /* RX offload flags */
 #define XGMAC_RX_OFFLOAD_NONE 0
 #define XGMAC_RX_SCATTER_F    RTE_BIT32(0)
+#define XGMAC_RX_RSS_HASH_F   RTE_BIT32(1)
 
 #define XGMAC_RX_FASTPATH_MODES                                                                    \
 	R(no_offload, XGMAC_RX_OFFLOAD_NONE)                                                       \
-	R(scatter, XGMAC_RX_SCATTER_F)
+	R(scatter, XGMAC_RX_SCATTER_F)                                                             \
+	R(rss_hash, XGMAC_RX_RSS_HASH_F)                                                           \
+	R(scatter_rss_hash, (XGMAC_RX_SCATTER_F | XGMAC_RX_RSS_HASH_F))
 
 #define R(name, flags)                                                                             \
 	uint16_t xgmac_recv_pkts_##name(void *rx_queue, struct rte_mbuf **rx_pkts,                 \

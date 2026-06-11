@@ -29,6 +29,16 @@ extern int xgmac_logtype;
 				XGMAC_TX_OFFLOAD_TSO)
 #define XGMAC_TX_MODE_MAX      16
 
+/* RSS */
+#define XGMAC_RSS_HASH_KEY_SIZE	    40
+#define XGMAC_RSS_MAX_TABLE_SIZE    256
+#define XGMAC_RSS_LOOKUP_TABLE_TYPE 0
+#define XGMAC_RSS_HASH_KEY_TYPE	    1
+
+#define XGMAC_RSS_OFFLOAD                                                                          \
+	(RTE_ETH_RSS_IPV4 | RTE_ETH_RSS_NONFRAG_IPV4_TCP | RTE_ETH_RSS_NONFRAG_IPV4_UDP |          \
+	 RTE_ETH_RSS_IPV6 | RTE_ETH_RSS_NONFRAG_IPV6_TCP | RTE_ETH_RSS_NONFRAG_IPV6_UDP)
+
 struct xgmac_hw_features {
 	uint32_t version;
 	uint16_t hash_table_size;
@@ -71,6 +81,12 @@ struct xgmac_dev {
 	uint16_t rx_buf_size;
 	uint16_t tx_offload_flags;
 	struct xgmac_hw_features hw_feat;
+	uint64_t rss_hf;
+	uint32_t rss_options;
+	uint16_t rss_table_size;
+	uint8_t rss_enable;
+	uint8_t rss_key[XGMAC_RSS_HASH_KEY_SIZE];
+	uint32_t rss_table[XGMAC_RSS_MAX_TABLE_SIZE];
 };
 
 #define XGMAC_FIELD_SHIFT(_mask) \

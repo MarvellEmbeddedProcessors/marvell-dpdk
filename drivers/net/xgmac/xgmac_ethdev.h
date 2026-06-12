@@ -50,6 +50,10 @@ extern int xgmac_logtype;
 #define XGMAC_MAX_QUEUES	8
 #define XGMAC_HASH_TABLE_REGS 8
 
+/* Loopback operation modes. */
+#define XGMAC_LPBK_NONE 0 /* Loopback disabled (default). */
+#define XGMAC_LPBK_MAC	1 /* MAC-level loopback. */
+
 struct xgmac_pfc_rxq_cfg {
 	uint8_t  enabled;
 	uint8_t  tc;

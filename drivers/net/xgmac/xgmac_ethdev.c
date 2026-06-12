@@ -168,6 +168,11 @@ xgmac_dev_configure(struct rte_eth_dev *eth_dev)
 		return -ENOTSUP;
 	}
 
+	if (conf->lpbk_mode != XGMAC_LPBK_NONE && conf->lpbk_mode != XGMAC_LPBK_MAC) {
+		XGMAC_LOG(ERR, "Unsupported loopback mode %u (0=off, 1=on)", conf->lpbk_mode);
+		return -ENOTSUP;
+	}
+
 	if (conf->rxmode.offloads & RTE_ETH_RX_OFFLOAD_TIMESTAMP) {
 		if (!dev->hw_feat.ptp) {
 			XGMAC_LOG(ERR, "Timestamp offload not supported by HW");

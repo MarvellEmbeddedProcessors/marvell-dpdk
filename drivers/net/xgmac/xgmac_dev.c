@@ -51,6 +51,12 @@ xgmac_mac_init(struct xgmac_dev *dev, uint16_t nb_rx_queues)
 		else
 			val &= ~XGMAC_CONFIG_IPC;
 	}
+
+	if (dev->eth_dev->data->dev_conf.lpbk_mode == XGMAC_LPBK_MAC)
+		val |= XGMAC_CONFIG_LM;
+	else
+		val &= ~XGMAC_CONFIG_LM;
+
 	xgmac_wr(dev, XGMAC_RX_CONFIG, val);
 
 	/* Enable Rx queues in RXQ_CTRL0 after all MAC config is done. */

@@ -212,6 +212,8 @@ xgmac_dev_start(struct rte_eth_dev *eth_dev)
 	if (ret)
 		goto dma_stop;
 
+	xgmac_mmc_init(dev);
+
 	dev->rx_buf_size = 0;
 	for (q = 0; q < nb_rx_queues; q++) {
 		struct xgmac_rx_queue *rxq = eth_dev->data->rx_queues[q];
@@ -736,6 +738,75 @@ xgmac_stats_reset(struct rte_eth_dev *eth_dev)
 	return 0;
 }
 
+struct xgmac_xstat_desc {
+	const char name[RTE_ETH_XSTATS_NAME_SIZE];
+	uint32_t offset;
+};
+
+#define XGMAC_XSTAT(_name, _field) { \
+	.name = _name, \
+	.offset = offsetof(struct xgmac_mmc_stats, _field), \
+}
+
+static const struct xgmac_xstat_desc xgmac_xstats_strings[] = {
+	XGMAC_XSTAT("tx_octet_count_gb", tx_octet_count_gb),
+	XGMAC_XSTAT("tx_frame_count_gb", tx_frame_count_gb),
+	XGMAC_XSTAT("tx_underflow_error", tx_underflow_error),
+	XGMAC_XSTAT("tx_pause_frames", tx_pause_frames),
+	XGMAC_XSTAT("rx_frame_count_gb", rx_frame_count_gb),
+	XGMAC_XSTAT("rx_octet_count_gb", rx_octet_count_gb),
+	XGMAC_XSTAT("rx_crc_error", rx_crc_error),
+	XGMAC_XSTAT("rx_runt_error", rx_runt_error),
+	XGMAC_XSTAT("rx_jabber_error", rx_jabber_error),
+	XGMAC_XSTAT("rx_length_error", rx_length_error),
+	XGMAC_XSTAT("rx_fifo_overflow", rx_fifo_overflow),
+	XGMAC_XSTAT("rx_pause_frames", rx_pause_frames),
+};
+
+#define XGMAC_NB_XSTATS RTE_DIM(xgmac_xstats_strings)
+
+static int
+xgmac_xstats_get_names(struct rte_eth_dev *eth_dev __rte_unused,
+		       struct rte_eth_xstat_name *xstats_names, unsigned int size)
+{
+	unsigned int i;
+
+	if (xstats_names == NULL || size < XGMAC_NB_XSTATS)
+		return XGMAC_NB_XSTATS;
+
+	for (i = 0; i < XGMAC_NB_XSTATS; i++)
+		snprintf(xstats_names[i].name, RTE_ETH_XSTATS_NAME_SIZE, "%s",
+			 xgmac_xstats_strings[i].name);
+
+	return XGMAC_NB_XSTATS;
+}
+
+static int
+xgmac_xstats_get(struct rte_eth_dev *eth_dev, struct rte_eth_xstat *xstats,
+		 unsigned int n)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	unsigned int i;
+
+	if (xstats == NULL || n < XGMAC_NB_XSTATS)
+		return XGMAC_NB_XSTATS;
+
+	xgmac_mmc_stats_read(dev);
+
+	for (i = 0; i < XGMAC_NB_XSTATS; i++) {
+		xstats[i].id = i;
+		xstats[i].value = *(uint64_t *)((uint8_t *)&dev->mmc_stats +
+						xgmac_xstats_strings[i].offset);
+	}
+	return XGMAC_NB_XSTATS;
+}
+
+static int
+xgmac_xstats_reset(struct rte_eth_dev *eth_dev)
+{
+	return xgmac_stats_reset(eth_dev);
+}
+
 static int
 xgmac_mtu_set(struct rte_eth_dev *eth_dev, uint16_t mtu)
 {
@@ -991,6 +1062,9 @@ static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.link_update = xgmac_link_update,
 	.stats_get = xgmac_stats_get,
 	.stats_reset = xgmac_stats_reset,
+	.xstats_get = xgmac_xstats_get,
+	.xstats_get_names = xgmac_xstats_get_names,
+	.xstats_reset = xgmac_xstats_reset,
 	.mtu_set = xgmac_mtu_set,
 	.mac_addr_set = xgmac_mac_addr_set,
 	.mac_addr_add = xgmac_mac_addr_add,

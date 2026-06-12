@@ -72,6 +72,23 @@ struct xgmac_hw_features {
 	uint8_t nrvf;
 };
 
+struct xgmac_mmc_stats {
+	/* Tx counters  */
+	uint64_t tx_octet_count_gb;
+	uint64_t tx_frame_count_gb;
+	uint64_t tx_underflow_error;
+	uint64_t tx_pause_frames;
+	/* Rx counters. */
+	uint64_t rx_frame_count_gb;
+	uint64_t rx_octet_count_gb;
+	uint64_t rx_crc_error;
+	uint64_t rx_runt_error;
+	uint64_t rx_jabber_error;
+	uint64_t rx_length_error;
+	uint64_t rx_fifo_overflow;
+	uint64_t rx_pause_frames;
+};
+
 struct xgmac_dev {
 	const struct rte_platform_device *pdev;
 	void *csr_base;
@@ -85,6 +102,7 @@ struct xgmac_dev {
 	uint16_t rx_buf_size;
 	uint16_t tx_offload_flags;
 	struct xgmac_hw_features hw_feat;
+	struct xgmac_mmc_stats mmc_stats;
 	uint64_t rss_hf;
 	uint32_t rss_options;
 	uint16_t rss_table_size;

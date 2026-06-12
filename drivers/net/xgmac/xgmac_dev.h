@@ -40,6 +40,11 @@ int xgmac_rxq_start(struct xgmac_dev *dev, struct xgmac_rx_queue *rxq);
 void xgmac_rxq_stop(struct xgmac_dev *dev, struct xgmac_rx_queue *rxq);
 void xgmac_txq_start(struct xgmac_dev *dev, struct xgmac_tx_queue *txq);
 void xgmac_txq_stop(struct xgmac_dev *dev, struct xgmac_tx_queue *txq);
+
+/* MMC (RMON) statistics helpers. */
+void xgmac_mmc_init(struct xgmac_dev *dev);
+void xgmac_mmc_stats_read(struct xgmac_dev *dev);
+
 /* RSS helpers. */
 int xgmac_write_rss_hash_key(struct xgmac_dev *dev);
 int xgmac_write_rss_lookup_table(struct xgmac_dev *dev);

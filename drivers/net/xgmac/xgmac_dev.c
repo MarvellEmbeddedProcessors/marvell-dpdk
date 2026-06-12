@@ -173,6 +173,47 @@ xgmac_mtl_init(struct xgmac_dev *dev, uint16_t nb_tx_queues, uint16_t nb_rx_queu
 }
 
 void
+xgmac_mmc_init(struct xgmac_dev *dev)
+{
+	uint32_t val;
+
+	/* Mask all MMC interrupts. */
+	xgmac_wr(dev, XGMAC_MMC_RIER, 0);
+	xgmac_wr(dev, XGMAC_MMC_TIER, 0);
+
+	/* Clear on read and avoid wrapping to zero. */
+	val = xgmac_rd(dev, XGMAC_MMC_CR);
+	val |= XGMAC_MMC_CR_CNTRST | XGMAC_MMC_CR_RSTONRD | XGMAC_MMC_CR_CNTSTOPRO;
+	xgmac_wr(dev, XGMAC_MMC_CR, val);
+
+	memset(&dev->mmc_stats, 0, sizeof(dev->mmc_stats));
+}
+
+void
+xgmac_mmc_stats_read(struct xgmac_dev *dev)
+{
+	struct xgmac_mmc_stats *s = &dev->mmc_stats;
+
+	/* Tx counters (64-bit). */
+	s->tx_octet_count_gb += xgmac_rd64(dev, XGMAC_MMC_TXOCTETCOUNT_GB_LO);
+	s->tx_frame_count_gb += xgmac_rd64(dev, XGMAC_MMC_TXFRAMECOUNT_GB_LO);
+	s->tx_underflow_error += xgmac_rd64(dev, XGMAC_MMC_TXUNDERFLOW_ERR_LO);
+	s->tx_pause_frames += xgmac_rd64(dev, XGMAC_MMC_TXPAUSEFRAMES_LO);
+
+	/* Rx counters (64-bit). */
+	s->rx_frame_count_gb += xgmac_rd64(dev, XGMAC_MMC_RXFRAMECOUNT_GB_LO);
+	s->rx_octet_count_gb += xgmac_rd64(dev, XGMAC_MMC_RXOCTETCOUNT_GB_LO);
+	s->rx_crc_error += xgmac_rd64(dev, XGMAC_MMC_RXCRCERROR_LO);
+	s->rx_length_error += xgmac_rd64(dev, XGMAC_MMC_RXLENGTHERROR_LO);
+	s->rx_fifo_overflow += xgmac_rd64(dev, XGMAC_MMC_RXFIFOOVERFLOW_LO);
+	s->rx_pause_frames += xgmac_rd64(dev, XGMAC_MMC_RXPAUSEFRAMES_LO);
+
+	/* Rx counters (32-bit). */
+	s->rx_runt_error += xgmac_rd(dev, XGMAC_MMC_RXRUNTERROR);
+	s->rx_jabber_error += xgmac_rd(dev, XGMAC_MMC_RXJABBERERROR);
+}
+
+void
 xgmac_mac_addr_read(struct xgmac_dev *dev, uint32_t index, struct rte_ether_addr *addr)
 {
 	uint32_t hi, lo;

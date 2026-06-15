@@ -929,6 +929,10 @@ xgmac_tx_desc_init_one(struct xgmac_dev *dev, struct xgmac_tx_queue *txq)
 	val = xgmac_rd(dev, XGMAC_DMA_CH_TX_CONTROL(q));
 	val &= ~XGMAC_TxPBL;
 	val |= XGMAC_FIELD_PREP(XGMAC_TxPBL, txpbl);
+	if (dev->hw_feat.tso && (dev->tx_offload_flags & XGMAC_TX_OFFLOAD_TSO))
+		val |= XGMAC_TSE;
+	else
+		val &= ~XGMAC_TSE;
 	xgmac_wr(dev, XGMAC_DMA_CH_TX_CONTROL(q), val | XGMAC_OSP);
 
 	txq->cur = 0;
@@ -937,6 +941,8 @@ xgmac_tx_desc_init_one(struct xgmac_dev *dev, struct xgmac_tx_queue *txq)
 	txq->vlan_ctx_qinq = 0;
 	txq->vlan_ctx_outer_tci = 0;
 	txq->vlan_ctx_inner_tci = 0;
+	txq->tso_mss = 0;
+	txq->tso_mss_valid = 0;
 
 	xgmac_wr(dev, XGMAC_DMA_CH_TxDESC_RING_LEN(q), txq->nb_desc - 1);
 	xgmac_wr(dev, XGMAC_DMA_CH_TxDESC_HADDR(q), xgmac_high32(txq->ring_phys_addr));

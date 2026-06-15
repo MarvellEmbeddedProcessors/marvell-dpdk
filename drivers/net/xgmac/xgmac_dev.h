@@ -13,6 +13,15 @@ struct xgmac_dev;
 struct xgmac_rx_queue;
 struct xgmac_tx_queue;
 
+/* TSO hardware limits. */
+#define XGMAC_TSO_MAX_HDR_LEN  256U      /* driver-enforced practical header cap */
+#define XGMAC_TSO_MAX_PAYLOAD  0x3FFFFU  /* TDES3.TPL is 18-bit */
+#define XGMAC_TSO_MAX_MSS      0x3FFFU   /* DMA_CH_CONTROL.MSS is 14-bit */
+#define XGMAC_TSO_MIN_TCP_HDR  20U
+#define XGMAC_TSO_MAX_TCP_HDR  60U       /* TDES3.THL is 4-bit (15 dwords) */
+#define XGMAC_TSO_MAX_SEG_LEN  16383U    /* hdr_len + MSS must fit transmitter limit */
+#define XGMAC_TSO_MIN_MSS      64U       /* spec-recommended minimum MSS */
+
 #define XGMAC_FRP_ENTRY_WORDS 4
 #define XGMAC_FRP_WORD_BYTES  4U  /* bytes per FRP match word (single 32-bit compare slot) */
 

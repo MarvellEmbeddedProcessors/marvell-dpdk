@@ -110,8 +110,12 @@ struct xgmac_tx_queue {
 	uint16_t vlan_ctx_inner_tci;
 	uint8_t vlan_ctx_qinq;
 	uint8_t vlan_ctx_valid;
+	uint16_t tso_mss;
+	uint16_t tso_max_seg_len;
+	uint8_t tso_mss_valid;
 
 	uint64_t errors;
+	uint64_t tso_rejected;
 
 	/* setup-only fields. */
 	uint64_t ring_phys_addr;

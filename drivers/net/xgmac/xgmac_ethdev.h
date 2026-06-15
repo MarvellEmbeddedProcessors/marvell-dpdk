@@ -111,6 +111,8 @@ struct xgmac_mmc_stats {
 	uint64_t frp_bypass_cnt;
 	/* Per-DMA-channel accept counter, indexed by channel. */
 	uint64_t frp_accept_cnt[XGMAC_MAX_QUEUES];
+	/* Aggregated TX counters from per-queue state. */
+	uint64_t tx_tso_rejected;
 };
 
 struct xgmac_dev {

@@ -143,6 +143,26 @@ xgmac_dev_configure(struct rte_eth_dev *eth_dev)
 		XGMAC_LOG(ERR, "QinQ insert offload requested but HW does not support double VLAN");
 		return -ENOTSUP;
 	}
+	if ((conf->txmode.offloads & RTE_ETH_TX_OFFLOAD_TCP_TSO) &&
+	    !dev->hw_feat.tso) {
+		XGMAC_LOG(ERR, "TCP TSO requested but HW does not support TSO");
+		return -ENOTSUP;
+	}
+	if ((conf->txmode.offloads & RTE_ETH_TX_OFFLOAD_VXLAN_TNL_TSO) &&
+	    (!dev->hw_feat.tso || !dev->hw_feat.tunnel)) {
+		XGMAC_LOG(ERR, "VxLAN tunnel TSO requested but HW does not support it");
+		return -ENOTSUP;
+	}
+	if ((conf->txmode.offloads & RTE_ETH_TX_OFFLOAD_GRE_TNL_TSO) &&
+	    (!dev->hw_feat.tso || !dev->hw_feat.tunnel)) {
+		XGMAC_LOG(ERR, "NVGRE tunnel TSO requested but HW does not support it");
+		return -ENOTSUP;
+	}
+	if ((conf->txmode.offloads & RTE_ETH_TX_OFFLOAD_VXLAN_TNL_TSO) &&
+	    (conf->txmode.offloads & RTE_ETH_TX_OFFLOAD_GRE_TNL_TSO)) {
+		XGMAC_LOG(ERR, "HW supports only one tunnel mode at a time (VxLAN or NVGRE)");
+		return -ENOTSUP;
+	}
 
 	if (conf->rxmode.offloads & RTE_ETH_RX_OFFLOAD_TIMESTAMP) {
 		if (!dev->hw_feat.ptp) {
@@ -567,25 +587,27 @@ xgmac_rx_queue_release(struct rte_eth_dev *dev, uint16_t rx_queue_id)
 }
 
 static int
-xgmac_tx_queue_setup(struct rte_eth_dev *dev, uint16_t tx_queue_id,
+xgmac_tx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t tx_queue_id,
 		     uint16_t nb_tx_desc, unsigned int socket_id,
 		     const struct rte_eth_txconf *tx_conf)
 {
-	struct xgmac_tx_queue *txq;
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
 	const struct rte_memzone *mz;
+	struct xgmac_tx_queue *txq;
+	uint32_t fifo_per_q;
 	size_t size;
 
 	if (nb_tx_desc < XGMAC_MIN_RING_DESC || nb_tx_desc > XGMAC_MAX_RING_DESC ||
 	    !rte_is_power_of_2(nb_tx_desc))
 		return -EINVAL;
 
-	if (dev->data->dev_started)
+	if (eth_dev->data->dev_started)
 		return -EBUSY;
 
-	if (dev->data->tx_queues[tx_queue_id]) {
-		xgmac_tx_queue_free(dev->data->tx_queues[tx_queue_id]);
-		dev->data->tx_queues[tx_queue_id] = NULL;
-		dev->data->tx_queue_state[tx_queue_id] = RTE_ETH_QUEUE_STATE_STOPPED;
+	if (eth_dev->data->tx_queues[tx_queue_id]) {
+		xgmac_tx_queue_free(eth_dev->data->tx_queues[tx_queue_id]);
+		eth_dev->data->tx_queues[tx_queue_id] = NULL;
+		eth_dev->data->tx_queue_state[tx_queue_id] = RTE_ETH_QUEUE_STATE_STOPPED;
 	}
 	txq = rte_zmalloc_socket("xgmac_txq", sizeof(*txq), RTE_CACHE_LINE_SIZE, socket_id);
 	if (!txq)
@@ -593,7 +615,7 @@ xgmac_tx_queue_setup(struct rte_eth_dev *dev, uint16_t tx_queue_id,
 
 	txq->nb_desc = nb_tx_desc;
 	txq->queue_id = tx_queue_id;
-	txq->port_id = dev->data->port_id;
+	txq->port_id = eth_dev->data->port_id;
 	txq->free_thresh = tx_conf->tx_free_thresh ?
 		tx_conf->tx_free_thresh : XGMAC_DEFAULT_TX_FREE_THRESH;
 	if (txq->free_thresh > txq->nb_desc)
@@ -602,15 +624,22 @@ xgmac_tx_queue_setup(struct rte_eth_dev *dev, uint16_t tx_queue_id,
 		txq->free_thresh = 1;
 	txq->cur = 0;
 	txq->dirty = 0;
-	txq->offloads = tx_conf->offloads | dev->data->dev_conf.txmode.offloads;
+	txq->offloads = tx_conf->offloads | eth_dev->data->dev_conf.txmode.offloads;
 	txq->deferred_start = tx_conf->tx_deferred_start;
 	txq->vlan_ctx_valid = 0;
 	txq->vlan_ctx_qinq = 0;
 	txq->vlan_ctx_outer_tci = 0;
 	txq->vlan_ctx_inner_tci = 0;
+	txq->tso_mss = 0;
+	txq->tso_mss_valid = 0;
+
+	fifo_per_q = XGMAC_FIFO_SIZE(dev->hw_feat.tx_fifo_size);
+	if (eth_dev->data->nb_tx_queues)
+		fifo_per_q /= eth_dev->data->nb_tx_queues;
+	txq->tso_max_seg_len = (uint16_t)RTE_MIN((uint32_t)XGMAC_TSO_MAX_SEG_LEN, fifo_per_q / 2);
 
 	size = nb_tx_desc * sizeof(union xgmac_tx_desc);
-	mz = xgmac_dma_zone_reserve_bounded(dev, "tx_ring", tx_queue_id, size,
+	mz = xgmac_dma_zone_reserve_bounded(eth_dev, "tx_ring", tx_queue_id, size,
 					    XGMAC_DESC_ALIGN, socket_id);
 	if (!mz) {
 		XGMAC_LOG(ERR, "tx_ring dma zone reserve bounded failed");
@@ -631,7 +660,7 @@ xgmac_tx_queue_setup(struct rte_eth_dev *dev, uint16_t tx_queue_id,
 		return -ENOMEM;
 	}
 
-	dev->data->tx_queues[tx_queue_id] = txq;
+	eth_dev->data->tx_queues[tx_queue_id] = txq;
 	return 0;
 }
 
@@ -720,6 +749,14 @@ xgmac_dev_infos_get(struct rte_eth_dev *eth_dev, struct rte_eth_dev_info *info)
 		info->tx_offload_capa |= RTE_ETH_TX_OFFLOAD_IPV4_CKSUM |
 					 RTE_ETH_TX_OFFLOAD_UDP_CKSUM |
 					 RTE_ETH_TX_OFFLOAD_TCP_CKSUM;
+	if (dev->hw_feat.tso)
+		info->tx_offload_capa |= RTE_ETH_TX_OFFLOAD_TCP_TSO;
+	if (dev->hw_feat.tunnel)
+		info->tx_offload_capa |= RTE_ETH_TX_OFFLOAD_OUTER_IPV4_CKSUM |
+					 RTE_ETH_TX_OFFLOAD_OUTER_UDP_CKSUM;
+	if (dev->hw_feat.tso && dev->hw_feat.tunnel)
+		info->tx_offload_capa |= RTE_ETH_TX_OFFLOAD_VXLAN_TNL_TSO |
+					 RTE_ETH_TX_OFFLOAD_GRE_TNL_TSO;
 	if (dev->hw_feat.dvlan)
 		info->tx_offload_capa |= RTE_ETH_TX_OFFLOAD_QINQ_INSERT;
 
@@ -855,6 +892,7 @@ xgmac_stats_reset(struct rte_eth_dev *eth_dev)
 			txq->nb_pkts = 0;
 			txq->nb_bytes = 0;
 			txq->errors = 0;
+			txq->tso_rejected = 0;
 		}
 	}
 
@@ -894,6 +932,7 @@ static const struct xgmac_xstat_desc xgmac_xstats_strings[] = {
 	XGMAC_XSTAT("frp_drop_cnt", frp_drop_cnt),
 	XGMAC_XSTAT("frp_error_cnt", frp_error_cnt),
 	XGMAC_XSTAT("frp_bypass_cnt", frp_bypass_cnt),
+	XGMAC_XSTAT("tx_tso_rejected", tx_tso_rejected),
 	XGMAC_FRP_ACCEPT_CH_XSTAT(0),
 	XGMAC_FRP_ACCEPT_CH_XSTAT(1),
 	XGMAC_FRP_ACCEPT_CH_XSTAT(2),
@@ -927,6 +966,8 @@ xgmac_xstats_get(struct rte_eth_dev *eth_dev, struct rte_eth_xstat *xstats,
 		 unsigned int n)
 {
 	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	struct xgmac_tx_queue *txq;
+	uint64_t tso_rejected = 0;
 	unsigned int i;
 
 	if (xstats == NULL || n < XGMAC_NB_XSTATS)
@@ -935,6 +976,13 @@ xgmac_xstats_get(struct rte_eth_dev *eth_dev, struct rte_eth_xstat *xstats,
 	xgmac_mmc_stats_read(dev);
 	if (dev->hw_feat.frp)
 		xgmac_frp_stats_read(dev);
+
+	for (i = 0; i < eth_dev->data->nb_tx_queues; i++) {
+		txq = eth_dev->data->tx_queues[i];
+		if (txq)
+			tso_rejected += txq->tso_rejected;
+	}
+	dev->mmc_stats.tx_tso_rejected = tso_rejected;
 
 	for (i = 0; i < XGMAC_NB_XSTATS; i++) {
 		xstats[i].id = i;

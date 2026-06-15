@@ -1998,3 +1998,167 @@ xgmac_frp_init(struct xgmac_dev *dev)
 
 	return 0;
 }
+
+/* Strides for per-queue / per-channel register groups in the dump tables. */
+#define XGMAC_MTL_Q_INC		0x80
+#define XGMAC_DMA_CH_INC	0x80
+
+/*  XGMAC register dump tables, organized by databook block. */
+static const uint32_t xgmac_mac_reg_tbl[] = {
+	XGMAC_TX_CONFIG,
+	XGMAC_RX_CONFIG,
+	XGMAC_PACKET_FILTER,
+	XGMAC_VLAN_TAG,
+	XGMAC_VLAN_HASH_TABLE,
+	XGMAC_VLAN_INCL(0),
+	XGMAC_INNER_VLAN_INCL,
+	XGMAC_RX_ETH_TYPE_MATCH,
+	XGMAC_RXQ_CTRL0,
+	XGMAC_RXQ_CTRL1,
+	XGMAC_RXQ_CTRL2,
+	XGMAC_RXQ_CTRL3,
+	XGMAC_INT_STATUS,
+	XGMAC_INT_EN,
+	XGMAC_RXTX_STATUS,
+	XGMAC_PMT,
+	XGMAC_LPI_CTRL,
+	XGMAC_LPI_TIMER_CTRL,
+	XGMAC_VERSION,
+	XGMAC_DEBUG,
+	XGMAC_HW_FEATURE0,
+	XGMAC_HW_FEATURE1,
+	XGMAC_HW_FEATURE2,
+	XGMAC_HW_FEATURE3,
+	XGMAC_HW_FEATURE4,
+	XGMAC_MDIO_ADDR,
+	XGMAC_MDIO_DATA,
+	XGMAC_MDIO_C22P,
+	XGMAC_GPIO_STATUS,
+	XGMAC_RX_FLOW_CTRL,
+	XGMAC_RSS_CTRL,
+	XGMAC_RSS_ADDR,
+	XGMAC_RSS_DATA,
+};
+
+static const uint32_t xgmac_mac_1588_reg_tbl[] = {
+	XGMAC_TIMESTAMP_CONTROL,
+	XGMAC_SUB_SECOND_INCR,
+	XGMAC_SYSTEM_TIME_SEC,
+	XGMAC_SYSTEM_TIME_NSEC,
+	XGMAC_SYSTEM_TIME_SEC_UPD,
+	XGMAC_SYSTEM_TIME_NSEC_UPD,
+	XGMAC_TIMESTAMP_ADDEND,
+	XGMAC_TIMESTAMP_STATUS,
+	XGMAC_TXTIMESTAMP_NSEC,
+	XGMAC_TXTIMESTAMP_SEC,
+};
+
+static const uint32_t xgmac_mtl_reg_tbl[] = {
+	XGMAC_MTL_OPMODE,
+	XGMAC_MTL_INT_STATUS,
+	XGMAC_MTL_RXQ_DMA_MAP0,
+	XGMAC_MTL_RXQ_DMA_MAP1,
+	XGMAC_MTL_RXQ_DMA_MAP2,
+	XGMAC_MTL_RXQ_DMA_MAP3,
+	XGMAC_TC_PRTY_MAP0,
+	XGMAC_TC_PRTY_MAP1,
+	XGMAC_MTL_RXP_CONTROL_STATUS,
+};
+
+static const uint32_t xgmac_mtl_txq_reg_tbl[] = {
+	XGMAC_MTL_TXQ_OPMODE(0),
+	XGMAC_MTL_TXQ_DEBUG(0),
+	XGMAC_MTL_QINTEN(0),
+	XGMAC_MTL_QINT_STATUS(0),
+};
+
+static const uint32_t xgmac_mtl_rxq_reg_tbl[] = {
+	XGMAC_MTL_RXQ_OPMODE(0),
+	XGMAC_MTL_RXQ_FLOW_CONTROL(0),
+};
+
+static const uint32_t xgmac_dma_reg_tbl[] = {
+	XGMAC_DMA_MODE,
+	XGMAC_DMA_SYSBUS_MODE,
+	XGMAC_TX_EDMA_CTRL,
+	XGMAC_RX_EDMA_CTRL,
+};
+
+static const uint32_t xgmac_dma_ch_reg_tbl[] = {
+	XGMAC_DMA_CH_CONTROL(0),
+	XGMAC_DMA_CH_TX_CONTROL(0),
+	XGMAC_DMA_CH_RX_CONTROL(0),
+	XGMAC_DMA_CH_TxDESC_HADDR(0),
+	XGMAC_DMA_CH_TxDESC_LADDR(0),
+	XGMAC_DMA_CH_RxDESC_HADDR(0),
+	XGMAC_DMA_CH_RxDESC_LADDR(0),
+	XGMAC_DMA_CH_TxDESC_TAIL_LPTR(0),
+	XGMAC_DMA_CH_RxDESC_TAIL_LPTR(0),
+	XGMAC_DMA_CH_TxDESC_RING_LEN(0),
+	XGMAC_DMA_CH_RxDESC_RING_LEN(0),
+	XGMAC_DMA_CH_INT_EN(0),
+	XGMAC_DMA_CH_Rx_WATCHDOG(0),
+	XGMAC_DMA_CH_STATUS(0),
+};
+
+static void
+xgmac_regs_dump_block(struct xgmac_dev *dev, const uint32_t *tbl, unsigned int n,
+		      uint32_t **out)
+{
+	unsigned int i;
+
+	for (i = 0; i < n; i++)
+		*(*out)++ = xgmac_rd(dev, tbl[i]);
+}
+
+static void
+xgmac_regs_dump_per_q(struct xgmac_dev *dev, const uint32_t *tbl, unsigned int n,
+		      uint16_t nb_q, uint32_t stride, uint32_t **out)
+{
+	unsigned int i;
+	uint16_t q;
+
+	for (q = 0; q < nb_q; q++) {
+		for (i = 0; i < n; i++)
+			*(*out)++ = xgmac_rd(dev, tbl[i] + q * stride);
+	}
+}
+
+uint32_t
+xgmac_regs_count(struct xgmac_dev *dev)
+{
+	uint16_t tx_q = dev->hw_feat.tx_q_cnt;
+	uint16_t rx_q = dev->hw_feat.rx_q_cnt;
+	uint16_t ch_n = RTE_MAX(tx_q, rx_q);
+
+	return RTE_DIM(xgmac_mac_reg_tbl)
+	     + RTE_DIM(xgmac_mac_1588_reg_tbl)
+	     + RTE_DIM(xgmac_mtl_reg_tbl)
+	     + tx_q * RTE_DIM(xgmac_mtl_txq_reg_tbl)
+	     + rx_q * RTE_DIM(xgmac_mtl_rxq_reg_tbl)
+	     + RTE_DIM(xgmac_dma_reg_tbl)
+	     + ch_n * RTE_DIM(xgmac_dma_ch_reg_tbl);
+}
+
+void
+xgmac_regs_dump(struct xgmac_dev *dev, uint32_t *out)
+{
+	uint16_t tx_q = dev->hw_feat.tx_q_cnt;
+	uint16_t rx_q = dev->hw_feat.rx_q_cnt;
+	uint16_t ch_n = RTE_MAX(tx_q, rx_q);
+
+	xgmac_regs_dump_block(dev, xgmac_mac_reg_tbl, RTE_DIM(xgmac_mac_reg_tbl), &out);
+	xgmac_regs_dump_block(dev, xgmac_mac_1588_reg_tbl,
+			      RTE_DIM(xgmac_mac_1588_reg_tbl), &out);
+	xgmac_regs_dump_block(dev, xgmac_mtl_reg_tbl, RTE_DIM(xgmac_mtl_reg_tbl), &out);
+	xgmac_regs_dump_per_q(dev, xgmac_mtl_txq_reg_tbl,
+			      RTE_DIM(xgmac_mtl_txq_reg_tbl), tx_q,
+			      XGMAC_MTL_Q_INC, &out);
+	xgmac_regs_dump_per_q(dev, xgmac_mtl_rxq_reg_tbl,
+			      RTE_DIM(xgmac_mtl_rxq_reg_tbl), rx_q,
+			      XGMAC_MTL_Q_INC, &out);
+	xgmac_regs_dump_block(dev, xgmac_dma_reg_tbl, RTE_DIM(xgmac_dma_reg_tbl), &out);
+	xgmac_regs_dump_per_q(dev, xgmac_dma_ch_reg_tbl,
+			      RTE_DIM(xgmac_dma_ch_reg_tbl), ch_n,
+			      XGMAC_DMA_CH_INC, &out);
+}

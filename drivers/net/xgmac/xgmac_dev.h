@@ -115,4 +115,8 @@ int xgmac_frp_program_rules(struct xgmac_dev *dev, const struct xgmac_frp_flow_r
 int xgmac_frp_entry_read(struct xgmac_dev *dev, uint16_t idx, struct xgmac_frp_hw_entry *entry);
 int xgmac_frp_table_flush(struct xgmac_dev *dev);
 
+/* Register dump helpers (used by .get_reg ethdev op). */
+uint32_t xgmac_regs_count(struct xgmac_dev *dev);
+void xgmac_regs_dump(struct xgmac_dev *dev, uint32_t *out);
+
 #endif /* __XGMAC_DEV_H__ */

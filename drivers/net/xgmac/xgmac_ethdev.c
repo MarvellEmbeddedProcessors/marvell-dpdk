@@ -1492,6 +1492,54 @@ xgmac_get_monitor_addr_op(void *rxq, struct rte_power_monitor_cond *pmc)
 	return xgmac_get_monitor_addr(rxq, pmc);
 }
 
+static int
+xgmac_fw_version_get(struct rte_eth_dev *eth_dev, char *buf, size_t size)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	uint32_t v = dev->hw_feat.version;
+	int n;
+
+	if (buf == NULL && size > 0)
+		return -EINVAL;
+
+	n = snprintf(buf, size, "snps=0x%02x dev=0x%02x user=0x%02x",
+		     (unsigned int)XGMAC_FIELD_GET(XGMAC_VERSION_SNPSVER, v),
+		     (unsigned int)XGMAC_FIELD_GET(XGMAC_VERSION_DEVID, v),
+		     (unsigned int)XGMAC_FIELD_GET(XGMAC_VERSION_USERVER, v));
+	if (n < 0)
+		return -EINVAL;
+	if ((size_t)n >= size)
+		return n + 1;
+
+	return 0;
+}
+
+static int
+xgmac_get_reg(struct rte_eth_dev *eth_dev, struct rte_dev_reg_info *regs)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	uint32_t total;
+
+	if (regs == NULL)
+		return -EINVAL;
+
+	total = xgmac_regs_count(dev);
+	regs->version = dev->hw_feat.version;
+	regs->width = sizeof(uint32_t);
+
+	if (regs->data == NULL) {
+		regs->length = total;
+		return 0;
+	}
+
+	if (regs->length && regs->length < total)
+		return -ENOSPC;
+	regs->length = total;
+
+	xgmac_regs_dump(dev, regs->data);
+	return 0;
+}
+
 static const uint32_t *
 xgmac_dev_supported_ptypes_get(struct rte_eth_dev *dev __rte_unused,
 			       size_t *no_of_elements)
@@ -1550,6 +1598,8 @@ static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.tx_queue_stop = xgmac_tx_queue_stop,
 	.rxq_info_get = xgmac_rxq_info_get,
 	.txq_info_get = xgmac_txq_info_get,
+	.get_reg = xgmac_get_reg,
+	.fw_version_get = xgmac_fw_version_get,
 	.get_monitor_addr = xgmac_get_monitor_addr_op,
 	.reta_update = xgmac_dev_rss_reta_update,
 	.reta_query = xgmac_dev_rss_reta_query,

@@ -80,6 +80,14 @@ xgmac_dev_configure(struct rte_eth_dev *eth_dev)
 		XGMAC_LOG(ERR, "MQ mode %u not supported", conf->rxmode.mq_mode);
 		return -EINVAL;
 	}
+	if ((conf->txmode.offloads & (RTE_ETH_TX_OFFLOAD_IPV4_CKSUM |
+				      RTE_ETH_TX_OFFLOAD_UDP_CKSUM |
+				      RTE_ETH_TX_OFFLOAD_TCP_CKSUM)) &&
+	    !dev->hw_feat.tx_coe) {
+		XGMAC_LOG(ERR, "Tx checksum offload requested but HW does not support it");
+		return -ENOTSUP;
+	}
+
 	if ((conf->txmode.offloads & RTE_ETH_TX_OFFLOAD_QINQ_INSERT) &&
 	    !dev->hw_feat.dvlan) {
 		XGMAC_LOG(ERR, "QinQ insert offload requested but HW does not support double VLAN");
@@ -634,6 +642,11 @@ xgmac_dev_infos_get(struct rte_eth_dev *eth_dev, struct rte_eth_dev_info *info)
 	}
 	info->tx_offload_capa = RTE_ETH_TX_OFFLOAD_MULTI_SEGS |
 				RTE_ETH_TX_OFFLOAD_VLAN_INSERT;
+
+	if (dev->hw_feat.tx_coe)
+		info->tx_offload_capa |= RTE_ETH_TX_OFFLOAD_IPV4_CKSUM |
+					 RTE_ETH_TX_OFFLOAD_UDP_CKSUM |
+					 RTE_ETH_TX_OFFLOAD_TCP_CKSUM;
 	if (dev->hw_feat.dvlan)
 		info->tx_offload_capa |= RTE_ETH_TX_OFFLOAD_QINQ_INSERT;
 

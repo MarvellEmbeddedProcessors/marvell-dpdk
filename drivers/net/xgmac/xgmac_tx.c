@@ -18,9 +18,7 @@ xgmac_tx_offload_flags(struct rte_eth_dev *eth_dev)
 
 	if (offloads & (RTE_ETH_TX_OFFLOAD_IPV4_CKSUM |
 			RTE_ETH_TX_OFFLOAD_UDP_CKSUM |
-			RTE_ETH_TX_OFFLOAD_TCP_CKSUM |
-			RTE_ETH_TX_OFFLOAD_SCTP_CKSUM |
-			RTE_ETH_TX_OFFLOAD_OUTER_IPV4_CKSUM))
+			RTE_ETH_TX_OFFLOAD_TCP_CKSUM))
 		flags |= XGMAC_TX_OFFLOAD_CKSUM;
 
 	if (offloads & (RTE_ETH_TX_OFFLOAD_VLAN_INSERT |
@@ -47,6 +45,25 @@ xgmac_tx_offload_update(struct rte_eth_dev *eth_dev)
 	eth_dev->tx_pkt_burst = xgmac_eth_tx_burst[mode & (XGMAC_TX_MODE_MAX - 1)];
 	if (eth_dev->data->dev_started)
 		rte_eth_fp_ops[eth_dev->data->port_id].tx_pkt_burst = eth_dev->tx_pkt_burst;
+
+	return 0;
+}
+
+static inline uint32_t
+xgmac_tx_desc_cic_flags(const struct rte_mbuf *mbuf, uint16_t flags)
+{
+	uint64_t l4_mask;
+
+	if (!(flags & XGMAC_TX_OFFLOAD_CKSUM))
+		return 0;
+
+	l4_mask = mbuf->ol_flags & RTE_MBUF_F_TX_L4_MASK;
+	if (l4_mask == RTE_MBUF_F_TX_TCP_CKSUM ||
+	    l4_mask == RTE_MBUF_F_TX_UDP_CKSUM)
+		return XGMAC_FIELD_PREP(XGMAC_TDES3_CIC, 0x3);
+
+	if (mbuf->ol_flags & RTE_MBUF_F_TX_IP_CKSUM)
+		return XGMAC_FIELD_PREP(XGMAC_TDES3_CIC, 0x1);
 
 	return 0;
 }
@@ -90,6 +107,7 @@ xgmac_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts,
 	uint16_t sent = 0, idx = 0;
 	uint64_t cur = txq->cur;
 	uint16_t outer_tci;
+	uint32_t csum_cic;
 
 	if (unlikely(nb_pkts == 0))
 		return nb_pkts;
@@ -106,6 +124,7 @@ xgmac_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts,
 	while (sent < nb_pkts && avail > 0) {
 		mbuf = tx_pkts[sent];
 		nsegs = mbuf->nb_segs;
+		csum_cic = xgmac_tx_desc_cic_flags(mbuf, flags);
 		vlan_insert = (flags & XGMAC_TX_OFFLOAD_VLAN) &&
 			      (mbuf->ol_flags & (RTE_MBUF_F_TX_VLAN | RTE_MBUF_F_TX_QINQ));
 		qinq_insert = vlan_insert && (mbuf->ol_flags & RTE_MBUF_F_TX_QINQ);
@@ -166,6 +185,7 @@ xgmac_xmit_pkts(void *tx_queue, struct rte_mbuf **tx_pkts, uint16_t nb_pkts,
 			if (j == 0) {
 				seg_tdes3 = XGMAC_FIELD_PREP(XGMAC_TDES3_FL, mbuf->pkt_len);
 				seg_tdes3 |= XGMAC_TDES3_FD;
+				seg_tdes3 |= csum_cic;
 			}
 			if (j == (nsegs - 1))
 				seg_tdes3 |= XGMAC_TDES3_LD;

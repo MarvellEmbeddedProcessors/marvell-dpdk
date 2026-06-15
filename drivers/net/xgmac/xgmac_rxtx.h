@@ -225,6 +225,8 @@ void xgmac_rxq_release_mbufs(struct xgmac_rx_queue *rxq);
 
 struct rte_power_monitor_cond;
 int xgmac_rx_descriptor_status(void *rxq_p, uint16_t offset);
+int xgmac_tx_descriptor_status(void *txq_p, uint16_t offset);
+int xgmac_tx_done_cleanup(void *txq_p, uint32_t free_cnt);
 int xgmac_get_monitor_addr(void *rxq_p, struct rte_power_monitor_cond *pmc);
 
 #endif /* __XGMAC_RXTX_H__ */

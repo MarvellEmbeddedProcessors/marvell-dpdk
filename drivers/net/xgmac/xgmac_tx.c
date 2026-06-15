@@ -92,6 +92,26 @@ xgmac_tx_offload_update(struct rte_eth_dev *eth_dev)
 	return 0;
 }
 
+int
+xgmac_tx_descriptor_status(void *txq_p, uint16_t offset)
+{
+	struct xgmac_tx_queue *txq = txq_p;
+	volatile union xgmac_tx_desc *desc;
+	uint32_t tdes3;
+	uint16_t idx;
+
+	if (txq == NULL || txq->desc == NULL)
+		return -EINVAL;
+	if (offset >= txq->nb_desc)
+		return -EINVAL;
+
+	idx = (txq->cur + offset) & (txq->nb_desc - 1);
+	desc = &txq->desc[idx];
+	tdes3 = desc->read.tdes3;
+
+	return (tdes3 & XGMAC_TDES3_OWN) ? RTE_ETH_TX_DESC_FULL : RTE_ETH_TX_DESC_DONE;
+}
+
 static inline uint32_t
 xgmac_tx_desc_cic_flags(const struct rte_mbuf *mbuf, uint16_t flags)
 {
@@ -111,13 +131,17 @@ xgmac_tx_desc_cic_flags(const struct rte_mbuf *mbuf, uint16_t flags)
 	return 0;
 }
 
-static inline void
-xgmac_tx_reclaim(struct xgmac_tx_queue *txq)
+static __rte_always_inline uint32_t
+xgmac_tx_clean_descs(struct xgmac_tx_queue *txq, uint32_t free_cnt)
 {
 	volatile union xgmac_tx_desc *desc;
+	uint32_t freed = 0;
 	uint16_t idx;
 
 	while (txq->dirty != txq->cur) {
+		if (free_cnt && freed >= free_cnt)
+			break;
+
 		idx = txq->dirty & (txq->nb_desc - 1);
 		desc = &txq->desc[idx];
 
@@ -127,11 +151,32 @@ xgmac_tx_reclaim(struct xgmac_tx_queue *txq)
 		desc->read.baddr = 0;
 		desc->read.tdes2 = 0;
 		desc->read.tdes3 = 0;
-		if (txq->sw_ring[idx])
+		if (txq->sw_ring[idx]) {
 			rte_pktmbuf_free(txq->sw_ring[idx]);
-		txq->sw_ring[idx] = NULL;
+			txq->sw_ring[idx] = NULL;
+			freed++;
+		}
 		txq->dirty = DESC_OFF_ADD(txq->dirty, 1, txq->nb_desc);
 	}
+
+	return freed;
+}
+
+static inline void
+xgmac_tx_reclaim(struct xgmac_tx_queue *txq)
+{
+	xgmac_tx_clean_descs(txq, 0);
+}
+
+int
+xgmac_tx_done_cleanup(void *txq_p, uint32_t free_cnt)
+{
+	struct xgmac_tx_queue *txq = txq_p;
+
+	if (txq == NULL)
+		return -EINVAL;
+
+	return (int)xgmac_tx_clean_descs(txq, free_cnt);
 }
 
 static __rte_always_inline int

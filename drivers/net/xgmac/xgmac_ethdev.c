@@ -1644,6 +1644,7 @@ static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.tx_queue_release = xgmac_tx_queue_release,
 	.tx_queue_start = xgmac_tx_queue_start,
 	.tx_queue_stop = xgmac_tx_queue_stop,
+	.tx_done_cleanup = xgmac_tx_done_cleanup,
 	.rxq_info_get = xgmac_rxq_info_get,
 	.txq_info_get = xgmac_txq_info_get,
 	.get_reg = xgmac_get_reg,

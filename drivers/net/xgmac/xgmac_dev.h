@@ -61,4 +61,8 @@ int xgmac_write_rss_hash_key(struct xgmac_dev *dev);
 int xgmac_write_rss_lookup_table(struct xgmac_dev *dev);
 int xgmac_rss_configure(struct xgmac_dev *dev);
 
+void xgmac_flow_ctrl_apply(struct xgmac_dev *dev, uint16_t nb_txq, uint16_t nb_rxq);
+void xgmac_rx_flow_ctrl_apply(struct xgmac_dev *dev, uint16_t nb_rxq, bool enable);
+void xgmac_pfc_queue_apply(struct xgmac_dev *dev, uint16_t nb_txq, uint16_t nb_rxq);
+
 #endif /* __XGMAC_DEV_H__ */

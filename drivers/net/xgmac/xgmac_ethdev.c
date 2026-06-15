@@ -225,6 +225,8 @@ xgmac_dev_start(struct rte_eth_dev *eth_dev)
 	xgmac_mac_init(dev, nb_rx_queues);
 	xgmac_mac_mtu_set(dev, eth_dev->data->mtu);
 	xgmac_mtl_init(dev, nb_tx_queues, nb_rx_queues);
+	xgmac_flow_ctrl_apply(dev, nb_tx_queues, nb_rx_queues);
+	xgmac_pfc_queue_apply(dev, nb_tx_queues, nb_rx_queues);
 	xgmac_vlan_insert_cfg(dev);
 
 	ret = xgmac_rss_configure(dev);
@@ -1061,6 +1063,154 @@ xgmac_dev_rss_hash_conf_get(struct rte_eth_dev *eth_dev, struct rte_eth_rss_conf
 }
 
 static int
+xgmac_flow_ctrl_get(struct rte_eth_dev *eth_dev, struct rte_eth_fc_conf *fc_conf)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	bool tx_pause, rx_pause;
+	uint32_t txfc;
+
+	if (fc_conf == NULL)
+		return -EINVAL;
+
+	txfc = xgmac_rd(dev, XGMAC_Qx_TX_FLOW_CTRL(0));
+	tx_pause = !!(txfc & XGMAC_TFE);
+	rx_pause = !!(xgmac_rd(dev, XGMAC_RX_FLOW_CTRL) & XGMAC_RFE);
+
+	if (tx_pause && rx_pause)
+		fc_conf->mode = RTE_ETH_FC_FULL;
+	else if (rx_pause)
+		fc_conf->mode = RTE_ETH_FC_RX_PAUSE;
+	else if (tx_pause)
+		fc_conf->mode = RTE_ETH_FC_TX_PAUSE;
+	else
+		fc_conf->mode = RTE_ETH_FC_NONE;
+
+	fc_conf->autoneg = dev->pause_autoneg;
+	fc_conf->pause_time = XGMAC_FIELD_GET(XGMAC_PT, txfc);
+	fc_conf->high_water = dev->fc_high_water;
+	fc_conf->low_water = dev->fc_low_water;
+	fc_conf->send_xon = 0;
+
+	return 0;
+}
+
+static int
+xgmac_flow_ctrl_set(struct rte_eth_dev *eth_dev, struct rte_eth_fc_conf *fc_conf)
+{
+	uint16_t nb_rx_queues = eth_dev->data->nb_rx_queues;
+	uint16_t nb_tx_queues = eth_dev->data->nb_tx_queues;
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+
+	if (fc_conf == NULL)
+		return -EINVAL;
+
+	switch (fc_conf->mode) {
+	case RTE_ETH_FC_FULL:
+		dev->tx_pause = 1;
+		dev->rx_pause = 1;
+		break;
+	case RTE_ETH_FC_RX_PAUSE:
+		dev->tx_pause = 0;
+		dev->rx_pause = 1;
+		break;
+	case RTE_ETH_FC_TX_PAUSE:
+		dev->tx_pause = 1;
+		dev->rx_pause = 0;
+		break;
+	case RTE_ETH_FC_NONE:
+		dev->tx_pause = 0;
+		dev->rx_pause = 0;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	dev->pause_autoneg = fc_conf->autoneg ? 1 : 0;
+	dev->pause_time = fc_conf->pause_time ? fc_conf->pause_time : 0xffff;
+	dev->fc_high_water = fc_conf->high_water;
+	dev->fc_low_water = fc_conf->low_water;
+	dev->flow_ctrl_cfg_set = 1;
+	/* Link flow control supersedes any prior PFC configuration. */
+	dev->pfc_queue_cfg_set = 0;
+	memset(dev->pfc_rxq, 0, sizeof(dev->pfc_rxq));
+	memset(dev->pfc_txq, 0, sizeof(dev->pfc_txq));
+
+	if (eth_dev->data->dev_started)
+		xgmac_flow_ctrl_apply(dev, nb_tx_queues, nb_rx_queues);
+
+	return 0;
+}
+
+static int
+xgmac_priority_flow_ctrl_queue_info_get(struct rte_eth_dev *eth_dev,
+					struct rte_eth_pfc_queue_info *pfc_info)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+
+	if (!pfc_info)
+		return -EINVAL;
+
+	pfc_info->tc_max = dev->hw_feat.tc_cnt;
+	pfc_info->mode_capa = RTE_ETH_FC_FULL;
+	return 0;
+}
+
+static int
+xgmac_priority_flow_ctrl_queue_config(struct rte_eth_dev *eth_dev,
+				      struct rte_eth_pfc_queue_conf *pfc_conf)
+{
+	uint16_t nb_rx_queues = eth_dev->data->nb_rx_queues;
+	uint16_t nb_tx_queues = eth_dev->data->nb_tx_queues;
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	uint8_t tc_max, tc;
+	uint16_t qid;
+	bool en;
+
+	if (!pfc_conf)
+		return -EINVAL;
+
+	/* PFC and link flow control cannot coexist. */
+	if (dev->flow_ctrl_cfg_set && !dev->pfc_queue_cfg_set &&
+	    (dev->tx_pause || dev->rx_pause)) {
+		XGMAC_LOG(ERR, "disable link flow control before configuring PFC");
+		return -ENOTSUP;
+	}
+
+	tc_max = dev->hw_feat.tc_cnt;
+
+	/* Validate and update TX-pause direction (rx_qid/tc). */
+	qid = pfc_conf->tx_pause.rx_qid;
+	tc  = pfc_conf->tx_pause.tc;
+	if (qid >= nb_rx_queues || qid >= dev->hw_feat.rx_q_cnt ||
+	    tc >= tc_max)
+		return -EINVAL;
+	en = (pfc_conf->mode == RTE_ETH_FC_FULL) ||
+	     (pfc_conf->mode == RTE_ETH_FC_TX_PAUSE);
+	dev->pfc_rxq[qid].enabled = en ? 1 : 0;
+	dev->pfc_rxq[qid].tc = tc;
+	dev->pfc_rxq[qid].pause_time = pfc_conf->tx_pause.pause_time ?
+				       pfc_conf->tx_pause.pause_time : 0xffff;
+
+	/* Validate and update RX-pause direction (tx_qid/tc). */
+	qid = pfc_conf->rx_pause.tx_qid;
+	tc  = pfc_conf->rx_pause.tc;
+	if (qid >= nb_tx_queues || qid >= dev->hw_feat.tx_q_cnt ||
+	    tc >= tc_max)
+		return -EINVAL;
+	en = (pfc_conf->mode == RTE_ETH_FC_FULL) ||
+	     (pfc_conf->mode == RTE_ETH_FC_RX_PAUSE);
+	dev->pfc_txq[qid].enabled = en ? 1 : 0;
+	dev->pfc_txq[qid].tc = tc;
+
+	dev->pfc_queue_cfg_set = 1;
+
+	if (eth_dev->data->dev_started)
+		xgmac_pfc_queue_apply(dev, nb_tx_queues, nb_rx_queues);
+
+	return 0;
+}
+
+static int
 xgmac_vlan_offload_set(struct rte_eth_dev *eth_dev, int mask __rte_unused)
 {
 	return xgmac_tx_offload_update(eth_dev);
@@ -1247,6 +1397,10 @@ static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.promiscuous_disable = xgmac_promiscuous_disable,
 	.allmulticast_enable = xgmac_allmulticast_enable,
 	.allmulticast_disable = xgmac_allmulticast_disable,
+	.flow_ctrl_get = xgmac_flow_ctrl_get,
+	.flow_ctrl_set = xgmac_flow_ctrl_set,
+	.priority_flow_ctrl_queue_info_get = xgmac_priority_flow_ctrl_queue_info_get,
+	.priority_flow_ctrl_queue_config = xgmac_priority_flow_ctrl_queue_config,
 	.vlan_offload_set = xgmac_vlan_offload_set,
 	.vlan_tpid_set = xgmac_vlan_tpid_set,
 	.rx_queue_setup = xgmac_rx_queue_setup,
@@ -1349,6 +1503,14 @@ xgmac_platform_probe(struct rte_platform_device *pdev)
 	dev->vlan_inner_tpid = RTE_ETHER_TYPE_VLAN;
 	dev->vlan_outer_svlan = 0;
 	dev->vlan_inner_svlan = 0;
+	dev->pause_autoneg = 1;
+	dev->tx_pause = 0;
+	dev->rx_pause = 0;
+	dev->flow_ctrl_cfg_set = 0;
+	dev->pfc_queue_cfg_set = 0;
+	dev->pause_time = 0xffff;
+	dev->fc_high_water = 0;
+	dev->fc_low_water = 0;
 
 	xgmac_hw_features_get(dev);
 	ver = dev->hw_feat.version;

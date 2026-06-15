@@ -39,6 +39,20 @@ extern int xgmac_logtype;
 	(RTE_ETH_RSS_IPV4 | RTE_ETH_RSS_NONFRAG_IPV4_TCP | RTE_ETH_RSS_NONFRAG_IPV4_UDP |          \
 	 RTE_ETH_RSS_IPV6 | RTE_ETH_RSS_NONFRAG_IPV6_TCP | RTE_ETH_RSS_NONFRAG_IPV6_UDP)
 
+/* XGMAC architectural maximum number of queues (same for Rx/Tx). */
+#define XGMAC_MAX_QUEUES	8
+
+struct xgmac_pfc_rxq_cfg {
+	uint8_t  enabled;
+	uint8_t  tc;
+	uint16_t pause_time;
+};
+
+struct xgmac_pfc_txq_cfg {
+	uint8_t  enabled;
+	uint8_t  tc;
+};
+
 struct xgmac_hw_features {
 	uint32_t version;
 	uint16_t hash_table_size;
@@ -107,6 +121,16 @@ struct xgmac_dev {
 	uint32_t rss_options;
 	uint16_t rss_table_size;
 	uint8_t rss_enable;
+	uint8_t pause_autoneg;
+	uint8_t tx_pause;
+	uint8_t rx_pause;
+	uint8_t flow_ctrl_cfg_set;
+	uint8_t pfc_queue_cfg_set;
+	uint16_t pause_time;
+	uint32_t fc_high_water;
+	uint32_t fc_low_water;
+	struct xgmac_pfc_rxq_cfg pfc_rxq[XGMAC_MAX_QUEUES];
+	struct xgmac_pfc_txq_cfg pfc_txq[XGMAC_MAX_QUEUES];
 	uint8_t timestamp_enable;
 	uint8_t timesync_enable;
 	uint32_t ts_addend;

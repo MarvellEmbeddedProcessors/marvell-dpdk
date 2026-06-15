@@ -13,6 +13,10 @@
 #include "xgmac_regs.h"
 #include "xgmac_rxtx.h"
 
+#define XGMAC_FLOW_CONTROL_UNIT 512U
+#define XGMAC_FLOW_CONTROL_VALUE(x) \
+	(((x) < 1024U) ? 0U : (((x) / XGMAC_FLOW_CONTROL_UNIT) - 2U))
+
 void
 xgmac_mac_init(struct xgmac_dev *dev, uint16_t nb_rx_queues)
 {
@@ -72,37 +76,146 @@ xgmac_vlan_insert_cfg(struct xgmac_dev *dev)
 	xgmac_wr(dev, XGMAC_INNER_VLAN_INCL, val);
 }
 
-static void
-xgmac_rx_flow_control_config(struct xgmac_dev *dev, uint16_t queue, uint32_t fifo_per_q)
+void
+xgmac_rx_flow_ctrl_apply(struct xgmac_dev *dev, uint16_t nb_rxq, bool enable)
 {
-	uint32_t val, flow;
-	uint32_t rfd, rfa;
+	uint32_t fifo_size, fifo_per_q;
+	uint32_t flow, val, rfd, rfa;
+	uint16_t q;
 
-	if (fifo_per_q < 4096)
+	nb_rxq = RTE_MAX(1, nb_rxq);
+	fifo_size = XGMAC_FIFO_SIZE(dev->hw_feat.rx_fifo_size);
+	fifo_per_q = fifo_size / nb_rxq;
+
+	for (q = 0; q < nb_rxq; q++) {
+		val = xgmac_rd(dev, XGMAC_MTL_RXQ_OPMODE(q));
+
+		if (!enable || fifo_per_q < XGMAC_MAX_RING_DESC) {
+			val &= ~XGMAC_EHFC;
+			xgmac_wr(dev, XGMAC_MTL_RXQ_OPMODE(q), val);
+			continue;
+		}
+
+		/*
+		 * Threshold for Deactivating (RFD) / Activating (RFA) flow
+		 * control. If user supplied high/low-water via flow_ctrl_set,
+		 * use those; else fall back to FIFO-per-queue based defaults.
+		 */
+		if (dev->fc_high_water || dev->fc_low_water) {
+			rfa = XGMAC_FLOW_CONTROL_VALUE(1024U * dev->fc_high_water);
+			rfd = XGMAC_FLOW_CONTROL_VALUE(1024U * dev->fc_low_water);
+		} else if (fifo_per_q == XGMAC_MAX_RING_DESC) {
+			rfd = 0x03; /* Full - 2.5K */
+			rfa = 0x01; /* Full - 1.5K */
+		} else {
+			rfd = 0x07; /* Full - 4.5K */
+			rfa = 0x04; /* Full - 3K */
+		}
+
+		flow = xgmac_rd(dev, XGMAC_MTL_RXQ_FLOW_CONTROL(q));
+		flow &= ~(XGMAC_RFD | XGMAC_RFA);
+		flow |= XGMAC_FIELD_PREP(XGMAC_RFD, rfd);
+		flow |= XGMAC_FIELD_PREP(XGMAC_RFA, rfa);
+		xgmac_wr(dev, XGMAC_MTL_RXQ_FLOW_CONTROL(q), flow);
+
+		val |= XGMAC_EHFC;
+		xgmac_wr(dev, XGMAC_MTL_RXQ_OPMODE(q), val);
+	}
+}
+
+void
+xgmac_flow_ctrl_apply(struct xgmac_dev *dev, uint16_t nb_txq, uint16_t nb_rxq)
+{
+	uint32_t val;
+	uint16_t q;
+
+	if (!dev->flow_ctrl_cfg_set)
 		return;
 
-	/* Threshold for Deactivating / Activating flow control. */
-	if (fifo_per_q == 4096) {
-		rfd = 0x03; /* Full - 2.5K */
-		rfa = 0x01; /* Full - 1.5K */
-	} else {
-		rfd = 0x07; /* Full - 4.5K */
-		rfa = 0x04; /* Full - 3K */
+	for (q = 0; q < nb_txq; q++) {
+		val = xgmac_rd(dev, XGMAC_Qx_TX_FLOW_CTRL(q));
+		val &= ~(XGMAC_PT | XGMAC_TFE);
+		if (dev->tx_pause) {
+			val |= XGMAC_FIELD_PREP(XGMAC_PT, dev->pause_time);
+			val |= XGMAC_TFE;
+		}
+		xgmac_wr(dev, XGMAC_Qx_TX_FLOW_CTRL(q), val);
 	}
 
-	/* Write RFA/RFD thresholds before enabling HW flow control. */
-	flow = xgmac_rd(dev, XGMAC_MTL_RXQ_FLOW_CONTROL(queue));
-	flow &= ~(XGMAC_RFD | XGMAC_RFA);
-	flow |= XGMAC_FIELD_PREP(XGMAC_RFD, rfd);
-	flow |= XGMAC_FIELD_PREP(XGMAC_RFA, rfa);
-	xgmac_wr(dev, XGMAC_MTL_RXQ_FLOW_CONTROL(queue), flow);
+	val = xgmac_rd(dev, XGMAC_RX_FLOW_CTRL);
+	/* Link PAUSE and PFC are mutually exclusive; make sure PFCE is off. */
+	val &= ~XGMAC_PFCE;
+	if (dev->rx_pause)
+		val |= XGMAC_RFE;
+	else
+		val &= ~XGMAC_RFE;
+	xgmac_wr(dev, XGMAC_RX_FLOW_CTRL, val);
 
-	/* Enable HW flow control in MTL_RXQ_OPMODE. */
-	val = xgmac_rd(dev, XGMAC_MTL_RXQ_OPMODE(queue));
-	val |= XGMAC_EHFC;
-	xgmac_wr(dev, XGMAC_MTL_RXQ_OPMODE(queue), val);
+	xgmac_rx_flow_ctrl_apply(dev, nb_rxq, dev->rx_pause);
+}
 
-	XGMAC_LOG(DEBUG, "Rx q%u flow ctrl: EHFC rfa=0x%x rfd=0x%x", queue, rfa, rfd);
+void
+xgmac_pfc_queue_apply(struct xgmac_dev *dev, uint16_t nb_txq, uint16_t nb_rxq)
+{
+	bool any_rx_enabled = false;
+	bool any_tx_enabled = false;
+	uint32_t reg, val;
+	uint16_t q;
+	uint8_t tc;
+
+	if (!dev->pfc_queue_cfg_set)
+		return;
+
+	for (q = 0; q < nb_rxq && q < dev->hw_feat.rx_q_cnt; q++) {
+		val = xgmac_rd(dev, XGMAC_MTL_RXQ_OPMODE(q));
+		if (!dev->pfc_rxq[q].enabled) {
+			val &= ~XGMAC_EHFC;
+			xgmac_wr(dev, XGMAC_MTL_RXQ_OPMODE(q), val);
+			continue;
+		}
+		any_rx_enabled = true;
+		tc = dev->pfc_rxq[q].tc;
+
+		val |= XGMAC_EHFC;
+		xgmac_wr(dev, XGMAC_MTL_RXQ_OPMODE(q), val);
+
+		if (dev->fc_high_water || dev->fc_low_water) {
+			val = xgmac_rd(dev, XGMAC_MTL_RXQ_FLOW_CONTROL(q));
+			val &= ~(XGMAC_RFA | XGMAC_RFD);
+			val |= XGMAC_FIELD_PREP(XGMAC_RFA,
+				XGMAC_FLOW_CONTROL_VALUE(1024U * dev->fc_high_water));
+			val |= XGMAC_FIELD_PREP(XGMAC_RFD,
+				XGMAC_FLOW_CONTROL_VALUE(1024U * dev->fc_low_water));
+			xgmac_wr(dev, XGMAC_MTL_RXQ_FLOW_CONTROL(q), val);
+		}
+
+		reg = (tc < 4) ? XGMAC_TC_PRTY_MAP0 : XGMAC_TC_PRTY_MAP1;
+		val = xgmac_rd(dev, reg);
+		val &= ~XGMAC_PSTC(tc);
+		val |= XGMAC_FIELD_PREP(XGMAC_PSTC(tc), dev->pfc_rxq[q].pause_time);
+		xgmac_wr(dev, reg, val);
+	}
+
+	for (q = 0; q < nb_txq && q < dev->hw_feat.tx_q_cnt; q++) {
+		val = xgmac_rd(dev, XGMAC_Qx_TX_FLOW_CTRL(q));
+		val &= ~(XGMAC_TFE | XGMAC_PT);
+		if (!dev->pfc_txq[q].enabled) {
+			xgmac_wr(dev, XGMAC_Qx_TX_FLOW_CTRL(q), val);
+			continue;
+		}
+		any_tx_enabled = true;
+		val |= XGMAC_TFE;
+		val |= XGMAC_FIELD_PREP(XGMAC_PT, dev->pause_time);
+		xgmac_wr(dev, XGMAC_Qx_TX_FLOW_CTRL(q), val);
+	}
+
+	/* PFCE enables both PFC reception and auto-PFC transmission. */
+	val = xgmac_rd(dev, XGMAC_RX_FLOW_CTRL);
+	if (any_rx_enabled || any_tx_enabled)
+		val |= XGMAC_PFCE | (any_tx_enabled ? XGMAC_RFE : 0);
+	else
+		val &= ~(XGMAC_PFCE | XGMAC_RFE);
+	xgmac_wr(dev, XGMAC_RX_FLOW_CTRL, val);
 }
 
 static void
@@ -172,9 +285,6 @@ xgmac_mtl_init(struct xgmac_dev *dev, uint16_t nb_tx_queues, uint16_t nb_rx_queu
 		if (dev->hw_feat.rx_coe)
 			val |= XGMAC_DIS_TCP_EF;
 		xgmac_wr(dev, XGMAC_MTL_RXQ_OPMODE(i), val);
-
-		/* Configure Rx flow control if per-queue FIFO >= 4 KiB. */
-		xgmac_rx_flow_control_config(dev, i, fifo_per_q);
 	}
 
 	XGMAC_LOG(DEBUG, "MTL Rx: q=%u fifo_total=%uB fifo/q=%uB RQS=%u", nb_rx_queues, fifo_size,

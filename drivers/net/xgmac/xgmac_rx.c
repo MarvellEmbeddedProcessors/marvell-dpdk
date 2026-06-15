@@ -4,6 +4,7 @@
 
 #include <rte_mbuf.h>
 #include <rte_mbuf_dyn.h>
+#include <rte_mbuf_ptype.h>
 
 #include "xgmac_ethdev.h"
 #include "xgmac_regs.h"
@@ -57,6 +58,44 @@ xgmac_rxq_release_mbufs(struct xgmac_rx_queue *rxq)
 	rxq->dirty = 0;
 }
 
+static const alignas(RTE_CACHE_LINE_SIZE) uint32_t xgmac_l34t_to_ptype[16] = {
+	[0x0] = RTE_PTYPE_L2_ETHER,
+	[0x1] = RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4 | RTE_PTYPE_L4_TCP,
+	[0x2] = RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4 | RTE_PTYPE_L4_UDP,
+	[0x3] = RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4 | RTE_PTYPE_L4_ICMP,
+	[0x4] = RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4 | RTE_PTYPE_L4_IGMP,
+	[0x5] = RTE_PTYPE_L2_ETHER,
+	[0x6] = RTE_PTYPE_L2_ETHER,
+	[0x7] = RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV4,
+	[0x8] = RTE_PTYPE_L2_ETHER,
+	[0x9] = RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV6 | RTE_PTYPE_L4_TCP,
+	[0xA] = RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV6 | RTE_PTYPE_L4_UDP,
+	[0xB] = RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV6 | RTE_PTYPE_L4_ICMP,
+	[0xC] = RTE_PTYPE_L2_ETHER,
+	[0xD] = RTE_PTYPE_L2_ETHER,
+	[0xE] = RTE_PTYPE_L2_ETHER,
+	[0xF] = RTE_PTYPE_L2_ETHER | RTE_PTYPE_L3_IPV6,
+};
+
+static const alignas(RTE_CACHE_LINE_SIZE) uint32_t xgmac_l34t_to_cksum[16] = {
+	[0x0] = 0,
+	[0x1] = RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_GOOD,
+	[0x2] = RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_GOOD,
+	[0x3] = RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_GOOD,
+	[0x4] = RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_UNKNOWN,
+	[0x5] = 0,
+	[0x6] = 0,
+	[0x7] = RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_UNKNOWN,
+	[0x8] = 0,
+	[0x9] = RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_GOOD,
+	[0xA] = RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_GOOD,
+	[0xB] = RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_GOOD,
+	[0xC] = 0,
+	[0xD] = 0,
+	[0xE] = 0,
+	[0xF] = RTE_MBUF_F_RX_IP_CKSUM_GOOD | RTE_MBUF_F_RX_L4_CKSUM_UNKNOWN,
+};
+
 static inline void
 xgmac_rx_refill(struct xgmac_rx_queue *rxq)
 {
@@ -75,11 +114,13 @@ xgmac_rx_refill(struct xgmac_rx_queue *rxq)
 		}
 
 		for (i = 0; i < thresh; i++) {
+			struct rte_mbuf *m = alloc_mbufs[i];
 			uint16_t idx = (start + i) & mask;
 
-			rxq->sw_ring[idx] = alloc_mbufs[i];
+			m->ol_flags = 0;
+			rxq->sw_ring[idx] = m;
 			desc = &rxq->desc[idx];
-			desc->read.baddr = rte_mbuf_data_iova_default(alloc_mbufs[i]);
+			desc->read.baddr = rte_mbuf_data_iova_default(m);
 			desc->read.rdes2 = 0;
 			desc->read.rdes3 = XGMAC_RDES3_OWN;
 		}
@@ -93,6 +134,31 @@ xgmac_rx_refill(struct xgmac_rx_queue *rxq)
 
 		rxq->dirty += thresh;
 	}
+}
+
+static __rte_always_inline bool
+xgmac_rx_is_cksum_only_err(uint32_t rdes3)
+{
+	uint32_t et = XGMAC_FIELD_GET(XGMAC_RDES3_ETLT, rdes3);
+
+	return et == XGMAC_RDES3_ET_IP_ERR || et == XGMAC_RDES3_ET_L4_ERR;
+}
+
+static __rte_always_inline uint64_t
+xgmac_rx_cksum_flags(uint32_t rdes3, uint32_t l34t)
+{
+	uint64_t ol = xgmac_l34t_to_cksum[l34t];
+
+	if (unlikely(rdes3 & XGMAC_RDES3_ES)) {
+		uint32_t et = XGMAC_FIELD_GET(XGMAC_RDES3_ETLT, rdes3);
+
+		if (et == XGMAC_RDES3_ET_IP_ERR)
+			return RTE_MBUF_F_RX_IP_CKSUM_BAD | RTE_MBUF_F_RX_L4_CKSUM_UNKNOWN;
+		if (et == XGMAC_RDES3_ET_L4_ERR)
+			return (ol & ~RTE_MBUF_F_RX_L4_CKSUM_GOOD) | RTE_MBUF_F_RX_L4_CKSUM_BAD;
+	}
+
+	return ol;
 }
 
 static __rte_always_inline uint16_t
@@ -162,20 +228,22 @@ xgmac_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts, con
 		}
 
 		if (unlikely(rdes3 & XGMAC_RDES3_ES)) {
-			if (flags & XGMAC_RX_SCATTER_F) {
-				if (first_seg) {
-					rte_pktmbuf_free(first_seg);
-					first_seg = NULL;
-					last_seg = NULL;
+			if (!(flags & XGMAC_RX_CKSUM_F) || !xgmac_rx_is_cksum_only_err(rdes3)) {
+				if (flags & XGMAC_RX_SCATTER_F) {
+					if (first_seg) {
+						rte_pktmbuf_free(first_seg);
+						first_seg = NULL;
+						last_seg = NULL;
+					}
 				}
+				rte_pktmbuf_free(rxq->sw_ring[idx]);
+				rxq->sw_ring[idx] = NULL;
+				rxq->errors++;
+				continue;
 			}
-			rte_pktmbuf_free(rxq->sw_ring[idx]);
-			errors++;
-			continue;
 		}
 
 		mbuf = rxq->sw_ring[idx];
-		mbuf->ol_flags = 0;
 
 		if (flags & XGMAC_RX_SCATTER_F) {
 			mbuf->data_len = buf_size;
@@ -203,6 +271,12 @@ xgmac_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts, con
 				first_seg->hash.rss = desc->write.rdes1;
 				first_seg->ol_flags |= RTE_MBUF_F_RX_RSS_HASH;
 			}
+			if (flags & XGMAC_RX_CKSUM_F) {
+				uint32_t l34t = XGMAC_FIELD_GET(XGMAC_RDES3_L34T, rdes3);
+
+				first_seg->packet_type = xgmac_l34t_to_ptype[l34t];
+				first_seg->ol_flags |= xgmac_rx_cksum_flags(rdes3, l34t);
+			}
 
 			nb_bytes += pkt_len;
 
@@ -223,6 +297,13 @@ xgmac_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts, con
 			if ((flags & XGMAC_RX_RSS_HASH_F) && (rdes3 & XGMAC_RDES3_RSV)) {
 				mbuf->hash.rss = desc->write.rdes1;
 				mbuf->ol_flags |= RTE_MBUF_F_RX_RSS_HASH;
+			}
+
+			if (flags & XGMAC_RX_CKSUM_F) {
+				uint32_t l34t = XGMAC_FIELD_GET(XGMAC_RDES3_L34T, rdes3);
+
+				mbuf->packet_type = xgmac_l34t_to_ptype[l34t];
+				mbuf->ol_flags |= xgmac_rx_cksum_flags(rdes3, l34t);
 			}
 
 			nb_bytes += pkt_len;
@@ -281,6 +362,11 @@ xgmac_rx_offload_update(struct rte_eth_dev *eth_dev)
 
 	if (dev->rss_enable)
 		f |= XGMAC_RX_RSS_HASH_F;
+
+	if (eth_dev->data->dev_conf.rxmode.offloads &
+	    (RTE_ETH_RX_OFFLOAD_IPV4_CKSUM | RTE_ETH_RX_OFFLOAD_UDP_CKSUM |
+	     RTE_ETH_RX_OFFLOAD_TCP_CKSUM))
+		f |= XGMAC_RX_CKSUM_F;
 
 	if (dev->timestamp_enable || dev->timesync_enable) {
 		uint64_t ts_flag = 0;

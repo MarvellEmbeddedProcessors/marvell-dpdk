@@ -165,17 +165,26 @@ int xgmac_tx_offload_update(struct rte_eth_dev *eth_dev);
 #define XGMAC_RX_SCATTER_F     RTE_BIT32(0)
 #define XGMAC_RX_RSS_HASH_F    RTE_BIT32(1)
 #define XGMAC_RX_TIMESTAMP_F   RTE_BIT32(2)
+#define XGMAC_RX_CKSUM_F       RTE_BIT32(3)
 
 #define XGMAC_RX_FASTPATH_MODES                                                                    \
-	R(no_offload,      XGMAC_RX_OFFLOAD_NONE)                                                 \
-	R(mseg,            XGMAC_RX_SCATTER_F)                                                     \
-	R(rss,             XGMAC_RX_RSS_HASH_F)                                                    \
-	R(mseg_rss,        (XGMAC_RX_SCATTER_F | XGMAC_RX_RSS_HASH_F))                           \
-	R(ts,              XGMAC_RX_TIMESTAMP_F)                                                   \
-	R(mseg_ts,         (XGMAC_RX_SCATTER_F | XGMAC_RX_TIMESTAMP_F))                           \
-	R(rss_ts,          (XGMAC_RX_RSS_HASH_F | XGMAC_RX_TIMESTAMP_F))                         \
-	R(mseg_rss_ts,     (XGMAC_RX_SCATTER_F | XGMAC_RX_RSS_HASH_F |                           \
-			    XGMAC_RX_TIMESTAMP_F))
+	R(no_offload, XGMAC_RX_OFFLOAD_NONE)                                                       \
+	R(mseg, XGMAC_RX_SCATTER_F)                                                                \
+	R(rss, XGMAC_RX_RSS_HASH_F)                                                                \
+	R(mseg_rss, (XGMAC_RX_SCATTER_F | XGMAC_RX_RSS_HASH_F))                                    \
+	R(ts, XGMAC_RX_TIMESTAMP_F)                                                                \
+	R(mseg_ts, (XGMAC_RX_SCATTER_F | XGMAC_RX_TIMESTAMP_F))                                    \
+	R(rss_ts, (XGMAC_RX_RSS_HASH_F | XGMAC_RX_TIMESTAMP_F))                                    \
+	R(mseg_rss_ts, (XGMAC_RX_SCATTER_F | XGMAC_RX_RSS_HASH_F | XGMAC_RX_TIMESTAMP_F))          \
+	R(cksum, XGMAC_RX_CKSUM_F)                                                                 \
+	R(mseg_cksum, (XGMAC_RX_SCATTER_F | XGMAC_RX_CKSUM_F))                                     \
+	R(rss_cksum, (XGMAC_RX_RSS_HASH_F | XGMAC_RX_CKSUM_F))                                     \
+	R(mseg_rss_cksum, (XGMAC_RX_SCATTER_F | XGMAC_RX_RSS_HASH_F | XGMAC_RX_CKSUM_F))           \
+	R(ts_cksum, (XGMAC_RX_TIMESTAMP_F | XGMAC_RX_CKSUM_F))                                     \
+	R(mseg_ts_cksum, (XGMAC_RX_SCATTER_F | XGMAC_RX_TIMESTAMP_F | XGMAC_RX_CKSUM_F))           \
+	R(rss_ts_cksum, (XGMAC_RX_RSS_HASH_F | XGMAC_RX_TIMESTAMP_F | XGMAC_RX_CKSUM_F))           \
+	R(mseg_rss_ts_cksum,                                                                       \
+	  (XGMAC_RX_SCATTER_F | XGMAC_RX_RSS_HASH_F | XGMAC_RX_TIMESTAMP_F | XGMAC_RX_CKSUM_F))
 
 #define R(name, flags)                                                                             \
 	uint16_t xgmac_recv_pkts_##name(void *rx_queue, struct rte_mbuf **rx_pkts,                 \

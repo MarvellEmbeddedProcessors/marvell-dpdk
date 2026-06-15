@@ -31,6 +31,15 @@ xgmac_mac_init(struct xgmac_dev *dev, uint16_t nb_rx_queues)
 	/* RX_CONFIG: set ACS (auto pad/CRC strip). */
 	val = xgmac_rd(dev, XGMAC_RX_CONFIG);
 	val |= XGMAC_CONFIG_ACS;
+	if (dev->hw_feat.rx_coe) {
+		uint64_t rx_ol = dev->eth_dev->data->dev_conf.rxmode.offloads;
+
+		if (rx_ol & (RTE_ETH_RX_OFFLOAD_IPV4_CKSUM | RTE_ETH_RX_OFFLOAD_UDP_CKSUM |
+			     RTE_ETH_RX_OFFLOAD_TCP_CKSUM))
+			val |= XGMAC_CONFIG_IPC;
+		else
+			val &= ~XGMAC_CONFIG_IPC;
+	}
 	xgmac_wr(dev, XGMAC_RX_CONFIG, val);
 
 	/* Enable Rx queues in RXQ_CTRL0 after all MAC config is done. */
@@ -160,6 +169,8 @@ xgmac_mtl_init(struct xgmac_dev *dev, uint16_t nb_tx_queues, uint16_t nb_rx_queu
 	for (i = 0; i < nb_rx_queues; i++) {
 		val = XGMAC_FIELD_PREP(XGMAC_RQS, qs);
 		val |= XGMAC_RSF;
+		if (dev->hw_feat.rx_coe)
+			val |= XGMAC_DIS_TCP_EF;
 		xgmac_wr(dev, XGMAC_MTL_RXQ_OPMODE(i), val);
 
 		/* Configure Rx flow control if per-queue FIFO >= 4 KiB. */

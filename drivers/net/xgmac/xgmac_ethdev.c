@@ -636,6 +636,10 @@ xgmac_dev_infos_get(struct rte_eth_dev *eth_dev, struct rte_eth_dev_info *info)
 	info->default_rxconf.rx_free_thresh = XGMAC_DEFAULT_RX_FREE_THRESH;
 	info->default_txconf.tx_free_thresh = XGMAC_DEFAULT_TX_FREE_THRESH;
 	info->rx_offload_capa = RTE_ETH_RX_OFFLOAD_SCATTER | RTE_ETH_RX_OFFLOAD_RSS_HASH;
+	if (dev->hw_feat.rx_coe)
+		info->rx_offload_capa |= RTE_ETH_RX_OFFLOAD_IPV4_CKSUM |
+					 RTE_ETH_RX_OFFLOAD_UDP_CKSUM |
+					 RTE_ETH_RX_OFFLOAD_TCP_CKSUM;
 	if (dev->hw_feat.ptp) {
 		info->rx_offload_capa |= RTE_ETH_RX_OFFLOAD_TIMESTAMP;
 		info->rx_queue_offload_capa |= RTE_ETH_RX_OFFLOAD_TIMESTAMP;
@@ -1201,12 +1205,31 @@ xgmac_timesync_write_time(struct rte_eth_dev *eth_dev, const struct timespec *ts
 					  (uint32_t)ts->tv_nsec);
 }
 
+static const uint32_t *
+xgmac_dev_supported_ptypes_get(struct rte_eth_dev *dev __rte_unused,
+			       size_t *no_of_elements)
+{
+	static const uint32_t ptypes[] = {
+		RTE_PTYPE_L2_ETHER,
+		RTE_PTYPE_L3_IPV4,
+		RTE_PTYPE_L3_IPV6,
+		RTE_PTYPE_L4_TCP,
+		RTE_PTYPE_L4_UDP,
+		RTE_PTYPE_L4_ICMP,
+		RTE_PTYPE_L4_IGMP,
+	};
+
+	*no_of_elements = RTE_DIM(ptypes);
+	return ptypes;
+}
+
 static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.dev_configure = xgmac_dev_configure,
 	.dev_start = xgmac_dev_start,
 	.dev_stop = xgmac_dev_stop,
 	.dev_close = xgmac_dev_close,
 	.dev_infos_get = xgmac_dev_infos_get,
+	.dev_supported_ptypes_get = xgmac_dev_supported_ptypes_get,
 	.dev_set_link_up = xgmac_dev_set_link_up,
 	.dev_set_link_down = xgmac_dev_set_link_down,
 	.link_update = xgmac_link_update,

@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include <rte_ether.h>
+#include <rte_malloc.h>
 #include <rte_random.h>
 
 #include "xgmac_dev.h"
@@ -637,10 +638,27 @@ xgmac_dma_init(struct xgmac_dev *dev)
 	return 0;
 }
 
+static inline uint16_t
+xgmac_frp_parse_buf_size_decode(uint8_t code)
+{
+	static const uint16_t frp_buf_tbl[4] = { 64, 128, 256, 0 };
+
+	return frp_buf_tbl[code & 0x3];
+}
+
+static inline uint16_t
+xgmac_frp_entries_decode(uint8_t code)
+{
+	static const uint16_t frp_ent_tbl[4] = { 64, 128, 256, 0 };
+
+	return frp_ent_tbl[code & 0x3];
+}
+
 void
 xgmac_hw_features_get(struct xgmac_dev *dev)
 {
 	struct xgmac_hw_features *hw_feat = &dev->hw_feat;
+	uint8_t frp_pb_code, frp_es_code;
 	uint32_t hw0, hw1, hw2, hw3;
 
 	hw_feat->version = xgmac_rd(dev, XGMAC_VERSION);
@@ -694,17 +712,22 @@ xgmac_hw_features_get(struct xgmac_dev *dev)
 	hw_feat->asp = XGMAC_FIELD_GET(XGMAC_HWFEAT3_ASP, hw3);
 	hw_feat->dvlan = !!(hw3 & XGMAC_HWFEAT3_DVLAN);
 	hw_feat->nrvf = XGMAC_FIELD_GET(XGMAC_HWFEAT3_NRVF, hw3);
+	hw_feat->frp = !!(hw3 & XGMAC_HWFEAT3_FRPSEL);
+	frp_pb_code = XGMAC_FIELD_GET(XGMAC_HWFEAT3_FRPPB, hw3);
+	frp_es_code = XGMAC_FIELD_GET(XGMAC_HWFEAT3_FRPES, hw3);
+	hw_feat->frp_parse_buf_size = xgmac_frp_parse_buf_size_decode(frp_pb_code);
+	hw_feat->frp_entry_count = xgmac_frp_entries_decode(frp_es_code);
 
 	XGMAC_LOG(INFO,
 		  "HW features: tx_q=%u rx_q=%u tx_ch=%u rx_ch=%u "
 		  "tx_fifo=%uKB rx_fifo=%uKB addrs=%u hash_tbl=%u "
-		  "asp=%u dvlan=%u nrvf=%u dma_addr=%u-bit tso=%u tunnel=%u rss=%u dcb=%u",
+		  "asp=%u dvlan=%u nrvf=%u dma_addr=%u-bit tso=%u tunnel=%u rss=%u dcb=%u frp=%u",
 		  hw_feat->tx_q_cnt, hw_feat->rx_q_cnt, hw_feat->tx_ch_cnt, hw_feat->rx_ch_cnt,
 		  XGMAC_FIFO_SIZE(hw_feat->tx_fifo_size) / 1024,
 		  XGMAC_FIFO_SIZE(hw_feat->rx_fifo_size) / 1024,
 		  hw_feat->addn_mac + 1, hw_feat->hash_table_size, hw_feat->asp, hw_feat->dvlan,
 		  hw_feat->nrvf, hw_feat->dma_addr_width, hw_feat->tso, hw_feat->tunnel,
-		  hw_feat->rss, hw_feat->dcb);
+		  hw_feat->rss, hw_feat->dcb, hw_feat->frp);
 }
 
 static int
@@ -1089,28 +1112,7 @@ xgmac_rss_enable(struct xgmac_dev *dev)
 static void
 xgmac_rss_set_dynamic_mtl_mapping(struct xgmac_dev *dev, uint16_t nb_rx_queues)
 {
-	static const uint32_t rxq_dma_map_regs[] = {
-		XGMAC_MTL_RXQ_DMA_MAP0,
-		XGMAC_MTL_RXQ_DMA_MAP1,
-		XGMAC_MTL_RXQ_DMA_MAP2,
-		XGMAC_MTL_RXQ_DMA_MAP3,
-	};
-	const uint16_t queues_per_reg = 4;
-	uint32_t reg_val = 0;
-	uint16_t i;
-
-	for (i = 0; i < nb_rx_queues; i++) {
-		uint16_t reg = i / queues_per_reg;
-		uint16_t pos = i % queues_per_reg;
-
-		if (pos == 0)
-			reg_val = xgmac_rd(dev, rxq_dma_map_regs[reg]);
-
-		reg_val |= 0x80u << (pos * 8);
-
-		if (pos == queues_per_reg - 1 || i == nb_rx_queues - 1)
-			xgmac_wr(dev, rxq_dma_map_regs[reg], reg_val);
-	}
+	xgmac_set_mtl_rxq_dma_mapping(dev, nb_rx_queues, true);
 }
 
 /*
@@ -1398,5 +1400,595 @@ xgmac_rss_configure(struct xgmac_dev *dev)
 		  nb_rx_queues, dev->rss_table_size, dev->rss_hf,
 		  xgmac_rd(dev, XGMAC_RSS_CTRL),
 		  xgmac_rd(dev, XGMAC_MTL_RXQ_DMA_MAP0));
+	return 0;
+}
+
+static int
+xgmac_wait_frp_idle(struct xgmac_dev *dev)
+{
+	uint64_t tmo_ms = XGMAC_TIMEOUT_MS;
+	uint32_t val;
+
+	do {
+		val = xgmac_rd(dev, XGMAC_MTL_RXP_IACC_CTRL_ST);
+		if (!(val & XGMAC_STARTBUSY))
+			return 0;
+		rte_delay_us_sleep(1000);
+		tmo_ms--;
+	} while (tmo_ms);
+
+	XGMAC_LOG(WARNING, "FRP indirect access timeout: iacc=0x%08x", val);
+	return -ETIMEDOUT;
+}
+
+static int
+xgmac_iacc_access(struct xgmac_dev *dev, uint8_t accsel, uint16_t addr, uint32_t *data, bool write)
+{
+	uint32_t ctrl;
+	int ret;
+
+	if (!data)
+		return -EINVAL;
+	if (accsel > XGMAC_ACCSEL_ACC_MMC)
+		return -EINVAL;
+
+	ret = xgmac_wait_frp_idle(dev);
+	if (ret)
+		return ret;
+
+	if (write)
+		xgmac_wr(dev, XGMAC_MTL_RXP_IACC_DATA, *data);
+
+	ctrl = XGMAC_FIELD_PREP(XGMAC_ACCSEL, accsel) |
+	       XGMAC_FIELD_PREP(XGMAC_RXP_IACC_ADDR, addr);
+	if (write)
+		ctrl |= XGMAC_WRRDN;
+	ctrl |= XGMAC_STARTBUSY;
+
+	xgmac_wr(dev, XGMAC_MTL_RXP_IACC_CTRL_ST, ctrl);
+
+	ret = xgmac_wait_frp_idle(dev);
+	if (ret)
+		return ret;
+
+	if (!write)
+		*data = xgmac_rd(dev, XGMAC_MTL_RXP_IACC_DATA);
+
+	return 0;
+}
+
+static int
+xgmac_wait_frp_state(struct xgmac_dev *dev, bool active)
+{
+	uint64_t tmo_ms = XGMAC_TIMEOUT_MS;
+	uint32_t val;
+
+	do {
+		val = xgmac_rd(dev, XGMAC_MTL_RXP_CONTROL_STATUS);
+		if (!!(val & XGMAC_RXPI) == active)
+			return 0;
+		rte_delay_us_sleep(1000);
+		tmo_ms--;
+	} while (tmo_ms);
+
+	return -ETIMEDOUT;
+}
+
+int
+xgmac_frp_enable(struct xgmac_dev *dev, bool enable)
+{
+	uint16_t nb_rx_queues;
+	uint32_t val;
+
+	if (!dev)
+		return -EINVAL;
+	if (!dev->hw_feat.frp)
+		return -ENOTSUP;
+
+	nb_rx_queues = RTE_MAX(1, dev->eth_dev->data->nb_rx_queues);
+	if (enable)
+		xgmac_set_mtl_rxq_dma_mapping(dev, nb_rx_queues, true);
+
+	val = xgmac_rd(dev, XGMAC_MTL_OPMODE);
+	if (enable)
+		val |= XGMAC_FRPE;
+	else
+		val &= ~XGMAC_FRPE;
+	xgmac_wr(dev, XGMAC_MTL_OPMODE, val);
+	if (xgmac_wait_frp_state(dev, enable))
+		XGMAC_LOG(WARNING, "timeout waiting FRP state=%u (RXPI)", enable);
+
+	if (!enable)
+		xgmac_set_mtl_rxq_dma_mapping(dev, nb_rx_queues, false);
+
+	return 0;
+}
+
+/* Validate a cfg against HW capabilities. */
+static int
+xgmac_frp_cfg_validate(struct xgmac_dev *dev, const struct xgmac_frp_entry_cfg *cfg)
+{
+	uint16_t entry_count;
+	uint16_t parse_buf_size;
+	uint16_t valid_ch_mask;
+	uint8_t max_frame_offset;
+
+	parse_buf_size = dev->hw_feat.frp_parse_buf_size;
+	if (!parse_buf_size)
+		return -EINVAL;
+	max_frame_offset = (parse_buf_size / sizeof(uint32_t)) - 1;
+	if (cfg->frame_offset > max_frame_offset)
+		return -EINVAL;
+	if (dev->hw_feat.rx_ch_cnt >= 16)
+		valid_ch_mask = UINT16_MAX;
+	else
+		valid_ch_mask = (uint16_t)(RTE_BIT32(dev->hw_feat.rx_ch_cnt) - 1);
+	/* PASS (AF=1, RF=0) requires a non-zero DCH that lies within rx_ch_cnt. */
+	if (cfg->action.accept_frame && !cfg->action.reject_frame &&
+	    (cfg->action.dma_ch_mask == 0 || (cfg->action.dma_ch_mask & ~valid_ch_mask)))
+		return -EINVAL;
+	/* DROP / intermediate / BYPASS: HW ignores DCH. */
+	if ((!cfg->action.accept_frame || cfg->action.reject_frame) &&
+	    (cfg->action.dma_ch_mask & ~valid_ch_mask))
+		return -EINVAL;
+	entry_count = dev->hw_feat.frp_entry_count;
+	if (cfg->action.ok_index >= entry_count)
+		return -EINVAL;
+
+	return 0;
+}
+
+/* Pack a (pre-validated) cfg into the 16-byte FRP HW instruction layout. */
+static void
+xgmac_frp_cfg_pack(const struct xgmac_frp_entry_cfg *cfg, struct xgmac_frp_hw_entry *entry)
+{
+	uint32_t ctrl = 0;
+
+	if (cfg->action.accept_frame)
+		ctrl |= RTE_BIT32(0);
+	if (cfg->action.reject_frame)
+		ctrl |= RTE_BIT32(1);
+	if (cfg->action.inverse_match)
+		ctrl |= RTE_BIT32(2);
+	if (cfg->action.next_control)
+		ctrl |= RTE_BIT32(3);
+
+	entry->data[0] = cfg->match_data;
+	entry->data[1] = cfg->match_en;
+	entry->data[2] =
+		ctrl | ((uint32_t)cfg->frame_offset << 8) | ((uint32_t)cfg->action.ok_index << 16);
+	/*
+	 * DCH is [111:96] => word3[15:0]. HW uses DCH only on PASS (AF=1, RF=0).
+	 * BYPASS (AF=1, RF=1), DROP (AF=0, RF=1) and intermediate (AF=0, RF=0) DCH is don't-care.
+	 */
+	entry->data[3] = (cfg->action.accept_frame && !cfg->action.reject_frame) ?
+				 (uint32_t)cfg->action.dma_ch_mask :
+				 0;
+}
+
+static int
+xgmac_frp_entry_write(struct xgmac_dev *dev, uint16_t idx, const struct xgmac_frp_hw_entry *entry)
+{
+	uint16_t entry_count;
+	uint16_t base;
+	uint32_t i;
+	int ret;
+
+	entry_count = dev->hw_feat.frp_entry_count;
+	if (idx >= entry_count)
+		return -EINVAL;
+
+	base = idx * XGMAC_FRP_ENTRY_WORDS;
+	for (i = 0; i < XGMAC_FRP_ENTRY_WORDS; i++) {
+		uint32_t data = entry->data[i];
+
+		ret = xgmac_iacc_access(dev, XGMAC_ACCSEL_ACC_IT, base + i, &data, true);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+static int
+xgmac_frp_map_flow_to_cfg(struct xgmac_dev *dev, uint16_t byte_offset, const uint8_t *match_value,
+			  const uint8_t *match_mask, uint8_t match_size,
+			  const struct xgmac_frp_action *action, uint8_t miss_ok_index,
+			  struct xgmac_frp_entry_cfg *generated_cfg, uint16_t *generated_cfg_num)
+{
+	uint32_t end_byte = byte_offset + match_size - 1u;
+	uint32_t first_word = byte_offset / XGMAC_FRP_WORD_BYTES;
+	uint32_t last_word = end_byte / XGMAC_FRP_WORD_BYTES;
+	struct xgmac_frp_entry_cfg cfg;
+	uint16_t cfg_num = 0;
+	uint32_t word, b;
+	int ret;
+
+	/* Defence in depth: a zero match_size would underflow end_byte above. */
+	if (match_size == 0)
+		return -EINVAL;
+
+	if (action->inverse_match && last_word != first_word)
+		return -ENOTSUP;
+
+	for (word = first_word; word <= last_word; word++) {
+		uint32_t word_start = word * XGMAC_FRP_WORD_BYTES;
+		uint32_t seg_start = (word_start > byte_offset) ? word_start : byte_offset;
+		uint32_t word_end = word_start + XGMAC_FRP_WORD_BYTES;
+		uint32_t match_end = byte_offset + match_size;
+		uint32_t seg_end = (word_end < match_end) ? word_end : match_end;
+
+		memset(&cfg, 0, sizeof(cfg));
+		cfg.frame_offset = (uint8_t)word;
+
+		if (word == last_word) {
+			/* Terminal entry: carries the rule's action. */
+			cfg.action = *action;
+		} else {
+			/*
+			 * Intermediate compare entry:
+			 *  - NIC=1: on match continue sequentially.
+			 *  - OKI=miss_ok_index: on mismatch jump to caller-specified
+			 *    fail path (usually next rule/residual entry).
+			 */
+			cfg.action.next_control = true;
+			cfg.action.ok_index = miss_ok_index;
+		}
+
+		for (b = seg_start; b < seg_end; b++) {
+			uint32_t src = b - byte_offset;
+			uint32_t pos = b - word_start;
+
+			/* Shift casts are required: uint8_t << 24 in signed int is UB. */
+			cfg.match_data |= (uint32_t)match_value[src] << (pos * 8);
+			cfg.match_en   |= (uint32_t)match_mask[src]  << (pos * 8);
+		}
+
+		ret = xgmac_frp_cfg_validate(dev, &cfg);
+		if (ret)
+			return ret;
+
+		generated_cfg[cfg_num++] = cfg;
+	}
+
+	*generated_cfg_num = cfg_num;
+	return 0;
+}
+
+static int
+xgmac_frp_compile_rules_at(struct xgmac_dev *dev, const struct xgmac_frp_flow_rule *rules,
+			   uint16_t nb_rules, uint16_t base_index, uint8_t residual_ok_index,
+			   struct xgmac_frp_entry_cfg *generated_cfg,
+			   uint16_t generated_cfg_max, uint16_t *generated_cfg_num)
+{
+	uint16_t entry_count, compiled = 0;
+	uint16_t i, mapped;
+	int ret;
+
+	entry_count = dev->hw_feat.frp_entry_count;
+	if (base_index >= entry_count || residual_ok_index >= entry_count)
+		return -EINVAL;
+	if (base_index > residual_ok_index)
+		return -EINVAL;
+
+	for (i = 0; i < nb_rules; i++) {
+		const struct xgmac_frp_flow_rule *rule = &rules[i];
+		uint16_t first_word, last_word, req_entries;
+		uint8_t miss_ok_index;
+		uint16_t next_start;
+
+		/* Skip zero-size rules (mirrors count_lanes) to keep lane indices consistent. */
+		if (rule->match_size == 0)
+			continue;
+
+		first_word = rule->byte_offset / XGMAC_FRP_WORD_BYTES;
+		last_word = (rule->byte_offset + rule->match_size - 1) / XGMAC_FRP_WORD_BYTES;
+		req_entries = last_word - first_word + 1;
+
+		if (compiled + req_entries > generated_cfg_max)
+			return -ENOSPC;
+
+		/*
+		 * Rules must fit strictly before the residual slot, so the
+		 * default-miss entry at residual_ok_index is never overwritten.
+		 */
+		next_start = base_index + compiled + req_entries;
+		if (next_start > residual_ok_index)
+			return -ENOSPC;
+
+		miss_ok_index = (i + 1 < nb_rules) ? (uint8_t)next_start : residual_ok_index;
+
+		ret = xgmac_frp_map_flow_to_cfg(dev, rule->byte_offset, rule->match_value,
+						rule->match_mask, rule->match_size, &rule->action,
+						miss_ok_index, &generated_cfg[compiled], &mapped);
+		if (ret)
+			return ret;
+		compiled += mapped;
+	}
+
+	*generated_cfg_num = compiled;
+	return 0;
+}
+
+/*
+ * NVE = last valid IT index; grow forward only so already-programmed
+ * entries stay reachable. NPE = max entries a frame may traverse; set it
+ * to NVE so a misbehaving chain aborts with NPEOVIS instead of stalling.
+ */
+static void
+xgmac_frp_grow_nve(struct xgmac_dev *dev, uint16_t want_idx)
+{
+	uint32_t val = xgmac_rd(dev, XGMAC_MTL_RXP_CONTROL_STATUS);
+	uint16_t cur = (uint16_t)XGMAC_FIELD_GET(XGMAC_NVE, val);
+
+	if (cur > want_idx)
+		want_idx = cur;
+
+	val &= ~(XGMAC_NVE | XGMAC_NPE);
+	val |= XGMAC_FIELD_PREP(XGMAC_NVE, want_idx);
+	val |= XGMAC_FIELD_PREP(XGMAC_NPE, want_idx);
+	xgmac_wr(dev, XGMAC_MTL_RXP_CONTROL_STATUS, val);
+}
+
+static int
+xgmac_frp_program_rules_at(struct xgmac_dev *dev, const struct xgmac_frp_flow_rule *rules,
+			   uint16_t nb_rules, uint16_t base_index, uint8_t residual_ok_index)
+{
+	struct xgmac_frp_entry_cfg *cfg_list = NULL;
+	struct xgmac_frp_hw_entry entry;
+	uint16_t entry_count, cfg_num = 0;
+	uint16_t avail_entries, i;
+	int ret;
+
+	entry_count = dev->hw_feat.frp_entry_count;
+	avail_entries = entry_count - base_index;
+	cfg_list = rte_zmalloc("xgmac_frp_cfg", avail_entries * sizeof(*cfg_list), 0);
+	if (!cfg_list)
+		return -ENOMEM;
+
+	ret = xgmac_frp_compile_rules_at(dev, rules, nb_rules, base_index, residual_ok_index,
+					 cfg_list, avail_entries, &cfg_num);
+	if (ret)
+		goto out;
+
+	if (cfg_num == 0) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	for (i = 0; i < cfg_num; i++) {
+		/* cfg_list was already validated in compile_rules_at. */
+		xgmac_frp_cfg_pack(&cfg_list[i], &entry);
+
+		ret = xgmac_frp_entry_write(dev, base_index + i, &entry);
+		if (ret)
+			goto out;
+	}
+
+out:
+	rte_free(cfg_list);
+	return ret;
+}
+
+enum xgmac_frp_default_miss {
+	XGMAC_FRP_DEFAULT_MISS_ACCEPT = 0,
+	XGMAC_FRP_DEFAULT_MISS_DROP = 1,
+};
+
+static int
+xgmac_frp_program_default_miss_entry(struct xgmac_dev *dev, uint8_t residual_ok_index,
+				     enum xgmac_frp_default_miss policy, uint16_t dma_ch_mask)
+{
+	struct xgmac_frp_entry_cfg residual_cfg = { 0 };
+	struct xgmac_frp_hw_entry residual_entry;
+	int ret;
+
+	residual_cfg.action.ok_index = residual_ok_index;
+	switch (policy) {
+	case XGMAC_FRP_DEFAULT_MISS_ACCEPT:
+		residual_cfg.action.accept_frame = true;
+		residual_cfg.action.dma_ch_mask = dma_ch_mask;
+		break;
+	case XGMAC_FRP_DEFAULT_MISS_DROP:
+		residual_cfg.action.reject_frame = true;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	ret = xgmac_frp_cfg_validate(dev, &residual_cfg);
+	if (ret)
+		return ret;
+	xgmac_frp_cfg_pack(&residual_cfg, &residual_entry);
+
+	return xgmac_frp_entry_write(dev, residual_ok_index, &residual_entry);
+}
+
+static uint16_t
+xgmac_frp_count_lanes(const struct xgmac_frp_flow_rule *rules, uint16_t nb_rules)
+{
+	uint16_t total = 0;
+	uint16_t i;
+
+	for (i = 0; i < nb_rules; i++) {
+		uint16_t first_word, last_word;
+
+		/* Skip zero-size rules to avoid underflowing the lane span below. */
+		if (rules[i].match_size == 0)
+			continue;
+
+		first_word = rules[i].byte_offset / XGMAC_FRP_WORD_BYTES;
+		last_word =
+			(rules[i].byte_offset + rules[i].match_size - 1) / XGMAC_FRP_WORD_BYTES;
+
+		total += last_word - first_word + 1;
+	}
+	return total;
+}
+
+int
+xgmac_frp_program_rules(struct xgmac_dev *dev, const struct xgmac_frp_flow_rule *rules,
+			uint16_t nb_rules)
+{
+	uint16_t entry_count, residual_ok_index;
+	enum xgmac_frp_default_miss policy;
+	int ret;
+
+	if (!dev->hw_feat.frp)
+		return -ENOTSUP;
+
+	entry_count = dev->hw_feat.frp_entry_count;
+	if (entry_count < 2)
+		return -ENOSPC;
+
+	if (nb_rules > 0 && !rules)
+		return -EINVAL;
+
+	/* Park the residual right after the last rule lane. */
+	residual_ok_index = (nb_rules > 0) ? xgmac_frp_count_lanes(rules, nb_rules) : 0;
+	if ((uint32_t)residual_ok_index >= entry_count)
+		return -ENOSPC;
+
+	policy = dev->flow_isolated ? XGMAC_FRP_DEFAULT_MISS_DROP : XGMAC_FRP_DEFAULT_MISS_ACCEPT;
+
+	/* Disable FRP before programming to avoid transient rule-less state. */
+	if (xgmac_rd(dev, XGMAC_MTL_OPMODE) & XGMAC_FRPE) {
+		ret = xgmac_frp_enable(dev, false);
+		if (ret)
+			return ret;
+	}
+
+	if (nb_rules > 0) {
+		ret = xgmac_frp_program_rules_at(dev, rules, nb_rules, 0,
+						 (uint8_t)residual_ok_index);
+		if (ret)
+			return ret;
+	}
+
+	ret = xgmac_frp_program_default_miss_entry(dev, (uint8_t)residual_ok_index, policy,
+						   (uint16_t)RTE_BIT32(0));
+	if (ret)
+		return ret;
+
+	xgmac_frp_grow_nve(dev, residual_ok_index);
+
+	return xgmac_frp_enable(dev, true);
+}
+
+int
+xgmac_frp_stats_read(struct xgmac_dev *dev)
+{
+	uint8_t rx_ch_cnt;
+	uint8_t ch;
+	uint32_t val;
+	int ret;
+
+	if (!dev)
+		return -EINVAL;
+	if (!dev->hw_feat.frp)
+		return -ENOTSUP;
+
+	ret = xgmac_iacc_access(dev, XGMAC_ACCSEL_ACC_IFR, XGMAC_FRP_IFR_DROP_CNT, &val, false);
+	if (ret)
+		return ret;
+	dev->mmc_stats.frp_drop_cnt += val & XGMAC_FRP_IFR_RXPDC_MASK;
+
+	ret = xgmac_iacc_access(dev, XGMAC_ACCSEL_ACC_IFR, XGMAC_FRP_IFR_ERROR_CNT, &val, false);
+	if (ret)
+		return ret;
+	dev->mmc_stats.frp_error_cnt += val & XGMAC_FRP_IFR_RXPDC_MASK;
+
+	ret = xgmac_iacc_access(dev, XGMAC_ACCSEL_ACC_IFR, XGMAC_FRP_IFR_BYPASS_CNT, &val, false);
+	if (ret)
+		return ret;
+	dev->mmc_stats.frp_bypass_cnt += val & XGMAC_FRP_IFR_RXPDC_MASK;
+
+	rx_ch_cnt = dev->hw_feat.rx_ch_cnt;
+	if (rx_ch_cnt > XGMAC_MAX_QUEUES)
+		rx_ch_cnt = XGMAC_MAX_QUEUES;
+	for (ch = 0; ch < rx_ch_cnt; ch++) {
+		ret = xgmac_iacc_access(dev, XGMAC_ACCSEL_ACC_IFR, XGMAC_FRP_IFR_ACCEPT_CNT(ch),
+					&val, false);
+		if (ret)
+			return ret;
+		dev->mmc_stats.frp_accept_cnt[ch] += val & XGMAC_FRP_IFR_RXPDC_MASK;
+	}
+
+	return 0;
+}
+
+int
+xgmac_frp_entry_read(struct xgmac_dev *dev, uint16_t idx, struct xgmac_frp_hw_entry *entry)
+{
+	uint16_t entry_count;
+	uint16_t base;
+	uint32_t i;
+	int ret;
+
+	entry_count = dev->hw_feat.frp_entry_count;
+	if (idx >= entry_count)
+		return -EINVAL;
+
+	base = idx * XGMAC_FRP_ENTRY_WORDS;
+	for (i = 0; i < XGMAC_FRP_ENTRY_WORDS; i++) {
+		uint32_t data = 0;
+
+		ret = xgmac_iacc_access(dev, XGMAC_ACCSEL_ACC_IT, base + i, &data, false);
+		if (ret)
+			return ret;
+		entry->data[i] = data;
+	}
+
+	return 0;
+}
+
+static int
+xgmac_frp_entry_clear(struct xgmac_dev *dev, uint16_t idx)
+{
+	struct xgmac_frp_hw_entry entry = { { 0 } };
+
+	return xgmac_frp_entry_write(dev, idx, &entry);
+}
+
+int
+xgmac_frp_table_flush(struct xgmac_dev *dev)
+{
+	uint16_t entry_count;
+	uint16_t idx;
+	int ret;
+
+	entry_count = dev->hw_feat.frp_entry_count;
+
+	for (idx = 0; idx < entry_count; idx++) {
+		ret = xgmac_frp_entry_clear(dev, idx);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+int
+xgmac_frp_init(struct xgmac_dev *dev)
+{
+	uint32_t val;
+	int ret;
+
+	if (!dev->hw_feat.frp)
+		return 0;
+
+	ret = xgmac_frp_enable(dev, false);
+	if (ret)
+		return ret;
+
+	ret = xgmac_frp_table_flush(dev);
+	if (ret)
+		return ret;
+
+	val = xgmac_rd(dev, XGMAC_MTL_RXP_CONTROL_STATUS);
+	val &= ~XGMAC_NVE;
+	val |= XGMAC_FIELD_PREP(XGMAC_NVE, 0);
+	xgmac_wr(dev, XGMAC_MTL_RXP_CONTROL_STATUS, val);
+
 	return 0;
 }

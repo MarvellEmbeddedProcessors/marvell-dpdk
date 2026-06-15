@@ -85,6 +85,9 @@ struct xgmac_hw_features {
 	uint8_t asp;
 	uint8_t dvlan;
 	uint8_t nrvf;
+	uint8_t frp;
+	uint16_t frp_parse_buf_size;
+	uint16_t frp_entry_count;
 };
 
 struct xgmac_mmc_stats {
@@ -102,6 +105,12 @@ struct xgmac_mmc_stats {
 	uint64_t rx_length_error;
 	uint64_t rx_fifo_overflow;
 	uint64_t rx_pause_frames;
+	/* FRP indirect counters (ACC_IFR). */
+	uint64_t frp_drop_cnt;
+	uint64_t frp_error_cnt;
+	uint64_t frp_bypass_cnt;
+	/* Per-DMA-channel accept counter, indexed by channel. */
+	uint64_t frp_accept_cnt[XGMAC_MAX_QUEUES];
 };
 
 struct xgmac_dev {
@@ -142,6 +151,7 @@ struct xgmac_dev {
 	uint8_t dcb_enable;
 	uint8_t dcb_nb_tcs;
 	uint8_t dcb_tc[RTE_ETH_DCB_NUM_USER_PRIORITIES];
+	uint8_t flow_isolated;
 };
 
 #define XGMAC_FIELD_SHIFT(_mask) \

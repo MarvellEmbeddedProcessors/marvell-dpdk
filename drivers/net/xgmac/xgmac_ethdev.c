@@ -270,7 +270,7 @@ xgmac_dev_start(struct rte_eth_dev *eth_dev)
 	}
 	ret = xgmac_dma_init(dev);
 	if (ret)
-		return ret;
+		goto dma_stop;
 
 	xgmac_mac_init(dev, nb_rx_queues);
 	xgmac_mac_mtu_set(dev, eth_dev->data->mtu);
@@ -303,6 +303,10 @@ xgmac_dev_start(struct rte_eth_dev *eth_dev)
 	ret = xgmac_timestamp_configure(dev);
 	if (ret)
 		goto dma_stop;
+
+	ret = xgmac_frp_init(dev);
+	if (ret)
+		goto timestamp_disable;
 
 	xgmac_mmc_init(dev);
 
@@ -354,6 +358,9 @@ stop_queues:
 		if (eth_dev->data->tx_queue_state[q] == RTE_ETH_QUEUE_STATE_STARTED)
 			xgmac_tx_queue_stop(eth_dev, q);
 	}
+timestamp_disable:
+	if (dev->timestamp_enable || dev->timesync_enable)
+		xgmac_timestamp_disable(dev);
 dma_stop:
 	xgmac_dma_stop(dev);
 
@@ -365,6 +372,7 @@ xgmac_dev_stop(struct rte_eth_dev *eth_dev)
 {
 	struct xgmac_dev *dev = eth_dev->data->dev_private;
 	uint16_t q;
+	int ret;
 
 	if (!eth_dev->data->dev_started)
 		return 0;
@@ -381,6 +389,11 @@ xgmac_dev_stop(struct rte_eth_dev *eth_dev)
 		if (eth_dev->data->tx_queues[q] == NULL)
 			continue;
 		xgmac_tx_queue_stop(eth_dev, q);
+	}
+	if (dev->hw_feat.frp) {
+		ret = xgmac_frp_enable(dev, false);
+		if (ret)
+			XGMAC_LOG(WARNING, "failed to disable FRP on stop: %d", ret);
 	}
 	xgmac_dma_stop(dev);
 	eth_dev->data->dev_started = 0;
@@ -858,6 +871,13 @@ struct xgmac_xstat_desc {
 	.offset = offsetof(struct xgmac_mmc_stats, _field), \
 }
 
+/* Per-DMA-channel FRP accept counters.  Indexed by channel. */
+#define XGMAC_FRP_ACCEPT_CH_XSTAT(_ch)                                                             \
+	{                                                                                          \
+		.name = "frp_accept_ch" #_ch,                                                      \
+		.offset = offsetof(struct xgmac_mmc_stats, frp_accept_cnt[_ch]),                   \
+	}
+
 static const struct xgmac_xstat_desc xgmac_xstats_strings[] = {
 	XGMAC_XSTAT("tx_octet_count_gb", tx_octet_count_gb),
 	XGMAC_XSTAT("tx_frame_count_gb", tx_frame_count_gb),
@@ -871,6 +891,17 @@ static const struct xgmac_xstat_desc xgmac_xstats_strings[] = {
 	XGMAC_XSTAT("rx_length_error", rx_length_error),
 	XGMAC_XSTAT("rx_fifo_overflow", rx_fifo_overflow),
 	XGMAC_XSTAT("rx_pause_frames", rx_pause_frames),
+	XGMAC_XSTAT("frp_drop_cnt", frp_drop_cnt),
+	XGMAC_XSTAT("frp_error_cnt", frp_error_cnt),
+	XGMAC_XSTAT("frp_bypass_cnt", frp_bypass_cnt),
+	XGMAC_FRP_ACCEPT_CH_XSTAT(0),
+	XGMAC_FRP_ACCEPT_CH_XSTAT(1),
+	XGMAC_FRP_ACCEPT_CH_XSTAT(2),
+	XGMAC_FRP_ACCEPT_CH_XSTAT(3),
+	XGMAC_FRP_ACCEPT_CH_XSTAT(4),
+	XGMAC_FRP_ACCEPT_CH_XSTAT(5),
+	XGMAC_FRP_ACCEPT_CH_XSTAT(6),
+	XGMAC_FRP_ACCEPT_CH_XSTAT(7),
 };
 
 #define XGMAC_NB_XSTATS RTE_DIM(xgmac_xstats_strings)
@@ -902,6 +933,8 @@ xgmac_xstats_get(struct rte_eth_dev *eth_dev, struct rte_eth_xstat *xstats,
 		return XGMAC_NB_XSTATS;
 
 	xgmac_mmc_stats_read(dev);
+	if (dev->hw_feat.frp)
+		xgmac_frp_stats_read(dev);
 
 	for (i = 0; i < XGMAC_NB_XSTATS; i++) {
 		xstats[i].id = i;

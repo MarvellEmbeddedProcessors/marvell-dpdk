@@ -51,6 +51,8 @@ struct xgmac_rx_queue {
 	uint16_t rx_free_thresh;
 	uint16_t queue_id;
 	uint16_t pad0;
+	int16_t ts_offset;
+	uint64_t ts_flag;
 	uint64_t nb_pkts;
 
 	/* Per-burst refill, feature paths, stats. */
@@ -61,6 +63,7 @@ struct xgmac_rx_queue {
 	uint64_t rx_mbuf_alloc_failed;
 	struct rte_mbuf *pkt_first_seg;
 	struct rte_mbuf *pkt_last_seg;
+	struct rte_mbuf *pkt_awaiting_ts;
 
 	/* setup-only fields. */
 	const struct rte_memzone *mz;
@@ -158,15 +161,21 @@ extern const eth_tx_burst_t xgmac_eth_tx_burst[XGMAC_TX_MODE_MAX];
 int xgmac_tx_offload_update(struct rte_eth_dev *eth_dev);
 
 /* RX offload flags */
-#define XGMAC_RX_OFFLOAD_NONE 0
-#define XGMAC_RX_SCATTER_F    RTE_BIT32(0)
-#define XGMAC_RX_RSS_HASH_F   RTE_BIT32(1)
+#define XGMAC_RX_OFFLOAD_NONE  0
+#define XGMAC_RX_SCATTER_F     RTE_BIT32(0)
+#define XGMAC_RX_RSS_HASH_F    RTE_BIT32(1)
+#define XGMAC_RX_TIMESTAMP_F   RTE_BIT32(2)
 
 #define XGMAC_RX_FASTPATH_MODES                                                                    \
-	R(no_offload, XGMAC_RX_OFFLOAD_NONE)                                                       \
-	R(scatter, XGMAC_RX_SCATTER_F)                                                             \
-	R(rss_hash, XGMAC_RX_RSS_HASH_F)                                                           \
-	R(scatter_rss_hash, (XGMAC_RX_SCATTER_F | XGMAC_RX_RSS_HASH_F))
+	R(no_offload,      XGMAC_RX_OFFLOAD_NONE)                                                 \
+	R(mseg,            XGMAC_RX_SCATTER_F)                                                     \
+	R(rss,             XGMAC_RX_RSS_HASH_F)                                                    \
+	R(mseg_rss,        (XGMAC_RX_SCATTER_F | XGMAC_RX_RSS_HASH_F))                           \
+	R(ts,              XGMAC_RX_TIMESTAMP_F)                                                   \
+	R(mseg_ts,         (XGMAC_RX_SCATTER_F | XGMAC_RX_TIMESTAMP_F))                           \
+	R(rss_ts,          (XGMAC_RX_RSS_HASH_F | XGMAC_RX_TIMESTAMP_F))                         \
+	R(mseg_rss_ts,     (XGMAC_RX_SCATTER_F | XGMAC_RX_RSS_HASH_F |                           \
+			    XGMAC_RX_TIMESTAMP_F))
 
 #define R(name, flags)                                                                             \
 	uint16_t xgmac_recv_pkts_##name(void *rx_queue, struct rte_mbuf **rx_pkts,                 \

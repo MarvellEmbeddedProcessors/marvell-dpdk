@@ -45,6 +45,17 @@ void xgmac_txq_stop(struct xgmac_dev *dev, struct xgmac_tx_queue *txq);
 void xgmac_mmc_init(struct xgmac_dev *dev);
 void xgmac_mmc_stats_read(struct xgmac_dev *dev);
 
+/* Timestamp helpers. */
+int xgmac_wait_tstamp_control(struct xgmac_dev *dev, uint32_t bit);
+int xgmac_timestamp_hw_init(struct xgmac_dev *dev, uint32_t tsctl_flags);
+int xgmac_timestamp_configure(struct xgmac_dev *dev);
+void xgmac_timestamp_disable(struct xgmac_dev *dev);
+int xgmac_timestamp_read_tx(struct xgmac_dev *dev, uint32_t *sec, uint32_t *nsec);
+int xgmac_timestamp_adjust_time(struct xgmac_dev *dev, int64_t delta);
+int xgmac_timestamp_adjust_freq(struct xgmac_dev *dev, int64_t ppm);
+void xgmac_timestamp_read_time(struct xgmac_dev *dev, uint32_t *sec, uint32_t *nsec);
+int xgmac_timestamp_write_time(struct xgmac_dev *dev, uint32_t sec, uint32_t nsec);
+
 /* RSS helpers. */
 int xgmac_write_rss_hash_key(struct xgmac_dev *dev);
 int xgmac_write_rss_lookup_table(struct xgmac_dev *dev);

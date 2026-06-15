@@ -914,6 +914,238 @@ xgmac_rss_set_dynamic_mtl_mapping(struct xgmac_dev *dev, uint16_t nb_rx_queues)
 	}
 }
 
+/*
+ * PTP reference clock frequency (Hz).
+ *
+ * In fine correction mode, every PTP ref clock tick the addend is added
+ * to a 32-bit accumulator.  On overflow, SSINC nanoseconds are added to
+ * the system time:
+ *
+ *   effective_ns_per_sec = (ref_clk * addend / 2^32) * SSINC
+ *
+ * Adjusting the addend allows fine-tuning the PTP clock frequency
+ * without changing the hardware ref clock.
+ */
+static inline uint64_t
+xgmac_ptp_ref_clk_hz(void)
+{
+	return 100000000ULL;
+}
+
+int
+xgmac_wait_tstamp_control(struct xgmac_dev *dev, uint32_t bit)
+{
+	unsigned int retries = 100;
+
+	while (retries > 0) {
+		if (!(xgmac_rd(dev, XGMAC_TIMESTAMP_CONTROL) & bit))
+			return 0;
+		rte_delay_ms(1);
+		retries--;
+	}
+
+	XGMAC_LOG(ERR, "Timed out waiting for TSCTL bit 0x%x to clear", bit);
+	return -ETIMEDOUT;
+}
+
+int
+xgmac_timestamp_hw_init(struct xgmac_dev *dev, uint32_t tsctl_flags)
+{
+	uint64_t ptp_ref_clk = xgmac_ptp_ref_clk_hz();
+	uint32_t ssinc, addend, val;
+	uint64_t target_freq;
+	int ret;
+
+	xgmac_wr(dev, XGMAC_TIMESTAMP_CONTROL, tsctl_flags);
+
+	/*
+	 * Target the overflow rate at ref_clk/2 so the addend sits at 50% of
+	 * the 32-bit range, leaving headroom for frequency adjustment in both
+	 * directions.
+	 */
+	target_freq = ptp_ref_clk / 2;
+	ssinc = (uint32_t)(1000000000ULL / target_freq);
+	addend = (uint32_t)((target_freq << 32) / ptp_ref_clk);
+
+	dev->ts_ssinc = ssinc;
+	dev->ts_addend = addend;
+
+	xgmac_wr(dev, XGMAC_SUB_SECOND_INCR,
+		  XGMAC_FIELD_PREP(XGMAC_SSINC_SSINC, ssinc));
+	xgmac_wr(dev, XGMAC_TIMESTAMP_ADDEND, addend);
+
+	val = xgmac_rd(dev, XGMAC_TIMESTAMP_CONTROL);
+	xgmac_wr(dev, XGMAC_TIMESTAMP_CONTROL, val | XGMAC_TSTAMP_TSADDREG);
+	ret = xgmac_wait_tstamp_control(dev, XGMAC_TSTAMP_TSADDREG);
+	if (ret)
+		return ret;
+
+	xgmac_wr(dev, XGMAC_SYSTEM_TIME_SEC_UPD, 0);
+	xgmac_wr(dev, XGMAC_SYSTEM_TIME_NSEC_UPD, 0);
+
+	val = xgmac_rd(dev, XGMAC_TIMESTAMP_CONTROL);
+	xgmac_wr(dev, XGMAC_TIMESTAMP_CONTROL, val | XGMAC_TSTAMP_TSINIT);
+	ret = xgmac_wait_tstamp_control(dev, XGMAC_TSTAMP_TSINIT);
+	if (ret)
+		return ret;
+
+	XGMAC_LOG(DEBUG, "TS hw init: TSCTL=0x%08x ssinc=%u addend=0x%08x ref_clk=%lluHz",
+		  xgmac_rd(dev, XGMAC_TIMESTAMP_CONTROL), ssinc, addend,
+		  (unsigned long long)ptp_ref_clk);
+	return 0;
+}
+
+static uint32_t
+xgmac_timestamp_ctrl_flags(struct xgmac_dev *dev)
+{
+	uint32_t val;
+
+	if (!dev->timestamp_enable && !dev->timesync_enable)
+		return 0;
+
+	val = XGMAC_TSTAMP_TSENA
+	    | XGMAC_TSTAMP_TSCFUPDT
+	    | XGMAC_TSTAMP_TSCTRLSSR
+	    | XGMAC_TSTAMP_TSVER2ENA
+	    | XGMAC_TSTAMP_TXTSSTSM;
+
+	if (dev->timestamp_enable) {
+		val |= XGMAC_TSTAMP_TSENALL;
+	} else {
+		val |= XGMAC_TSTAMP_TSIPENA
+		     | XGMAC_TSTAMP_TSIPV6ENA
+		     | XGMAC_TSTAMP_TSIPV4ENA
+		     | XGMAC_TSTAMP_TSEVNTENA
+		     | XGMAC_FIELD_PREP(XGMAC_TSTAMP_SNAPTYPSEL, 2);
+	}
+
+	return val;
+}
+
+int
+xgmac_timestamp_configure(struct xgmac_dev *dev)
+{
+	uint32_t flags;
+
+	flags = xgmac_timestamp_ctrl_flags(dev);
+	if (!flags)
+		return 0;
+
+	return xgmac_timestamp_hw_init(dev, flags);
+}
+
+void
+xgmac_timestamp_disable(struct xgmac_dev *dev)
+{
+	uint32_t val;
+
+	val = xgmac_rd(dev, XGMAC_TIMESTAMP_CONTROL);
+	xgmac_wr(dev, XGMAC_TIMESTAMP_CONTROL, val & ~XGMAC_TSTAMP_TSENA);
+}
+
+int
+xgmac_timestamp_read_tx(struct xgmac_dev *dev, uint32_t *sec, uint32_t *nsec)
+{
+	uint32_t status;
+
+	status = xgmac_rd(dev, XGMAC_TIMESTAMP_STATUS);
+
+	/* Check if a valid timestamp is available. */
+	if (!(status & XGMAC_TSSTATUS_TXTSC))
+		return -EAGAIN;
+
+	*nsec = xgmac_rd(dev, XGMAC_TXTIMESTAMP_NSEC);
+	*sec = xgmac_rd(dev, XGMAC_TXTIMESTAMP_SEC);
+
+	/* Check if the timestamp was overwritten before it was read. */
+	if (*nsec & XGMAC_TXTSSTSMIS)
+		return -EINVAL;
+
+	return 0;
+}
+
+#define NSEC_PER_SEC 1000000000ULL
+
+int
+xgmac_timestamp_adjust_time(struct xgmac_dev *dev, int64_t delta)
+{
+	uint32_t sec, nsec, val;
+	bool neg = false;
+	uint64_t mag;
+
+	if (delta < 0) {
+		neg = true;
+		mag = -(uint64_t)delta;
+	} else {
+		mag = (uint64_t)delta;
+	}
+
+	sec = (uint32_t)(mag / NSEC_PER_SEC);
+	nsec = (uint32_t)(mag % NSEC_PER_SEC);
+
+	if (neg) {
+		if (sec)
+			sec = 0xFFFFFFFF - (sec - 1);
+		if (nsec)
+			nsec = NSEC_PER_SEC - nsec;
+	}
+
+	xgmac_wr(dev, XGMAC_SYSTEM_TIME_SEC_UPD, sec);
+	xgmac_wr(dev, XGMAC_SYSTEM_TIME_NSEC_UPD, neg ? (nsec | XGMAC_NSEC_UPD_ADDSUB) : nsec);
+
+	val = xgmac_rd(dev, XGMAC_TIMESTAMP_CONTROL);
+	xgmac_wr(dev, XGMAC_TIMESTAMP_CONTROL, val | XGMAC_TSTAMP_TSUPDT);
+	return xgmac_wait_tstamp_control(dev, XGMAC_TSTAMP_TSUPDT);
+}
+
+int
+xgmac_timestamp_adjust_freq(struct xgmac_dev *dev, int64_t ppm)
+{
+	uint64_t abs_ppm, diff;
+	uint32_t addend, val;
+	bool neg = false;
+
+	if (ppm < 0) {
+		neg = true;
+		abs_ppm = (uint64_t)(-ppm);
+	} else {
+		abs_ppm = (uint64_t)ppm;
+	}
+
+	/* ppm is scaled PPM (16.16 fixed-point representation) */
+	diff = (uint64_t)dev->ts_addend * abs_ppm;
+	diff >>= 16;
+	diff /= 1000000ULL;
+
+	addend = neg ? dev->ts_addend - (uint32_t)diff : dev->ts_addend + (uint32_t)diff;
+
+	xgmac_wr(dev, XGMAC_TIMESTAMP_ADDEND, addend);
+
+	val = xgmac_rd(dev, XGMAC_TIMESTAMP_CONTROL);
+	xgmac_wr(dev, XGMAC_TIMESTAMP_CONTROL, val | XGMAC_TSTAMP_TSADDREG);
+	return xgmac_wait_tstamp_control(dev, XGMAC_TSTAMP_TSADDREG);
+}
+
+void
+xgmac_timestamp_read_time(struct xgmac_dev *dev, uint32_t *sec, uint32_t *nsec)
+{
+	*sec = xgmac_rd(dev, XGMAC_SYSTEM_TIME_SEC);
+	*nsec = xgmac_rd(dev, XGMAC_SYSTEM_TIME_NSEC);
+}
+
+int
+xgmac_timestamp_write_time(struct xgmac_dev *dev, uint32_t sec, uint32_t nsec)
+{
+	uint32_t val;
+
+	xgmac_wr(dev, XGMAC_SYSTEM_TIME_SEC_UPD, sec);
+	xgmac_wr(dev, XGMAC_SYSTEM_TIME_NSEC_UPD, nsec);
+
+	val = xgmac_rd(dev, XGMAC_TIMESTAMP_CONTROL);
+	xgmac_wr(dev, XGMAC_TIMESTAMP_CONTROL, val | XGMAC_TSTAMP_TSINIT);
+	return xgmac_wait_tstamp_control(dev, XGMAC_TSTAMP_TSINIT);
+}
+
 int
 xgmac_rss_configure(struct xgmac_dev *dev)
 {

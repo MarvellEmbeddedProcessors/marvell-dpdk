@@ -107,6 +107,11 @@ struct xgmac_dev {
 	uint32_t rss_options;
 	uint16_t rss_table_size;
 	uint8_t rss_enable;
+	uint8_t timestamp_enable;
+	uint8_t timesync_enable;
+	uint32_t ts_addend;
+	uint32_t ts_ssinc;
+	uint64_t rx_tstamp;
 	uint8_t rss_key[XGMAC_RSS_HASH_KEY_SIZE];
 	uint32_t rss_table[XGMAC_RSS_MAX_TABLE_SIZE];
 };

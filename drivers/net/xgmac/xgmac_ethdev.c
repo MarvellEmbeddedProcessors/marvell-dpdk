@@ -11,6 +11,7 @@
 #include <rte_ethdev.h>
 #include <rte_malloc.h>
 #include <rte_memzone.h>
+#include <rte_time.h>
 
 #include "xgmac_dev.h"
 #include "xgmac_ethdev.h"
@@ -83,6 +84,16 @@ xgmac_dev_configure(struct rte_eth_dev *eth_dev)
 	    !dev->hw_feat.dvlan) {
 		XGMAC_LOG(ERR, "QinQ insert offload requested but HW does not support double VLAN");
 		return -ENOTSUP;
+	}
+
+	if (conf->rxmode.offloads & RTE_ETH_RX_OFFLOAD_TIMESTAMP) {
+		if (!dev->hw_feat.ptp) {
+			XGMAC_LOG(ERR, "Timestamp offload not supported by HW");
+			return -ENOTSUP;
+		}
+		dev->timestamp_enable = 1;
+	} else {
+		dev->timestamp_enable = 0;
 	}
 
 	return xgmac_tx_offload_update(eth_dev);
@@ -212,6 +223,25 @@ xgmac_dev_start(struct rte_eth_dev *eth_dev)
 	if (ret)
 		goto dma_stop;
 
+	/*
+	 * Rx timestamping is port-wide; honour it when requested either at port
+	 * level (already reflected in dev->timestamp_enable) or on any Rx queue.
+	 */
+	if (dev->hw_feat.ptp && !dev->timestamp_enable) {
+		for (q = 0; q < nb_rx_queues; q++) {
+			struct xgmac_rx_queue *rxq = eth_dev->data->rx_queues[q];
+
+			if (rxq->offloads & RTE_ETH_RX_OFFLOAD_TIMESTAMP) {
+				dev->timestamp_enable = 1;
+				break;
+			}
+		}
+	}
+
+	ret = xgmac_timestamp_configure(dev);
+	if (ret)
+		goto dma_stop;
+
 	xgmac_mmc_init(dev);
 
 	dev->rx_buf_size = 0;
@@ -276,6 +306,9 @@ xgmac_dev_stop(struct rte_eth_dev *eth_dev)
 
 	if (!eth_dev->data->dev_started)
 		return 0;
+
+	if (dev->timestamp_enable || dev->timesync_enable)
+		xgmac_timestamp_disable(dev);
 
 	for (q = 0; q < eth_dev->data->nb_rx_queues; q++) {
 		if (eth_dev->data->rx_queues[q] == NULL)
@@ -595,6 +628,10 @@ xgmac_dev_infos_get(struct rte_eth_dev *eth_dev, struct rte_eth_dev_info *info)
 	info->default_rxconf.rx_free_thresh = XGMAC_DEFAULT_RX_FREE_THRESH;
 	info->default_txconf.tx_free_thresh = XGMAC_DEFAULT_TX_FREE_THRESH;
 	info->rx_offload_capa = RTE_ETH_RX_OFFLOAD_SCATTER | RTE_ETH_RX_OFFLOAD_RSS_HASH;
+	if (dev->hw_feat.ptp) {
+		info->rx_offload_capa |= RTE_ETH_RX_OFFLOAD_TIMESTAMP;
+		info->rx_queue_offload_capa |= RTE_ETH_RX_OFFLOAD_TIMESTAMP;
+	}
 	info->tx_offload_capa = RTE_ETH_TX_OFFLOAD_MULTI_SEGS |
 				RTE_ETH_TX_OFFLOAD_VLAN_INSERT;
 	if (dev->hw_feat.dvlan)
@@ -1051,6 +1088,106 @@ xgmac_vlan_tpid_set(struct rte_eth_dev *eth_dev, enum rte_vlan_type type, uint16
 	return 0;
 }
 
+static int
+xgmac_timesync_enable(struct rte_eth_dev *eth_dev)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	int ret;
+
+	if (!dev->hw_feat.ptp)
+		return -ENOTSUP;
+
+	dev->timesync_enable = 1;
+
+	/* TSENALL mode (offload-timestamp) is a superset; skip re-init. */
+	if (dev->timestamp_enable)
+		return 0;
+
+	ret = xgmac_timestamp_configure(dev);
+	if (ret)
+		return ret;
+
+	if (eth_dev->data->dev_started)
+		xgmac_rx_offload_update(eth_dev);
+
+	return 0;
+}
+
+static int
+xgmac_timesync_disable(struct rte_eth_dev *eth_dev)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+
+	dev->timesync_enable = 0;
+
+	if (!dev->timestamp_enable) {
+		xgmac_timestamp_disable(dev);
+		if (eth_dev->data->dev_started)
+			xgmac_rx_offload_update(eth_dev);
+	}
+
+	return 0;
+}
+
+static int
+xgmac_timesync_read_rx_timestamp(struct rte_eth_dev *eth_dev, struct timespec *timestamp,
+				 uint32_t flags __rte_unused)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	uint64_t tstamp;
+
+	tstamp = rte_atomic_exchange_explicit(&dev->rx_tstamp, 0, rte_memory_order_relaxed);
+	if (tstamp == 0)
+		return -EINVAL;
+
+	*timestamp = rte_ns_to_timespec(tstamp);
+	return 0;
+}
+
+static int
+xgmac_timesync_read_tx_timestamp(struct rte_eth_dev *eth_dev, struct timespec *timestamp)
+{
+	uint32_t sec, nsec;
+	int ret;
+
+	ret = xgmac_timestamp_read_tx(eth_dev->data->dev_private, &sec, &nsec);
+	if (ret == 0) {
+		timestamp->tv_sec = sec;
+		timestamp->tv_nsec = nsec;
+	}
+	return ret;
+}
+
+static int
+xgmac_timesync_adjust_time(struct rte_eth_dev *eth_dev, int64_t delta)
+{
+	return xgmac_timestamp_adjust_time(eth_dev->data->dev_private, delta);
+}
+
+static int
+xgmac_timesync_adjust_freq(struct rte_eth_dev *eth_dev, int64_t ppm)
+{
+	return xgmac_timestamp_adjust_freq(eth_dev->data->dev_private, ppm);
+}
+
+static int
+xgmac_timesync_read_time(struct rte_eth_dev *eth_dev, struct timespec *ts)
+{
+	uint32_t sec, nsec;
+
+	xgmac_timestamp_read_time(eth_dev->data->dev_private, &sec, &nsec);
+	ts->tv_sec = sec;
+	ts->tv_nsec = nsec;
+	return 0;
+}
+
+static int
+xgmac_timesync_write_time(struct rte_eth_dev *eth_dev, const struct timespec *ts)
+{
+	return xgmac_timestamp_write_time(eth_dev->data->dev_private, (uint32_t)ts->tv_sec,
+					  (uint32_t)ts->tv_nsec);
+}
+
 static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.dev_configure = xgmac_dev_configure,
 	.dev_start = xgmac_dev_start,
@@ -1090,6 +1227,14 @@ static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.reta_query = xgmac_dev_rss_reta_query,
 	.rss_hash_update = xgmac_dev_rss_hash_update,
 	.rss_hash_conf_get = xgmac_dev_rss_hash_conf_get,
+	.timesync_enable = xgmac_timesync_enable,
+	.timesync_disable = xgmac_timesync_disable,
+	.timesync_read_rx_timestamp = xgmac_timesync_read_rx_timestamp,
+	.timesync_read_tx_timestamp = xgmac_timesync_read_tx_timestamp,
+	.timesync_adjust_time = xgmac_timesync_adjust_time,
+	.timesync_adjust_freq = xgmac_timesync_adjust_freq,
+	.timesync_read_time = xgmac_timesync_read_time,
+	.timesync_write_time = xgmac_timesync_write_time,
 };
 
 /* Check if platform device is Synopsys XGMAC by reading device tree compatible. */

@@ -3,10 +3,13 @@
  */
 
 #include <rte_mbuf.h>
+#include <rte_mbuf_dyn.h>
 
 #include "xgmac_ethdev.h"
 #include "xgmac_regs.h"
 #include "xgmac_rxtx.h"
+
+#define NSEC_PER_SEC 1000000000ULL
 
 void
 xgmac_rxq_release_mbufs(struct xgmac_rx_queue *rxq)
@@ -41,6 +44,12 @@ xgmac_rxq_release_mbufs(struct xgmac_rx_queue *rxq)
 		rte_pktmbuf_free(rxq->pkt_first_seg);
 		rxq->pkt_first_seg = NULL;
 		rxq->pkt_last_seg = NULL;
+	}
+
+	/* Free a packet held awaiting its Rx timestamp, if any. */
+	if (rxq->pkt_awaiting_ts) {
+		rte_pktmbuf_free(rxq->pkt_awaiting_ts);
+		rxq->pkt_awaiting_ts = NULL;
 	}
 
 	/* Reset queue state. */
@@ -124,7 +133,29 @@ xgmac_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts, con
 
 		cur++;
 
-		if (unlikely(rdes3 & XGMAC_RDES3_CTXT)) {
+		if ((flags & XGMAC_RX_TIMESTAMP_F) && unlikely(rdes3 & XGMAC_RDES3_CTXT)) {
+			if (rxq->pkt_awaiting_ts &&
+			    (rdes3 & XGMAC_RDES3_TSA) && !(rdes3 & XGMAC_RDES3_TSD)) {
+				uint32_t rtsl = desc->write.rdes0;
+				uint32_t rtsh = desc->write.rdes1;
+
+				if (likely(rtsl != 0xFFFFFFFF || rtsh != 0xFFFFFFFF)) {
+					*RTE_MBUF_DYNFIELD(rxq->pkt_awaiting_ts, rxq->ts_offset,
+						rte_mbuf_timestamp_t *) =
+						(uint64_t)rtsh * NSEC_PER_SEC + rtsl;
+					rxq->pkt_awaiting_ts->ol_flags |= rxq->ts_flag;
+					rte_atomic_store_explicit(&rxq->dev->rx_tstamp,
+								  (uint64_t)rtsh * NSEC_PER_SEC +
+									  rtsl,
+								  rte_memory_order_relaxed);
+				}
+			}
+
+			/* Hand the held packet to the caller now that its timestamp is applied. */
+			if (rxq->pkt_awaiting_ts != NULL) {
+				rx_pkts[nb_rx++] = rxq->pkt_awaiting_ts;
+				rxq->pkt_awaiting_ts = NULL;
+			}
 			rte_pktmbuf_free(rxq->sw_ring[idx]);
 			rxq->sw_ring[idx] = NULL;
 			continue;
@@ -172,9 +203,14 @@ xgmac_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts, con
 				first_seg->hash.rss = desc->write.rdes1;
 				first_seg->ol_flags |= RTE_MBUF_F_RX_RSS_HASH;
 			}
+
 			nb_bytes += pkt_len;
 
-			rx_pkts[nb_rx++] = first_seg;
+			/* Hold the packet if timestamp is expected but not yet arrived. */
+			if ((flags & XGMAC_RX_TIMESTAMP_F) && (rdes3 & XGMAC_RDES3_CDA))
+				rxq->pkt_awaiting_ts = first_seg;
+			else
+				rx_pkts[nb_rx++] = first_seg;
 			first_seg = NULL;
 			last_seg = NULL;
 		} else {
@@ -188,8 +224,14 @@ xgmac_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts, con
 				mbuf->hash.rss = desc->write.rdes1;
 				mbuf->ol_flags |= RTE_MBUF_F_RX_RSS_HASH;
 			}
+
 			nb_bytes += pkt_len;
-			rx_pkts[nb_rx++] = mbuf;
+
+			/* Hold the packet if timestamp is expected but not yet arrived. */
+			if ((flags & XGMAC_RX_TIMESTAMP_F) && (rdes3 & XGMAC_RDES3_CDA))
+				rxq->pkt_awaiting_ts = mbuf;
+			else
+				rx_pkts[nb_rx++] = mbuf;
 		}
 	}
 
@@ -240,6 +282,25 @@ xgmac_rx_offload_update(struct rte_eth_dev *eth_dev)
 	if (dev->rss_enable)
 		f |= XGMAC_RX_RSS_HASH_F;
 
+	if (dev->timestamp_enable || dev->timesync_enable) {
+		uint64_t ts_flag = 0;
+		int ts_offset = 0;
+		uint16_t i;
+
+		if (rte_mbuf_dyn_rx_timestamp_register(&ts_offset, &ts_flag) != 0) {
+			XGMAC_LOG(ERR, "Cannot register mbuf dynfield for Rx timestamp");
+		} else {
+			f |= XGMAC_RX_TIMESTAMP_F;
+			for (i = 0; i < eth_dev->data->nb_rx_queues; i++) {
+				struct xgmac_rx_queue *rxq = eth_dev->data->rx_queues[i];
+
+				if (rxq) {
+					rxq->ts_offset = ts_offset;
+					rxq->ts_flag = ts_flag;
+				}
+			}
+		}
+	}
 	eth_dev->data->scattered_rx = !!(f & XGMAC_RX_SCATTER_F);
 	eth_dev->rx_pkt_burst = rx_burst[f];
 }

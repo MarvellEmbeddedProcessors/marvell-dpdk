@@ -219,4 +219,8 @@ XGMAC_RX_FASTPATH_MODES
 void xgmac_rx_offload_update(struct rte_eth_dev *eth_dev);
 void xgmac_rxq_release_mbufs(struct xgmac_rx_queue *rxq);
 
+struct rte_power_monitor_cond;
+int xgmac_rx_descriptor_status(void *rxq_p, uint16_t offset);
+int xgmac_get_monitor_addr(void *rxq_p, struct rte_power_monitor_cond *pmc);
+
 #endif /* __XGMAC_RXTX_H__ */

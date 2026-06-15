@@ -1480,6 +1480,18 @@ xgmac_timesync_write_time(struct rte_eth_dev *eth_dev, const struct timespec *ts
 					  (uint32_t)ts->tv_nsec);
 }
 
+static int
+xgmac_rx_descriptor_status_op(void *rxq, uint16_t offset)
+{
+	return xgmac_rx_descriptor_status(rxq, offset);
+}
+
+static int
+xgmac_get_monitor_addr_op(void *rxq, struct rte_power_monitor_cond *pmc)
+{
+	return xgmac_get_monitor_addr(rxq, pmc);
+}
+
 static const uint32_t *
 xgmac_dev_supported_ptypes_get(struct rte_eth_dev *dev __rte_unused,
 			       size_t *no_of_elements)
@@ -1538,6 +1550,7 @@ static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.tx_queue_stop = xgmac_tx_queue_stop,
 	.rxq_info_get = xgmac_rxq_info_get,
 	.txq_info_get = xgmac_txq_info_get,
+	.get_monitor_addr = xgmac_get_monitor_addr_op,
 	.reta_update = xgmac_dev_rss_reta_update,
 	.reta_query = xgmac_dev_rss_reta_query,
 	.rss_hash_update = xgmac_dev_rss_hash_update,
@@ -1657,6 +1670,7 @@ xgmac_platform_probe(struct rte_platform_device *pdev)
 	eth_dev->device = &pdev->device;
 	eth_dev->dev_ops = &xgmac_eth_dev_ops;
 	eth_dev->rx_pkt_burst = xgmac_recv_pkts_no_offload;
+	eth_dev->rx_descriptor_status = xgmac_rx_descriptor_status_op;
 
 	xgmac_tx_offload_update(eth_dev);
 	rte_eth_dev_probing_finish(eth_dev);

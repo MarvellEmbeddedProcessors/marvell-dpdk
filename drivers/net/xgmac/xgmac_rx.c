@@ -2,9 +2,12 @@
  * Copyright(c) 2026 Marvell.
  */
 
+#include <errno.h>
+
 #include <rte_mbuf.h>
 #include <rte_mbuf_dyn.h>
 #include <rte_mbuf_ptype.h>
+#include <rte_power_intrinsics.h>
 
 #include "xgmac_ethdev.h"
 #include "xgmac_regs.h"
@@ -388,6 +391,59 @@ xgmac_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts, con
 
 XGMAC_RX_FASTPATH_MODES
 #undef R
+
+int
+xgmac_rx_descriptor_status(void *rxq_p, uint16_t offset)
+{
+	struct xgmac_rx_queue *rxq = rxq_p;
+	volatile union xgmac_rx_desc *desc;
+	uint16_t mask, idx;
+	uint32_t rdes3;
+
+	if (rxq == NULL || rxq->desc == NULL)
+		return -EINVAL;
+	if (offset >= rxq->nb_desc)
+		return -EINVAL;
+
+	mask = rxq->nb_desc - 1;
+	idx = (uint16_t)((rxq->cur + offset) & mask);
+	desc = &rxq->desc[idx];
+	rdes3 = desc->write.rdes3;
+
+	if (rdes3 & XGMAC_RDES3_OWN)
+		return RTE_ETH_RX_DESC_AVAIL;
+
+	return RTE_ETH_RX_DESC_DONE;
+}
+
+static int
+xgmac_monitor_callback(const uint64_t value,
+		       const uint64_t opaque[RTE_POWER_MONITOR_OPAQUE_SZ] __rte_unused)
+{
+	/* HW clears OWN on DMA completion, so return 0. */
+	return (value & XGMAC_RDES3_OWN) ? 0 : -1;
+}
+
+int
+xgmac_get_monitor_addr(void *rxq_p, struct rte_power_monitor_cond *pmc)
+{
+	struct xgmac_rx_queue *rxq = rxq_p;
+	volatile union xgmac_rx_desc *desc;
+	uint16_t mask, idx;
+
+	if (rxq == NULL || pmc == NULL || rxq->desc == NULL)
+		return -EINVAL;
+
+	mask = rxq->nb_desc - 1;
+	idx = (uint16_t)(rxq->cur & mask);
+	desc = &rxq->desc[idx];
+
+	pmc->addr = (void *)(uintptr_t)&desc->write.rdes3;
+	pmc->size = sizeof(uint32_t);
+	pmc->fn = xgmac_monitor_callback;
+
+	return 0;
+}
 
 void
 xgmac_rx_offload_update(struct rte_eth_dev *eth_dev)

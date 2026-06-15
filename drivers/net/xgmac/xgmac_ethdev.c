@@ -68,18 +68,68 @@ xgmac_dev_configure(struct rte_eth_dev *eth_dev)
 		return -EINVAL;
 	}
 
-	if (conf->rxmode.mq_mode == RTE_ETH_MQ_RX_RSS) {
+	switch (conf->rxmode.mq_mode) {
+	case RTE_ETH_MQ_RX_NONE:
+		dev->rss_enable = 0;
+		dev->dcb_enable = 0;
+		break;
+	case RTE_ETH_MQ_RX_RSS:
 		if (!dev->hw_feat.rss) {
 			XGMAC_LOG(ERR, "RSS not supported by HW");
 			return -EINVAL;
 		}
 		dev->rss_enable = 1;
-	} else if (conf->rxmode.mq_mode == RTE_ETH_MQ_RX_NONE) {
+		dev->dcb_enable = 0;
+		break;
+	case RTE_ETH_MQ_RX_DCB:
+		const struct rte_eth_dcb_rx_conf *dcb = &conf->rx_adv_conf.dcb_rx_conf;
+		unsigned int p;
+
+		if (!dev->hw_feat.dcb) {
+			XGMAC_LOG(ERR, "DCB not supported by HW (DCBEN=0)");
+			return -ENOTSUP;
+		}
+		if (dcb->nb_tcs != RTE_ETH_4_TCS && dcb->nb_tcs != RTE_ETH_8_TCS) {
+			XGMAC_LOG(ERR, "DCB nb_tcs %u must be 4 or 8", dcb->nb_tcs);
+			return -EINVAL;
+		}
+		if (dcb->nb_tcs > dev->hw_feat.tc_cnt) {
+			XGMAC_LOG(ERR, "DCB nb_tcs %u exceeds HW TC count %u", dcb->nb_tcs,
+				  dev->hw_feat.tc_cnt);
+			return -EINVAL;
+		}
+		if (dcb->nb_tcs > dev->hw_feat.tx_q_cnt) {
+			XGMAC_LOG(ERR, "DCB nb_tcs %u exceeds HW Tx queue count %u",
+				  dcb->nb_tcs, dev->hw_feat.tx_q_cnt);
+			return -EINVAL;
+		}
+		if (eth_dev->data->nb_rx_queues < dcb->nb_tcs) {
+			XGMAC_LOG(ERR, "DCB requires nb_rx_queues (%u) >= nb_tcs (%u)",
+				  eth_dev->data->nb_rx_queues, dcb->nb_tcs);
+			return -EINVAL;
+		}
+		for (p = 0; p < RTE_ETH_DCB_NUM_USER_PRIORITIES; p++) {
+			if (dcb->dcb_tc[p] >= dcb->nb_tcs) {
+				XGMAC_LOG(ERR, "DCB dcb_tc[%u] = %u must be < nb_tcs (%u)", p,
+					  dcb->dcb_tc[p], dcb->nb_tcs);
+				return -EINVAL;
+			}
+		}
+
 		dev->rss_enable = 0;
-	} else {
-		XGMAC_LOG(ERR, "MQ mode %u not supported", conf->rxmode.mq_mode);
-		return -EINVAL;
+		dev->dcb_enable = 1;
+		dev->dcb_nb_tcs = dcb->nb_tcs;
+		memcpy(dev->dcb_tc, dcb->dcb_tc, sizeof(dev->dcb_tc));
+		break;
+	default:
+		XGMAC_LOG(ERR, "Rx MQ mode %u not supported", conf->rxmode.mq_mode);
+		return -ENOTSUP;
 	}
+	if (conf->txmode.mq_mode == RTE_ETH_MQ_TX_DCB) {
+		XGMAC_LOG(ERR, "Tx DCB mq_mode not supported");
+		return -ENOTSUP;
+	}
+
 	if ((conf->txmode.offloads & (RTE_ETH_TX_OFFLOAD_IPV4_CKSUM |
 				      RTE_ETH_TX_OFFLOAD_UDP_CKSUM |
 				      RTE_ETH_TX_OFFLOAD_TCP_CKSUM)) &&
@@ -225,6 +275,7 @@ xgmac_dev_start(struct rte_eth_dev *eth_dev)
 	xgmac_mac_init(dev, nb_rx_queues);
 	xgmac_mac_mtu_set(dev, eth_dev->data->mtu);
 	xgmac_mtl_init(dev, nb_tx_queues, nb_rx_queues);
+	xgmac_dcb_configure(dev);
 	xgmac_flow_ctrl_apply(dev, nb_tx_queues, nb_rx_queues);
 	xgmac_pfc_queue_apply(dev, nb_tx_queues, nb_rx_queues);
 	xgmac_vlan_insert_cfg(dev);
@@ -918,6 +969,29 @@ xgmac_mac_addr_add(struct rte_eth_dev *eth_dev, struct rte_ether_addr *mac_addr,
 	return 0;
 }
 
+static int
+xgmac_dev_get_dcb_info(struct rte_eth_dev *eth_dev, struct rte_eth_dcb_info *dcb_info)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	uint8_t i, p;
+
+	dcb_info->nb_tcs = dev->dcb_enable ? dev->dcb_nb_tcs : 1;
+
+	if (dev->dcb_enable) {
+		for (p = 0; p < RTE_ETH_DCB_NUM_USER_PRIORITIES; p++)
+			dcb_info->prio_tc[p] = dev->dcb_tc[p];
+	}
+
+	for (i = 0; i < dcb_info->nb_tcs; i++) {
+		dcb_info->tc_queue.tc_rxq[0][i].base = i;
+		dcb_info->tc_queue.tc_rxq[0][i].nb_queue = 1;
+		dcb_info->tc_queue.tc_txq[0][i].base = i;
+		dcb_info->tc_queue.tc_txq[0][i].nb_queue = 1;
+	}
+
+	return 0;
+}
+
 static void
 xgmac_mac_addr_remove(struct rte_eth_dev *eth_dev, uint32_t index)
 {
@@ -1435,6 +1509,7 @@ static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.reta_query = xgmac_dev_rss_reta_query,
 	.rss_hash_update = xgmac_dev_rss_hash_update,
 	.rss_hash_conf_get = xgmac_dev_rss_hash_conf_get,
+	.get_dcb_info = xgmac_dev_get_dcb_info,
 	.timesync_enable = xgmac_timesync_enable,
 	.timesync_disable = xgmac_timesync_disable,
 	.timesync_read_rx_timestamp = xgmac_timesync_read_rx_timestamp,

@@ -30,6 +30,9 @@ void xgmac_hw_features_get(struct xgmac_dev *dev);
 /* MTL block helpers. */
 void xgmac_mtl_init(struct xgmac_dev *dev, uint16_t nb_tx_queues, uint16_t nb_rx_queues);
 
+/* DCB Rx helpers. */
+void xgmac_dcb_configure(struct xgmac_dev *dev);
+
 /* DMA block helpers */
 int xgmac_dma_init(struct xgmac_dev *dev);
 void xgmac_dma_stop(struct xgmac_dev *dev);

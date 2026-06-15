@@ -51,6 +51,9 @@ xgmac_mac_init(struct xgmac_dev *dev, uint16_t nb_rx_queues)
 	for (i = 0; i < nb_rx_queues && i < 8; i++)
 		val |= (2u << (i * 2));
 	xgmac_wr(dev, XGMAC_RXQ_CTRL0, val);
+	xgmac_wr(dev, XGMAC_RXQ_CTRL1, 0);
+	xgmac_wr(dev, XGMAC_RXQ_CTRL2, 0);
+	xgmac_wr(dev, XGMAC_RXQ_CTRL3, 0);
 
 	XGMAC_LOG(INFO, "MAC init: rx_q=%u, filter=0x%x", nb_rx_queues,
 		  xgmac_rd(dev, XGMAC_PACKET_FILTER));
@@ -339,6 +342,32 @@ xgmac_mtl_init(struct xgmac_dev *dev, uint16_t nb_tx_queues, uint16_t nb_rx_queu
 		  fifo_per_q, qs);
 
 	XGMAC_LOG(INFO, "MTL init: tx_q=%u rx_q=%u", nb_tx_queues, nb_rx_queues);
+}
+
+void
+xgmac_dcb_configure(struct xgmac_dev *dev)
+{
+	uint8_t psrq[XGMAC_MAX_QUEUES] = {0};
+	uint32_t ctrl2 = 0, ctrl3 = 0;
+	unsigned int p, q;
+
+	if (!dev->dcb_enable)
+		return;
+
+	/* Invert dcb_tc[] into per-queue PSRQ bitmaps. */
+	for (p = 0; p < RTE_ETH_DCB_NUM_USER_PRIORITIES; p++)
+		psrq[dev->dcb_tc[p]] |= RTE_BIT32(p);
+
+	for (q = 0; q < 4; q++)
+		ctrl2 |= (uint32_t)psrq[q] << (q * 8);
+	for (q = 0; q < 4; q++)
+		ctrl3 |= (uint32_t)psrq[4 + q] << (q * 8);
+
+	xgmac_wr(dev, XGMAC_RXQ_CTRL2, ctrl2);
+	xgmac_wr(dev, XGMAC_RXQ_CTRL3, ctrl3);
+
+	XGMAC_LOG(INFO, "DCB Rx enabled: nb_tcs=%u PSRQ Ctrl2=0x%08x Ctrl3=0x%08x", dev->dcb_nb_tcs,
+		  ctrl2, ctrl3);
 }
 
 void
@@ -636,6 +665,7 @@ xgmac_hw_features_get(struct xgmac_dev *dev)
 	hw_feat->tx_fifo_size = (hw1 >> 6) & 0x1f;
 	hw_feat->tso = !!(hw1 & RTE_BIT32(18));
 	hw_feat->rss = !!(hw1 & RTE_BIT32(20));
+	hw_feat->dcb = !!(hw1 & RTE_BIT32(16));
 	hw_feat->tc_cnt = ((hw1 >> 21) & 0x7) + 1;
 	hw_feat->hash_table_size = (hw1 >> 24) & 0x7;
 
@@ -668,13 +698,13 @@ xgmac_hw_features_get(struct xgmac_dev *dev)
 	XGMAC_LOG(INFO,
 		  "HW features: tx_q=%u rx_q=%u tx_ch=%u rx_ch=%u "
 		  "tx_fifo=%uKB rx_fifo=%uKB addrs=%u hash_tbl=%u "
-		  "asp=%u dvlan=%u nrvf=%u dma_addr=%u-bit tso=%u tunnel=%u rss=%u",
+		  "asp=%u dvlan=%u nrvf=%u dma_addr=%u-bit tso=%u tunnel=%u rss=%u dcb=%u",
 		  hw_feat->tx_q_cnt, hw_feat->rx_q_cnt, hw_feat->tx_ch_cnt, hw_feat->rx_ch_cnt,
 		  XGMAC_FIFO_SIZE(hw_feat->tx_fifo_size) / 1024,
 		  XGMAC_FIFO_SIZE(hw_feat->rx_fifo_size) / 1024,
 		  hw_feat->addn_mac + 1, hw_feat->hash_table_size, hw_feat->asp, hw_feat->dvlan,
 		  hw_feat->nrvf, hw_feat->dma_addr_width, hw_feat->tso, hw_feat->tunnel,
-		  hw_feat->rss);
+		  hw_feat->rss, hw_feat->dcb);
 }
 
 static int

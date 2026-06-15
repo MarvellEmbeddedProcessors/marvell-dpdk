@@ -73,6 +73,7 @@ struct xgmac_hw_features {
 	uint8_t tc_cnt;
 	uint8_t tso;
 	uint8_t rss;
+	uint8_t dcb;
 
 	/* HW_Feature2 */
 	uint8_t rx_q_cnt;
@@ -138,6 +139,9 @@ struct xgmac_dev {
 	uint64_t rx_tstamp;
 	uint8_t rss_key[XGMAC_RSS_HASH_KEY_SIZE];
 	uint32_t rss_table[XGMAC_RSS_MAX_TABLE_SIZE];
+	uint8_t dcb_enable;
+	uint8_t dcb_nb_tcs;
+	uint8_t dcb_tc[RTE_ETH_DCB_NUM_USER_PRIORITIES];
 };
 
 #define XGMAC_FIELD_SHIFT(_mask) \

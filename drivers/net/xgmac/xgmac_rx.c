@@ -144,6 +144,30 @@ xgmac_rx_is_cksum_only_err(uint32_t rdes3)
 	return et == XGMAC_RDES3_ET_IP_ERR || et == XGMAC_RDES3_ET_L4_ERR;
 }
 
+static __rte_always_inline void
+xgmac_rx_vlan_parse(struct rte_mbuf *mbuf, volatile union xgmac_rx_desc *desc, uint32_t rdes3)
+{
+	uint32_t lt, rdes0;
+
+	if (unlikely(rdes3 & XGMAC_RDES3_ES))
+		return;
+
+	lt = XGMAC_FIELD_GET(XGMAC_RDES3_ETLT, rdes3);
+	if (lt < XGMAC_RDES3_LT_VLAN_MIN)
+		return;
+
+	rdes0 = desc->write.rdes0;
+	if (lt >= XGMAC_RDES3_LT_DVLAN_MIN && lt <= XGMAC_RDES3_LT_DVLAN_MAX) {
+		mbuf->vlan_tci = XGMAC_FIELD_GET(XGMAC_RDES0_IVT, rdes0);
+		mbuf->vlan_tci_outer = rdes0 & XGMAC_RDES0_OVT;
+		mbuf->ol_flags |= RTE_MBUF_F_RX_VLAN | RTE_MBUF_F_RX_VLAN_STRIPPED |
+				  RTE_MBUF_F_RX_QINQ | RTE_MBUF_F_RX_QINQ_STRIPPED;
+	} else {
+		mbuf->vlan_tci = rdes0 & XGMAC_RDES0_OVT;
+		mbuf->ol_flags |= RTE_MBUF_F_RX_VLAN | RTE_MBUF_F_RX_VLAN_STRIPPED;
+	}
+}
+
 static __rte_always_inline uint64_t
 xgmac_rx_cksum_flags(uint32_t rdes3, uint32_t l34t)
 {
@@ -278,6 +302,9 @@ xgmac_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts, con
 				first_seg->ol_flags |= xgmac_rx_cksum_flags(rdes3, l34t);
 			}
 
+			if (flags & XGMAC_RX_VLAN_STRIP_F)
+				xgmac_rx_vlan_parse(first_seg, desc, rdes3);
+
 			nb_bytes += pkt_len;
 
 			/* Hold the packet if timestamp is expected but not yet arrived. */
@@ -305,6 +332,9 @@ xgmac_recv_pkts(void *rx_queue, struct rte_mbuf **rx_pkts, uint16_t nb_pkts, con
 				mbuf->packet_type = xgmac_l34t_to_ptype[l34t];
 				mbuf->ol_flags |= xgmac_rx_cksum_flags(rdes3, l34t);
 			}
+
+			if (flags & XGMAC_RX_VLAN_STRIP_F)
+				xgmac_rx_vlan_parse(mbuf, desc, rdes3);
 
 			nb_bytes += pkt_len;
 
@@ -368,6 +398,10 @@ xgmac_rx_offload_update(struct rte_eth_dev *eth_dev)
 	     RTE_ETH_RX_OFFLOAD_TCP_CKSUM))
 		f |= XGMAC_RX_CKSUM_F;
 
+	if (eth_dev->data->dev_conf.rxmode.offloads &
+	    (RTE_ETH_RX_OFFLOAD_VLAN_STRIP | RTE_ETH_RX_OFFLOAD_QINQ_STRIP))
+		f |= XGMAC_RX_VLAN_STRIP_F;
+
 	if (dev->timestamp_enable || dev->timesync_enable) {
 		uint64_t ts_flag = 0;
 		int ts_offset = 0;
@@ -389,4 +423,6 @@ xgmac_rx_offload_update(struct rte_eth_dev *eth_dev)
 	}
 	eth_dev->data->scattered_rx = !!(f & XGMAC_RX_SCATTER_F);
 	eth_dev->rx_pkt_burst = rx_burst[f];
+	if (eth_dev->data->dev_started)
+		rte_eth_fp_ops[eth_dev->data->port_id].rx_pkt_burst = eth_dev->rx_pkt_burst;
 }

@@ -166,6 +166,7 @@ int xgmac_tx_offload_update(struct rte_eth_dev *eth_dev);
 #define XGMAC_RX_RSS_HASH_F    RTE_BIT32(1)
 #define XGMAC_RX_TIMESTAMP_F   RTE_BIT32(2)
 #define XGMAC_RX_CKSUM_F       RTE_BIT32(3)
+#define XGMAC_RX_VLAN_STRIP_F  RTE_BIT32(4)
 
 #define XGMAC_RX_FASTPATH_MODES                                                                    \
 	R(no_offload, XGMAC_RX_OFFLOAD_NONE)                                                       \
@@ -184,7 +185,29 @@ int xgmac_tx_offload_update(struct rte_eth_dev *eth_dev);
 	R(mseg_ts_cksum, (XGMAC_RX_SCATTER_F | XGMAC_RX_TIMESTAMP_F | XGMAC_RX_CKSUM_F))           \
 	R(rss_ts_cksum, (XGMAC_RX_RSS_HASH_F | XGMAC_RX_TIMESTAMP_F | XGMAC_RX_CKSUM_F))           \
 	R(mseg_rss_ts_cksum,                                                                       \
-	  (XGMAC_RX_SCATTER_F | XGMAC_RX_RSS_HASH_F | XGMAC_RX_TIMESTAMP_F | XGMAC_RX_CKSUM_F))
+	  (XGMAC_RX_SCATTER_F | XGMAC_RX_RSS_HASH_F | XGMAC_RX_TIMESTAMP_F | XGMAC_RX_CKSUM_F))    \
+	R(vlan, XGMAC_RX_VLAN_STRIP_F)                                                             \
+	R(mseg_vlan, (XGMAC_RX_SCATTER_F | XGMAC_RX_VLAN_STRIP_F))                                 \
+	R(rss_vlan, (XGMAC_RX_RSS_HASH_F | XGMAC_RX_VLAN_STRIP_F))                                 \
+	R(mseg_rss_vlan, (XGMAC_RX_SCATTER_F | XGMAC_RX_RSS_HASH_F | XGMAC_RX_VLAN_STRIP_F))       \
+	R(ts_vlan, (XGMAC_RX_TIMESTAMP_F | XGMAC_RX_VLAN_STRIP_F))                                 \
+	R(mseg_ts_vlan, (XGMAC_RX_SCATTER_F | XGMAC_RX_TIMESTAMP_F | XGMAC_RX_VLAN_STRIP_F))       \
+	R(rss_ts_vlan, (XGMAC_RX_RSS_HASH_F | XGMAC_RX_TIMESTAMP_F | XGMAC_RX_VLAN_STRIP_F))       \
+	R(mseg_rss_ts_vlan, (XGMAC_RX_SCATTER_F | XGMAC_RX_RSS_HASH_F | XGMAC_RX_TIMESTAMP_F |     \
+			     XGMAC_RX_VLAN_STRIP_F))                                               \
+	R(cksum_vlan, (XGMAC_RX_CKSUM_F | XGMAC_RX_VLAN_STRIP_F))                                  \
+	R(mseg_cksum_vlan, (XGMAC_RX_SCATTER_F | XGMAC_RX_CKSUM_F | XGMAC_RX_VLAN_STRIP_F))        \
+	R(rss_cksum_vlan, (XGMAC_RX_RSS_HASH_F | XGMAC_RX_CKSUM_F | XGMAC_RX_VLAN_STRIP_F))        \
+	R(mseg_rss_cksum_vlan,                                                                     \
+	  (XGMAC_RX_SCATTER_F | XGMAC_RX_RSS_HASH_F | XGMAC_RX_CKSUM_F | XGMAC_RX_VLAN_STRIP_F))   \
+	R(ts_cksum_vlan, (XGMAC_RX_TIMESTAMP_F | XGMAC_RX_CKSUM_F | XGMAC_RX_VLAN_STRIP_F))        \
+	R(mseg_ts_cksum_vlan,                                                                      \
+	  (XGMAC_RX_SCATTER_F | XGMAC_RX_TIMESTAMP_F | XGMAC_RX_CKSUM_F | XGMAC_RX_VLAN_STRIP_F))  \
+	R(rss_ts_cksum_vlan,                                                                       \
+	  (XGMAC_RX_RSS_HASH_F | XGMAC_RX_TIMESTAMP_F | XGMAC_RX_CKSUM_F | XGMAC_RX_VLAN_STRIP_F)) \
+	R(mseg_rss_ts_cksum_vlan,                                                                  \
+	  (XGMAC_RX_SCATTER_F | XGMAC_RX_RSS_HASH_F | XGMAC_RX_TIMESTAMP_F | XGMAC_RX_CKSUM_F |    \
+	   XGMAC_RX_VLAN_STRIP_F))
 
 #define R(name, flags)                                                                             \
 	uint16_t xgmac_recv_pkts_##name(void *rx_queue, struct rte_mbuf **rx_pkts,                 \

@@ -228,6 +228,7 @@ xgmac_dev_start(struct rte_eth_dev *eth_dev)
 	xgmac_flow_ctrl_apply(dev, nb_tx_queues, nb_rx_queues);
 	xgmac_pfc_queue_apply(dev, nb_tx_queues, nb_rx_queues);
 	xgmac_vlan_insert_cfg(dev);
+	xgmac_vlan_strip_cfg(dev);
 
 	ret = xgmac_rss_configure(dev);
 	if (ret)
@@ -637,7 +638,10 @@ xgmac_dev_infos_get(struct rte_eth_dev *eth_dev, struct rte_eth_dev_info *info)
 	info->tx_desc_lim = xgmac_tx_desc_lim;
 	info->default_rxconf.rx_free_thresh = XGMAC_DEFAULT_RX_FREE_THRESH;
 	info->default_txconf.tx_free_thresh = XGMAC_DEFAULT_TX_FREE_THRESH;
-	info->rx_offload_capa = RTE_ETH_RX_OFFLOAD_SCATTER | RTE_ETH_RX_OFFLOAD_RSS_HASH;
+	info->rx_offload_capa = RTE_ETH_RX_OFFLOAD_SCATTER | RTE_ETH_RX_OFFLOAD_RSS_HASH |
+				RTE_ETH_RX_OFFLOAD_VLAN_STRIP;
+	if (dev->hw_feat.dvlan)
+		info->rx_offload_capa |= RTE_ETH_RX_OFFLOAD_QINQ_STRIP;
 	if (dev->hw_feat.rx_coe)
 		info->rx_offload_capa |= RTE_ETH_RX_OFFLOAD_IPV4_CKSUM |
 					 RTE_ETH_RX_OFFLOAD_UDP_CKSUM |
@@ -1211,8 +1215,23 @@ xgmac_priority_flow_ctrl_queue_config(struct rte_eth_dev *eth_dev,
 }
 
 static int
-xgmac_vlan_offload_set(struct rte_eth_dev *eth_dev, int mask __rte_unused)
+xgmac_vlan_offload_set(struct rte_eth_dev *eth_dev, int mask)
 {
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	uint64_t offloads = eth_dev->data->dev_conf.rxmode.offloads;
+
+	if (mask & (RTE_ETH_VLAN_STRIP_MASK | RTE_ETH_QINQ_STRIP_MASK)) {
+		if ((offloads & RTE_ETH_RX_OFFLOAD_QINQ_STRIP) && !dev->hw_feat.dvlan) {
+			XGMAC_LOG(ERR, "QinQ strip requires Double VLAN support");
+			return -ENOTSUP;
+		}
+
+		xgmac_vlan_strip_cfg(dev);
+
+		if (eth_dev->data->dev_started)
+			xgmac_rx_offload_update(eth_dev);
+	}
+
 	return xgmac_tx_offload_update(eth_dev);
 }
 

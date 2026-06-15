@@ -56,6 +56,21 @@ xgmac_mac_init(struct xgmac_dev *dev, uint16_t nb_rx_queues)
 		  xgmac_rd(dev, XGMAC_PACKET_FILTER));
 }
 
+static void
+xgmac_dvlp_update(struct xgmac_dev *dev)
+{
+	uint64_t rx_ol = dev->eth_dev->data->dev_conf.rxmode.offloads;
+	uint64_t tx_ol = dev->eth_dev->data->dev_conf.txmode.offloads;
+	uint32_t val = xgmac_rd(dev, XGMAC_VLAN_TAG);
+
+	if ((rx_ol & RTE_ETH_RX_OFFLOAD_QINQ_STRIP) || (tx_ol & RTE_ETH_TX_OFFLOAD_QINQ_INSERT))
+		val |= XGMAC_VLAN_EDVLP;
+	else
+		val &= ~XGMAC_VLAN_EDVLP;
+
+	xgmac_wr(dev, XGMAC_VLAN_TAG, val);
+}
+
 void
 xgmac_vlan_insert_cfg(struct xgmac_dev *dev)
 {
@@ -74,6 +89,39 @@ xgmac_vlan_insert_cfg(struct xgmac_dev *dev)
 	if (dev->vlan_inner_svlan)
 		val |= XGMAC_VLAN_CSVL;
 	xgmac_wr(dev, XGMAC_INNER_VLAN_INCL, val);
+	xgmac_dvlp_update(dev);
+}
+
+void
+xgmac_vlan_strip_cfg(struct xgmac_dev *dev)
+{
+	uint64_t offloads = dev->eth_dev->data->dev_conf.rxmode.offloads;
+	bool strip_outer = !!(offloads & RTE_ETH_RX_OFFLOAD_VLAN_STRIP);
+	bool strip_qinq = !!(offloads & RTE_ETH_RX_OFFLOAD_QINQ_STRIP);
+	uint32_t val;
+
+	/* QinQ stripping enables outer strip. */
+	if (strip_qinq)
+		strip_outer = true;
+
+	val = xgmac_rd(dev, XGMAC_VLAN_TAG);
+	val &= ~(XGMAC_VLAN_EVLS | XGMAC_VLAN_EVLRXS | XGMAC_VLAN_ESVL | XGMAC_VLAN_EIVLS |
+		 XGMAC_VLAN_EIVLRXS);
+
+	if (strip_outer) {
+		val |= XGMAC_FIELD_PREP(XGMAC_VLAN_EVLS, XGMAC_VLAN_EVLS_ALWAYS);
+		val |= XGMAC_VLAN_EVLRXS;
+		if (dev->vlan_outer_svlan)
+			val |= XGMAC_VLAN_ESVL;
+	}
+
+	if (strip_qinq) {
+		val |= XGMAC_FIELD_PREP(XGMAC_VLAN_EIVLS, XGMAC_VLAN_EVLS_ALWAYS);
+		val |= XGMAC_VLAN_EIVLRXS;
+	}
+
+	xgmac_wr(dev, XGMAC_VLAN_TAG, val);
+	xgmac_dvlp_update(dev);
 }
 
 void

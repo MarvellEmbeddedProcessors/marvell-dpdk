@@ -21,6 +21,7 @@
 void
 xgmac_mac_init(struct xgmac_dev *dev, uint16_t nb_rx_queues)
 {
+	uint64_t rx_ol = dev->eth_dev->data->dev_conf.rxmode.offloads;
 	uint32_t val;
 	uint16_t i;
 
@@ -33,12 +34,17 @@ xgmac_mac_init(struct xgmac_dev *dev, uint16_t nb_rx_queues)
 	val |= XGMAC_CONFIG_JD | XGMAC_CONFIG_SS_10000;
 	xgmac_wr(dev, XGMAC_TX_CONFIG, val);
 
-	/* RX_CONFIG: set ACS (auto pad/CRC strip). */
+	/* RX_CONFIG: strip CRC (CST + ACS) unless KEEP_CRC is requested.
+	 * Enable IPC only when L3/L4 cksum offload is requested.
+	 */
 	val = xgmac_rd(dev, XGMAC_RX_CONFIG);
-	val |= XGMAC_CONFIG_ACS;
-	if (dev->hw_feat.rx_coe) {
-		uint64_t rx_ol = dev->eth_dev->data->dev_conf.rxmode.offloads;
 
+	if (rx_ol & RTE_ETH_RX_OFFLOAD_KEEP_CRC)
+		val &= ~(XGMAC_CONFIG_CST | XGMAC_CONFIG_ACS);
+	else
+		val |= XGMAC_CONFIG_CST | XGMAC_CONFIG_ACS;
+
+	if (dev->hw_feat.rx_coe) {
 		if (rx_ol & (RTE_ETH_RX_OFFLOAD_IPV4_CKSUM | RTE_ETH_RX_OFFLOAD_UDP_CKSUM |
 			     RTE_ETH_RX_OFFLOAD_TCP_CKSUM))
 			val |= XGMAC_CONFIG_IPC;

@@ -702,7 +702,7 @@ xgmac_dev_infos_get(struct rte_eth_dev *eth_dev, struct rte_eth_dev_info *info)
 	info->default_rxconf.rx_free_thresh = XGMAC_DEFAULT_RX_FREE_THRESH;
 	info->default_txconf.tx_free_thresh = XGMAC_DEFAULT_TX_FREE_THRESH;
 	info->rx_offload_capa = RTE_ETH_RX_OFFLOAD_SCATTER | RTE_ETH_RX_OFFLOAD_RSS_HASH |
-				RTE_ETH_RX_OFFLOAD_VLAN_STRIP;
+				RTE_ETH_RX_OFFLOAD_VLAN_STRIP | RTE_ETH_RX_OFFLOAD_KEEP_CRC;
 	if (dev->hw_feat.dvlan)
 		info->rx_offload_capa |= RTE_ETH_RX_OFFLOAD_QINQ_STRIP;
 	if (dev->hw_feat.rx_coe)

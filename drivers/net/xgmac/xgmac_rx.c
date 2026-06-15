@@ -99,40 +99,58 @@ static const alignas(RTE_CACHE_LINE_SIZE) uint32_t xgmac_l34t_to_cksum[16] = {
 static inline void
 xgmac_rx_refill(struct xgmac_rx_queue *rxq)
 {
-	struct rte_mbuf *alloc_mbufs[XGMAC_DEFAULT_RX_FREE_THRESH];
+	struct rte_mbuf *alloc_mbufs[XGMAC_RX_REFILL_CHUNK];
 	const uint16_t thresh = rxq->rx_free_thresh;
 	const uint16_t mask = rxq->nb_desc - 1;
 	volatile union xgmac_rx_desc *desc;
-	uint16_t start, i, tail_idx;
+	uint16_t i, tail_idx;
 
 	while ((uint16_t)(rxq->cur - rxq->dirty) >= thresh) {
-		start = rxq->dirty & mask;
+		bool alloc_failed = false;
+		uint16_t filled = 0;
 
-		if (rte_mbuf_raw_alloc_bulk(rxq->mb_pool, alloc_mbufs, thresh) != 0) {
-			rxq->rx_mbuf_alloc_failed += thresh;
+		while (filled < thresh) {
+			uint16_t chunk = RTE_MIN((uint16_t)(thresh - filled),
+						 (uint16_t)XGMAC_RX_REFILL_CHUNK);
+			uint16_t start = (rxq->dirty + filled) & mask;
+
+			if (rte_mbuf_raw_alloc_bulk(rxq->mb_pool, alloc_mbufs, chunk) != 0) {
+				rxq->rx_mbuf_alloc_failed += (uint32_t)(thresh - filled);
+				alloc_failed = true;
+				break;
+			}
+
+			for (i = 0; i < chunk; i++) {
+				struct rte_mbuf *m = alloc_mbufs[i];
+				uint16_t idx = (start + i) & mask;
+
+				m->ol_flags = 0;
+				m->data_off = RTE_PKTMBUF_HEADROOM;
+				m->next = NULL;
+				rxq->sw_ring[idx] = m;
+				desc = &rxq->desc[idx];
+				desc->read.baddr = rte_mbuf_data_iova_default(m);
+				desc->read.rdes2 = 0;
+				desc->read.rdes3 = XGMAC_RDES3_OWN;
+			}
+
+			filled += chunk;
+		}
+
+		if (filled == 0)
 			return;
-		}
-
-		for (i = 0; i < thresh; i++) {
-			struct rte_mbuf *m = alloc_mbufs[i];
-			uint16_t idx = (start + i) & mask;
-
-			m->ol_flags = 0;
-			rxq->sw_ring[idx] = m;
-			desc = &rxq->desc[idx];
-			desc->read.baddr = rte_mbuf_data_iova_default(m);
-			desc->read.rdes2 = 0;
-			desc->read.rdes3 = XGMAC_RDES3_OWN;
-		}
 
 		/* Force all descriptor writes to be visible before the tail pointer update. */
 		rte_wmb();
 
-		tail_idx = (start + thresh - 1) & mask;
+		tail_idx = (rxq->dirty + filled - 1) & mask;
 		xgmac_wr(rxq->dev, XGMAC_DMA_CH_RxDESC_TAIL_LPTR(rxq->queue_id),
 			 xgmac_low32(rxq->ring_phys_addr + tail_idx * sizeof(union xgmac_rx_desc)));
 
-		rxq->dirty += thresh;
+		rxq->dirty += filled;
+
+		if (alloc_failed)
+			return;
 	}
 }
 

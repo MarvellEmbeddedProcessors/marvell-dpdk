@@ -425,8 +425,7 @@ xgmac_rx_queue_setup(struct rte_eth_dev *dev, uint16_t rx_queue_id,
 	rx_free_thresh =
 		rx_conf->rx_free_thresh ? rx_conf->rx_free_thresh : XGMAC_DEFAULT_RX_FREE_THRESH;
 
-	if (rx_free_thresh >= nb_rx_desc || rx_free_thresh > XGMAC_DEFAULT_RX_FREE_THRESH ||
-	    nb_rx_desc % rx_free_thresh != 0) {
+	if (rx_free_thresh >= nb_rx_desc || nb_rx_desc % rx_free_thresh != 0) {
 		XGMAC_LOG(ERR, "rx_free_thresh %u invalid for nb_rx_desc %u", rx_free_thresh,
 			  nb_rx_desc);
 		return -EINVAL;

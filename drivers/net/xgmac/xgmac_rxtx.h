@@ -9,6 +9,7 @@
 #define XGMAC_DESC_ALIGN	     128
 #define XGMAC_DEFAULT_RX_FREE_THRESH 32
 #define XGMAC_DEFAULT_TX_FREE_THRESH 32
+#define XGMAC_RX_REFILL_CHUNK	     32
 
 struct rte_memzone;
 

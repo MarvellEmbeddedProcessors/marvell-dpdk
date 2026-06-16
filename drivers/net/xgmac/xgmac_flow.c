@@ -386,6 +386,29 @@ xgmac_flow_insert_sorted(struct xgmac_dev *dev, struct xgmac_flow *flow)
 }
 
 static int
+xgmac_flow_apply_no_rules_state(struct xgmac_dev *dev)
+{
+	/* Install drop-all rule if isolated, or disable the parser if not. */
+	if (dev->flow_isolated) {
+		static const uint8_t drop_match_data[1] = {0};
+		static const uint8_t drop_match_mask[1] = {0};
+		struct xgmac_frp_flow_rule isolate_drop_rule = {
+			.byte_offset = 0,
+			.match_value = drop_match_data,
+			.match_mask = drop_match_mask,
+			.match_size = 1,
+			.action = {
+					.reject_frame = true,
+				  },
+		};
+
+		return xgmac_frp_program_rules(dev, &isolate_drop_rule, 1);
+	}
+
+	return xgmac_frp_enable(dev, false);
+}
+
+static int
 xgmac_flow_reprogram_locked(struct xgmac_dev *dev, struct rte_flow_error *error)
 {
 	struct xgmac_frp_flow_rule *rules;
@@ -396,12 +419,13 @@ xgmac_flow_reprogram_locked(struct xgmac_dev *dev, struct rte_flow_error *error)
 	TAILQ_FOREACH (f, &dev->flow_list, next)
 		nb++;
 
-	/* Empty list: turn the parser off so silicon returns to pre-FRP behaviour. */
 	if (nb == 0) {
-		ret = xgmac_frp_enable(dev, false);
+		ret = xgmac_flow_apply_no_rules_state(dev);
 		if (ret)
-			return rte_flow_error_set(error, -ret, RTE_FLOW_ERROR_TYPE_UNSPECIFIED,
-						  NULL, "failed to disable FRP parser");
+			return rte_flow_error_set(
+				error, -ret, RTE_FLOW_ERROR_TYPE_UNSPECIFIED, NULL,
+				dev->flow_isolated ? "failed to install isolated drop entry" :
+						     "failed to disable FRP parser");
 		return 0;
 	}
 
@@ -423,8 +447,10 @@ xgmac_flow_reprogram_locked(struct xgmac_dev *dev, struct rte_flow_error *error)
 	ret = xgmac_frp_program_rules(dev, rules, nb);
 	rte_free(rules);
 	if (ret) {
-		/* HW table may be partially written; disable parser as fail-safe. */
-		(void)xgmac_frp_enable(dev, false);
+		/* HW table may be partially written; fall back to no-rules state. */
+		if (xgmac_flow_apply_no_rules_state(dev))
+			XGMAC_LOG(ERR,
+				  "FRP fail-safe failed; parser may be in an inconsistent state");
 		return rte_flow_error_set(error, -ret, RTE_FLOW_ERROR_TYPE_UNSPECIFIED, NULL,
 					  "FRP rule programming failed");
 	}
@@ -432,7 +458,6 @@ xgmac_flow_reprogram_locked(struct xgmac_dev *dev, struct rte_flow_error *error)
 	return 0;
 }
 
-/* Single source of truth for what the driver accepts; both validate and create call this. */
 static int
 xgmac_flow_compile(struct xgmac_dev *dev, const struct rte_flow_attr *attr,
 		   const struct rte_flow_item pattern[], const struct rte_flow_action actions[],
@@ -560,18 +585,23 @@ xgmac_flow_flush(struct rte_eth_dev *eth_dev, struct rte_flow_error *error)
 
 	rte_spinlock_lock(&dev->flow_lock);
 
-	ret = xgmac_frp_enable(dev, false);
+	ret = xgmac_flow_apply_no_rules_state(dev);
 	if (ret) {
 		rte_spinlock_unlock(&dev->flow_lock);
 		return rte_flow_error_set(error, -ret, RTE_FLOW_ERROR_TYPE_UNSPECIFIED, NULL,
-					  "failed to disable FRP parser");
+					  dev->flow_isolated ?
+						  "failed to install isolated drop entry" :
+						  "failed to disable FRP parser");
 	}
 
-	ret = xgmac_frp_table_flush(dev);
-	if (ret) {
-		rte_spinlock_unlock(&dev->flow_lock);
-		return rte_flow_error_set(error, -ret, RTE_FLOW_ERROR_TYPE_UNSPECIFIED, NULL,
-					  "failed to flush FRP table");
+	/* Don't wipe the drop-all rule if isolated. */
+	if (!dev->flow_isolated) {
+		ret = xgmac_frp_table_flush(dev);
+		if (ret) {
+			rte_spinlock_unlock(&dev->flow_lock);
+			return rte_flow_error_set(error, -ret, RTE_FLOW_ERROR_TYPE_UNSPECIFIED,
+						  NULL, "failed to flush FRP table");
+		}
 	}
 
 	while ((flow = TAILQ_FIRST(&dev->flow_list)) != NULL) {
@@ -592,18 +622,39 @@ xgmac_flow_query(struct rte_eth_dev *eth_dev, struct rte_flow *flow,
 	RTE_SET_USED(action);
 	RTE_SET_USED(data);
 
+	/* No per-rule FRP counter support, so no query support. */
 	return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_UNSPECIFIED, NULL,
-				  "flow query not supported");
+				  "flow query not supported (no per-rule FRP counters)");
 }
 
 static int
 xgmac_flow_isolate(struct rte_eth_dev *eth_dev, int set, struct rte_flow_error *error)
 {
-	RTE_SET_USED(eth_dev);
-	RTE_SET_USED(set);
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	const bool want = !!set;
+	uint8_t saved;
+	int ret;
 
-	return rte_flow_error_set(error, ENOTSUP, RTE_FLOW_ERROR_TYPE_UNSPECIFIED, NULL,
-				  "isolate mode not supported");
+	rte_spinlock_lock(&dev->flow_lock);
+
+	if (dev->flow_isolated == want) {
+		rte_spinlock_unlock(&dev->flow_lock);
+		return 0;
+	}
+
+	/* Update flow_isolated; reprogram_locked re-derives the parser state. */
+	saved = dev->flow_isolated;
+	dev->flow_isolated = want;
+
+	ret = xgmac_flow_reprogram_locked(dev, error);
+	if (ret) {
+		dev->flow_isolated = saved;
+		rte_spinlock_unlock(&dev->flow_lock);
+		return ret;
+	}
+
+	rte_spinlock_unlock(&dev->flow_lock);
+	return 0;
 }
 
 static const struct rte_flow_ops xgmac_flow_ops = {
@@ -616,8 +667,14 @@ static const struct rte_flow_ops xgmac_flow_ops = {
 };
 
 int
-xgmac_flow_ops_get(struct rte_eth_dev *eth_dev __rte_unused, const struct rte_flow_ops **ops)
+xgmac_flow_ops_get(struct rte_eth_dev *eth_dev, const struct rte_flow_ops **ops)
 {
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+
+	/* Gate all rte_flow ops on FRP presence; non-FRP silicon advertises no flow support. */
+	if (!dev->hw_feat.frp)
+		return -ENOTSUP;
+
 	*ops = &xgmac_flow_ops;
 	return 0;
 }

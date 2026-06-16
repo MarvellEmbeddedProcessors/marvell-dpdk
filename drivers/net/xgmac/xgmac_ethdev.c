@@ -25,6 +25,8 @@
 
 RTE_LOG_REGISTER_DEFAULT(xgmac_logtype, INFO);
 
+static int xgmac_eth_dev_init(struct rte_eth_dev *eth_dev);
+
 static const struct rte_memzone *
 xgmac_dma_zone_reserve_bounded(const struct rte_eth_dev *eth_dev, const char *ring_name,
 			       uint16_t queue_id, size_t size, unsigned int align,
@@ -521,7 +523,23 @@ xgmac_dev_close(struct rte_eth_dev *eth_dev)
 		xgmac_tx_queue_free(eth_dev->data->tx_queues[i]);
 		eth_dev->data->tx_queues[i] = NULL;
 	}
+
+	rte_free(eth_dev->data->mac_addrs);
+	eth_dev->data->mac_addrs = NULL;
+
 	return 0;
+}
+
+static int
+xgmac_dev_reset(struct rte_eth_dev *eth_dev)
+{
+	int ret;
+
+	ret = xgmac_dev_close(eth_dev);
+	if (ret)
+		return ret;
+
+	return xgmac_eth_dev_init(eth_dev);
 }
 
 static int
@@ -1644,6 +1662,7 @@ static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.dev_start = xgmac_dev_start,
 	.dev_stop = xgmac_dev_stop,
 	.dev_close = xgmac_dev_close,
+	.dev_reset = xgmac_dev_reset,
 	.dev_infos_get = xgmac_dev_infos_get,
 	.dev_supported_ptypes_get = xgmac_dev_supported_ptypes_get,
 	.dev_set_link_up = xgmac_dev_set_link_up,
@@ -1736,11 +1755,66 @@ xgmac_is_compatible(const char *dev_name)
 }
 
 static int
+xgmac_eth_dev_init(struct rte_eth_dev *eth_dev)
+{
+	struct xgmac_dev *dev = eth_dev->data->dev_private;
+	const struct rte_platform_device *pdev = dev->pdev;
+	uint32_t ver;
+
+	dev->tx_offload_flags = XGMAC_TX_OFFLOAD_NONE;
+	dev->vlan_outer_tpid = RTE_ETHER_TYPE_VLAN;
+	dev->vlan_inner_tpid = RTE_ETHER_TYPE_VLAN;
+	dev->vlan_outer_svlan = 0;
+	dev->vlan_inner_svlan = 0;
+	dev->pause_autoneg = 1;
+	dev->tx_pause = 0;
+	dev->rx_pause = 0;
+	dev->flow_ctrl_cfg_set = 0;
+	dev->pfc_queue_cfg_set = 0;
+	dev->pause_time = 0xffff;
+	dev->fc_high_water = 0;
+	dev->fc_low_water = 0;
+
+	TAILQ_INIT(&dev->flow_list);
+	rte_spinlock_init(&dev->flow_lock);
+	dev->flow_next_seq = 0;
+
+	xgmac_hw_features_get(dev);
+
+	if (dev->hw_feat.dma_addr_width < 40) {
+		XGMAC_LOG(ERR, "%s: DMA address width is %u-bit, minimum 40-bit required",
+			  pdev->name, dev->hw_feat.dma_addr_width);
+		return -ENOTSUP;
+	}
+
+	ver = dev->hw_feat.version;
+	XGMAC_LOG(INFO, "%s: synopsys_id=0x%02x dev_id=0x%02x", pdev->name, ver & 0xff,
+		  (ver >> 8) & 0xff);
+
+	eth_dev->data->mac_addrs = rte_zmalloc(pdev->name,
+		(dev->hw_feat.addn_mac + 1) * sizeof(struct rte_ether_addr), 0);
+	if (eth_dev->data->mac_addrs == NULL) {
+		XGMAC_LOG(ERR, "%s: failed to allocate mac_addrs", pdev->name);
+		return -ENOMEM;
+	}
+
+	xgmac_mac_addr_read(dev, 0, &eth_dev->data->mac_addrs[0]);
+
+	eth_dev->dev_ops = &xgmac_eth_dev_ops;
+	eth_dev->rx_descriptor_status = xgmac_rx_descriptor_status_op;
+	eth_dev->tx_descriptor_status = xgmac_tx_descriptor_status;
+	xgmac_tx_offload_update(eth_dev);
+	eth_dev->rx_pkt_burst = xgmac_recv_pkts_no_offload;
+
+	return xgmac_intr_register(eth_dev);
+}
+
+static int
 xgmac_platform_probe(struct rte_platform_device *pdev)
 {
 	struct rte_eth_dev *eth_dev;
 	struct xgmac_dev *dev;
-	uint32_t ver;
+	int ret;
 
 	if (rte_eal_process_type() != RTE_PROC_PRIMARY)
 		return -ENOTSUP;
@@ -1772,49 +1846,14 @@ xgmac_platform_probe(struct rte_platform_device *pdev)
 	dev->csr_base = pdev->resource[0].mem.addr;
 	dev->csr_size = pdev->resource[0].mem.len;
 	dev->pdev = pdev;
-	dev->tx_offload_flags = XGMAC_TX_OFFLOAD_NONE;
-	dev->vlan_outer_tpid = RTE_ETHER_TYPE_VLAN;
-	dev->vlan_inner_tpid = RTE_ETHER_TYPE_VLAN;
-	dev->vlan_outer_svlan = 0;
-	dev->vlan_inner_svlan = 0;
-	dev->pause_autoneg = 1;
-	dev->tx_pause = 0;
-	dev->rx_pause = 0;
-	dev->flow_ctrl_cfg_set = 0;
-	dev->pfc_queue_cfg_set = 0;
-	dev->pause_time = 0xffff;
-	dev->fc_high_water = 0;
-	dev->fc_low_water = 0;
-
-	TAILQ_INIT(&dev->flow_list);
-	rte_spinlock_init(&dev->flow_lock);
-	dev->flow_next_seq = 0;
-
-	xgmac_hw_features_get(dev);
-	ver = dev->hw_feat.version;
-	XGMAC_LOG(INFO, "%s: synopsys_id=0x%02x dev_id=0x%02x", pdev->name, ver & 0xff,
-		  (ver >> 8) & 0xff);
-
-	eth_dev->data->mac_addrs = rte_zmalloc(
-		pdev->name, (dev->hw_feat.addn_mac + 1) * sizeof(struct rte_ether_addr), 0);
-	if (eth_dev->data->mac_addrs == NULL) {
-		XGMAC_LOG(ERR, "%s: failed to allocate mac_addrs", pdev->name);
-		rte_free(eth_dev->data->dev_private);
-		rte_eth_dev_release_port(eth_dev);
-		return -ENOMEM;
-	}
-
-	xgmac_mac_addr_read(dev, 0, &eth_dev->data->mac_addrs[0]);
-
+	dev->eth_dev = eth_dev;
 	eth_dev->device = &pdev->device;
-	eth_dev->dev_ops = &xgmac_eth_dev_ops;
-	eth_dev->rx_pkt_burst = xgmac_recv_pkts_no_offload;
-	eth_dev->rx_descriptor_status = xgmac_rx_descriptor_status_op;
 
-	xgmac_tx_offload_update(eth_dev);
-
-	xgmac_intr_register(eth_dev);
-
+	ret = xgmac_eth_dev_init(eth_dev);
+	if (ret) {
+		rte_eth_dev_release_port(eth_dev);
+		return ret;
+	}
 	rte_eth_dev_probing_finish(eth_dev);
 
 	XGMAC_LOG(INFO, "%s: probed", pdev->name);

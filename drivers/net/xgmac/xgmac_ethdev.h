@@ -169,6 +169,11 @@ struct xgmac_dev {
 	struct xgmac_flow_list flow_list;
 	rte_spinlock_t flow_lock;
 	uint64_t flow_next_seq;
+
+	int irq_event_fd;            /* macirq eventfd, -1 if none */
+	uint8_t irq_multi;           /* per-channel IRQ mode active */
+	uint16_t irq_n_rxq;          /* RX queue IRQs bound */
+	uint32_t irq_rxq_vfio_idx[XGMAC_MAX_QUEUES];
 };
 
 #define XGMAC_FIELD_SHIFT(_mask) \

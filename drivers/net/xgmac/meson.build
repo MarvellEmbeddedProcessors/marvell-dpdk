@@ -10,6 +10,7 @@ sources = files(
         'xgmac_dev.c',
         'xgmac_ethdev.c',
         'xgmac_flow.c',
+        'xgmac_irq.c',
         'xgmac_rx.c',
         'xgmac_tx.c',
 )

@@ -9,6 +9,7 @@
 
 #include <rte_io.h>
 
+struct rte_eth_dev;
 struct xgmac_dev;
 struct xgmac_rx_queue;
 struct xgmac_tx_queue;
@@ -127,5 +128,12 @@ int xgmac_frp_table_flush(struct xgmac_dev *dev);
 /* Register dump helpers (used by .get_reg ethdev op). */
 uint32_t xgmac_regs_count(struct xgmac_dev *dev);
 void xgmac_regs_dump(struct xgmac_dev *dev, uint32_t *out);
+
+int xgmac_intr_register(struct rte_eth_dev *eth_dev);
+void xgmac_intr_unregister(struct rte_eth_dev *eth_dev);
+int xgmac_rxq_intr_setup(struct rte_eth_dev *eth_dev);
+void xgmac_rxq_intr_teardown(struct rte_eth_dev *eth_dev);
+int xgmac_rx_queue_intr_enable(struct rte_eth_dev *eth_dev, uint16_t qid);
+int xgmac_rx_queue_intr_disable(struct rte_eth_dev *eth_dev, uint16_t qid);
 
 #endif /* __XGMAC_DEV_H__ */

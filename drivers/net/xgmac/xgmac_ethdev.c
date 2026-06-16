@@ -104,6 +104,7 @@ xgmac_dev_configure(struct rte_eth_dev *eth_dev)
 				  dcb->nb_tcs, dev->hw_feat.tx_q_cnt);
 			return -EINVAL;
 		}
+
 		if (eth_dev->data->nb_rx_queues < dcb->nb_tcs) {
 			XGMAC_LOG(ERR, "DCB requires nb_rx_queues (%u) >= nb_tcs (%u)",
 				  eth_dev->data->nb_rx_queues, dcb->nb_tcs);
@@ -293,6 +294,11 @@ xgmac_dev_start(struct rte_eth_dev *eth_dev)
 	if (ret)
 		goto dma_stop;
 
+	/* Arm per-queue Rx interrupt lines if requested via intr_conf.rxq. */
+	ret = xgmac_rxq_intr_setup(eth_dev);
+	if (ret)
+		goto dma_stop;
+
 	xgmac_mac_init(dev, nb_rx_queues);
 	xgmac_mac_mtu_set(dev, eth_dev->data->mtu);
 	xgmac_mtl_init(dev, nb_tx_queues, nb_rx_queues);
@@ -404,6 +410,8 @@ xgmac_dev_stop(struct rte_eth_dev *eth_dev)
 	if (dev->timestamp_enable || dev->timesync_enable)
 		xgmac_timestamp_disable(dev);
 
+	xgmac_rxq_intr_teardown(eth_dev);
+
 	for (q = 0; q < eth_dev->data->nb_rx_queues; q++) {
 		if (eth_dev->data->rx_queues[q] == NULL)
 			continue;
@@ -500,6 +508,8 @@ xgmac_dev_close(struct rte_eth_dev *eth_dev)
 
 	if (eth_dev->data->dev_started)
 		xgmac_dev_stop(eth_dev);
+
+	xgmac_intr_unregister(eth_dev);
 
 	xgmac_flow_resources_free(dev);
 
@@ -1663,6 +1673,8 @@ static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.rx_queue_release = xgmac_rx_queue_release,
 	.rx_queue_start = xgmac_rx_queue_start,
 	.rx_queue_stop = xgmac_rx_queue_stop,
+	.rx_queue_intr_enable = xgmac_rx_queue_intr_enable,
+	.rx_queue_intr_disable = xgmac_rx_queue_intr_disable,
 	.tx_queue_setup = xgmac_tx_queue_setup,
 	.tx_queue_release = xgmac_tx_queue_release,
 	.tx_queue_start = xgmac_tx_queue_start,
@@ -1800,6 +1812,9 @@ xgmac_platform_probe(struct rte_platform_device *pdev)
 	eth_dev->rx_descriptor_status = xgmac_rx_descriptor_status_op;
 
 	xgmac_tx_offload_update(eth_dev);
+
+	xgmac_intr_register(eth_dev);
+
 	rte_eth_dev_probing_finish(eth_dev);
 
 	XGMAC_LOG(INFO, "%s: probed", pdev->name);

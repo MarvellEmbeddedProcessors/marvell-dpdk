@@ -15,6 +15,7 @@
 
 #include "xgmac_dev.h"
 #include "xgmac_ethdev.h"
+#include "xgmac_flow.h"
 #include "xgmac_regs.h"
 #include "xgmac_rxtx.h"
 
@@ -1663,6 +1664,7 @@ static const struct eth_dev_ops xgmac_eth_dev_ops = {
 	.timesync_adjust_freq = xgmac_timesync_adjust_freq,
 	.timesync_read_time = xgmac_timesync_read_time,
 	.timesync_write_time = xgmac_timesync_write_time,
+	.flow_ops_get = xgmac_flow_ops_get,
 };
 
 /* Check if platform device is Synopsys XGMAC by reading device tree compatible. */
@@ -1749,6 +1751,10 @@ xgmac_platform_probe(struct rte_platform_device *pdev)
 	dev->pause_time = 0xffff;
 	dev->fc_high_water = 0;
 	dev->fc_low_water = 0;
+
+	TAILQ_INIT(&dev->flow_list);
+	rte_spinlock_init(&dev->flow_lock);
+	dev->flow_next_seq = 0;
 
 	xgmac_hw_features_get(dev);
 	ver = dev->hw_feat.version;

@@ -5,9 +5,16 @@
 #ifndef __XGMAC_ETHDEV_H__
 #define __XGMAC_ETHDEV_H__
 
+#include <sys/queue.h>
+
 #include <ethdev_driver.h>
 #include <rte_io.h>
 #include <rte_log.h>
+#include <rte_spinlock.h>
+
+/* Forward declaration; full definition lives in xgmac_flow.h. */
+struct xgmac_flow;
+TAILQ_HEAD(xgmac_flow_list, xgmac_flow);
 
 extern int xgmac_logtype;
 #define RTE_LOGTYPE_XGMAC xgmac_logtype
@@ -154,6 +161,14 @@ struct xgmac_dev {
 	uint8_t dcb_nb_tcs;
 	uint8_t dcb_tc[RTE_ETH_DCB_NUM_USER_PRIORITIES];
 	uint8_t flow_isolated;
+	/* rte_flow / FRP state. flow_lock serialises the create/destroy/flush
+	 * fast path that re-programs the FRP instruction table; flow_next_seq
+	 * is a monotonic tie-breaker so equal-priority rules keep insertion
+	 * order across re-programs.
+	 */
+	struct xgmac_flow_list flow_list;
+	rte_spinlock_t flow_lock;
+	uint64_t flow_next_seq;
 };
 
 #define XGMAC_FIELD_SHIFT(_mask) \

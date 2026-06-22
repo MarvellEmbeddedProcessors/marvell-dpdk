@@ -1164,4 +1164,35 @@ const char *rte_pmd_cnxk_model_str_get(void);
 __rte_experimental
 int rte_pmd_cnxk_nix_inl_ipsec_vlan_cfg(uint16_t portid, uint8_t pcp_qsel[8]);
 
+/**
+ * Configure DSCP-to-CPTQ mapping for inline IPsec queue selection.
+ *
+ * Programs NIX_AF_RX_IPSEC_QMAP(idx)_DSCP(0..3) with the supplied mapping.
+ * Each dscp_map[] entry is a 64-bit register holding 16 x 4-bit CPTQ indices,
+ * covering all 64 DSCP values.
+ *
+ * Up to two DSCP maps can be configured; call this API once per distinct map
+ * (submitting an identical map reuses the existing one). The kernel allocates
+ * the physical HW table from a shared pool and the PMD tracks it internally,
+ * so the application never handles the physical index. A flow rule references
+ * a map by the order it was configured on this port (first distinct call ->
+ * map 0, second -> map 1) via its ipsec_qsel value:
+ *   map 0: RTE_PMD_CNXK_SEC_IPSEC_QSEL_INNER_DSCP_MAP0 (inner) or
+ *          RTE_PMD_CNXK_SEC_IPSEC_QSEL_OUTER_DSCP_MAP0 (outer)
+ *   map 1: RTE_PMD_CNXK_SEC_IPSEC_QSEL_INNER_DSCP_MAP1 (inner) or
+ *          RTE_PMD_CNXK_SEC_IPSEC_QSEL_OUTER_DSCP_MAP1 (outer)
+ *
+ * @param portid
+ *   Port identifier of the Ethernet device.
+ * @param dscp_map
+ *   Array of 4 uint64_t values encoding DSCP-to-CPTQ mapping.
+ *   Each 64-bit value has 16 x 4-bit fields: bits[3:0]=DSCP0, bits[7:4]=DSCP1, etc.
+ *
+ * @return
+ *   0 on success, a negative errno value otherwise. -ENOSPC if the shared HW
+ *   DSCP table pool is exhausted.
+ */
+__rte_experimental
+int rte_pmd_cnxk_nix_inl_ipsec_dscp_cfg(uint16_t portid, uint64_t dscp_map[4]);
+
 #endif /* _PMD_CNXK_H_ */

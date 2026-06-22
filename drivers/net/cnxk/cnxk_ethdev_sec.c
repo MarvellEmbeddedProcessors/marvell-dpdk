@@ -708,6 +708,39 @@ rte_pmd_cnxk_nix_inl_ipsec_vlan_cfg(uint16_t portid, uint8_t pcp_qsel[8])
 	return rc;
 }
 
+RTE_EXPORT_EXPERIMENTAL_SYMBOL(rte_pmd_cnxk_nix_inl_ipsec_dscp_cfg, 25.11)
+int
+rte_pmd_cnxk_nix_inl_ipsec_dscp_cfg(uint16_t portid, uint64_t dscp_map[4])
+{
+	struct rte_eth_dev *eth_dev;
+	struct cnxk_eth_dev *dev;
+	int rc;
+
+	if (!rte_eth_dev_is_valid_port(portid)) {
+		plt_err("Invalid port %u", portid);
+		return -EINVAL;
+	}
+
+	if (!roc_feature_nix_has_inl_multi_queue()) {
+		plt_err("Inline multi-queue feature not supported");
+		return -ENOTSUP;
+	}
+
+	if (!dscp_map) {
+		plt_err("dscp_map array is NULL");
+		return -EINVAL;
+	}
+
+	eth_dev = &rte_eth_devices[portid];
+	dev = cnxk_eth_pmd_priv(eth_dev);
+
+	rc = roc_nix_inl_ipsec_dscp_cfg(&dev->nix, dscp_map);
+	if (rc)
+		plt_err("Failed to configure IPsec DSCP cfg: rc=%d", rc);
+
+	return rc;
+}
+
 static unsigned int
 cnxk_eth_sec_session_get_size(void *device __rte_unused)
 {

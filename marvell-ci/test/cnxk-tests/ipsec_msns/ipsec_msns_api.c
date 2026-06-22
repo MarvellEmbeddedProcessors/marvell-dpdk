@@ -66,6 +66,8 @@ enum test_mode {
 	CUSTOM_PROFILE_RTE_PMD_CNXK_MSNS_TEST,
 	/* PCP-based CPT queue selection test (CN20K only) */
 	IPSEC_RTE_PMD_CNXK_PCP_QSEL_TEST,
+	/* DSCP-based CPT queue selection test (CN20K only) */
+	IPSEC_RTE_PMD_CNXK_DSCP_QSEL_TEST,
 };
 
 static struct rte_mempool *mbufpool[RTE_MAX_ETHPORTS];
@@ -134,6 +136,7 @@ static struct rte_flow *default_flow[RTE_MAX_ETHPORTS][RTE_PMD_CNXK_SEC_ACTION_A
 static struct rte_flow *default_flow_no_msns[RTE_MAX_ETHPORTS];
 static struct rte_flow *custom_flow[RTE_MAX_ETHPORTS];
 static struct rte_flow *pcp_qsel_flow[RTE_MAX_ETHPORTS];
+static struct rte_flow *dscp_qsel_flow[RTE_MAX_ETHPORTS];
 
 /* Example usage, max entries 4K */
 #define MAX_SA_SIZE (4 * 1024)
@@ -183,6 +186,8 @@ ipsec_test_mode_to_string(enum test_mode testmode)
 		return "CUSTOM_PROFILE_RTE_PMD_CNXK_MSNS_TEST";
 	case IPSEC_RTE_PMD_CNXK_PCP_QSEL_TEST:
 		return "IPSEC_RTE_PMD_CNXK_PCP_QSEL_TEST";
+	case IPSEC_RTE_PMD_CNXK_DSCP_QSEL_TEST:
+		return "IPSEC_RTE_PMD_CNXK_DSCP_QSEL_TEST";
 	}
 	return NULL;
 }
@@ -622,6 +627,7 @@ print_usage(const char *name)
 		"\t\t\t2: CUSTOM_PROFILE_RTE_PMD_CNXK_API_TEST\n"
 		"\t\t\t3: CUSTOM_PROFILE_RTE_PMD_CNXK_MSNS_TEST\n"
 		"\t\t\t4: IPSEC_RTE_PMD_CNXK_PCP_QSEL_TEST (CN20K)\n"
+		"\t\t\t5: IPSEC_RTE_PMD_CNXK_DSCP_QSEL_TEST (CN20K)\n"
 		"\t[--portmask]	          Port mask to enable\n"
 		"\t[--nb-mbufs <count >]  MBUFs per packet pool\n"
 		"\t[--num-sas <count>]    Number of SA's to create\n"
@@ -1080,6 +1086,7 @@ ut_setup(int argc, char **argv)
 	}
 
 	check_all_ports_link_status(ethdev_port_mask);
+
 	flow_init();
 	return 0;
 }
@@ -2153,8 +2160,7 @@ destroy_default_flow(uint16_t port_id)
 }
 
 static int
-create_pcp_qsel_flow(uint16_t port_id, uint32_t spi, uint16_t sa_lo,
-		     uint16_t sa_hi)
+create_qsel_flow(uint16_t port_id, uint32_t spi, uint16_t sa_lo, uint16_t sa_hi, uint32_t qsel)
 {
 	struct rte_pmd_cnxk_sec_action sec = {0};
 	struct rte_flow_item_esp mesp = {0};
@@ -2163,7 +2169,23 @@ create_pcp_qsel_flow(uint16_t port_id, uint32_t spi, uint16_t sa_lo,
 	struct rte_flow_item pattern[2];
 	struct rte_flow_attr attr = {0};
 	struct rte_flow_error err;
+	struct rte_flow **flow_slot;
 	struct rte_flow *flow;
+	const char *name;
+
+	/* Only PCP and DSCP qsel variants are supported here */
+	if (qsel == RTE_PMD_CNXK_SEC_IPSEC_QSEL_VTAG0_PCP ||
+	    qsel == RTE_PMD_CNXK_SEC_IPSEC_QSEL_VTAG1_PCP) {
+		name = "PCP";
+		flow_slot = &pcp_qsel_flow[port_id];
+	} else if (qsel >= RTE_PMD_CNXK_SEC_IPSEC_QSEL_INNER_DSCP_MAP0 &&
+		   qsel <= RTE_PMD_CNXK_SEC_IPSEC_QSEL_OUTER_DSCP_MAP1) {
+		name = "DSCP";
+		flow_slot = &dscp_qsel_flow[port_id];
+	} else {
+		app_err("Unsupported qsel value %u\n", qsel);
+		return -1;
+	}
 
 	pattern[0].type = RTE_FLOW_ITEM_TYPE_ESP;
 	pattern[0].spec = &esp;
@@ -2175,7 +2197,7 @@ create_pcp_qsel_flow(uint16_t port_id, uint32_t spi, uint16_t sa_lo,
 	sec.sa_xor = 1;
 	sec.sa_hi = sa_hi;
 	sec.sa_lo = sa_lo;
-	sec.ipsec_qsel = RTE_PMD_CNXK_SEC_IPSEC_QSEL_VTAG0_PCP;
+	sec.ipsec_qsel = (enum rte_pmd_cnxk_sec_ipsec_qsel)qsel;
 
 	action[0].type = RTE_FLOW_ACTION_TYPE_SECURITY;
 	action[0].conf = &sec;
@@ -2188,23 +2210,23 @@ create_pcp_qsel_flow(uint16_t port_id, uint32_t spi, uint16_t sa_lo,
 
 	flow = rte_flow_create(port_id, &attr, pattern, action, &err);
 	if (flow == NULL) {
-		printf("PCP qsel flow rule create failed\n");
+		app_err("%s qsel flow rule create failed\n", name);
 		return -1;
 	}
 
-	pcp_qsel_flow[port_id] = flow;
+	*flow_slot = flow;
 	return 0;
 }
 
 static void
-destroy_pcp_qsel_flow(uint16_t port_id)
+destroy_qsel_flow(uint16_t port_id, struct rte_flow **flow_slot)
 {
 	struct rte_flow_error err;
 
-	if (!pcp_qsel_flow[port_id])
+	if (!*flow_slot)
 		return;
-	rte_flow_destroy(port_id, pcp_qsel_flow[port_id], &err);
-	pcp_qsel_flow[port_id] = NULL;
+	rte_flow_destroy(port_id, *flow_slot, &err);
+	*flow_slot = NULL;
 }
 
 #define VLAN_PCP_OFFSET 14
@@ -2248,7 +2270,7 @@ ut_ipsec_pcp_qsel_test(void)
 	sa_hi = (spi >> 16) & 0xffff;
 	sa_lo = 0x0;
 
-	printf("PCP QSEL: out_sa_index=%u in_sa_index=%u spi=0x%x\n",
+	app_info("PCP QSEL: out_sa_index=%u in_sa_index=%u spi=0x%x\n",
 	       out_sa_index, in_sa_index, spi);
 
 	memcpy(&sa_data, sess_conf, sizeof(sa_data));
@@ -2257,10 +2279,10 @@ ut_ipsec_pcp_qsel_test(void)
 					  RTE_SECURITY_IPSEC_SA_DIR_EGRESS,
 					  RTE_SECURITY_IPSEC_TUNNEL_IPV4);
 	if (ret) {
-		printf("Failed to create outbound session\n");
+		app_err("Failed to create outbound session\n");
 		goto out;
 	}
-	printf("Created Outbound session with sa_index = 0x%x\n",
+	app_info("Created Outbound session with sa_index = 0x%x\n",
 	       sa_data.ipsec_xform.spi);
 
 	sa_data.ipsec_xform.spi = spi;
@@ -2272,10 +2294,10 @@ ut_ipsec_pcp_qsel_test(void)
 	conf.crypto_xform = &sa_data.xform.aead;
 	ret = rte_security_session_update(sec_ctx, out_ses, &conf);
 	if (ret) {
-		printf("Session update failed outbound\n");
+		app_err("Session update failed outbound\n");
 		goto out;
 	}
-	printf("Updated Outbound session with SPI = 0x%x\n", spi);
+	app_info("Updated Outbound session with SPI = 0x%x\n", spi);
 
 	memcpy(&sa_data, sess_conf, sizeof(sa_data));
 	sa_data.ipsec_xform.spi = sa_index;
@@ -2284,10 +2306,10 @@ ut_ipsec_pcp_qsel_test(void)
 					  RTE_SECURITY_IPSEC_SA_DIR_INGRESS,
 					  RTE_SECURITY_IPSEC_TUNNEL_IPV4);
 	if (ret) {
-		printf("Failed to create inbound session\n");
+		app_err("Failed to create inbound session\n");
 		goto out;
 	}
-	printf("Created Inbound session with sa_index = 0x%x\n",
+	app_info("Created Inbound session with sa_index = 0x%x\n",
 	       sa_data.ipsec_xform.spi);
 
 	sa_data.ipsec_xform.spi = spi;
@@ -2301,10 +2323,10 @@ ut_ipsec_pcp_qsel_test(void)
 	conf.userdata = (void *)(uint64_t)1;
 	ret = rte_security_session_update(sec_ctx, in_ses, &conf);
 	if (ret) {
-		printf("Session update failed inbound\n");
+		app_err("Session update failed inbound\n");
 		goto out;
 	}
-	printf("Updated Inbound session with SPI = 0x%x\n", spi);
+	app_info("Updated Inbound session with SPI = 0x%x\n", spi);
 
 	{
 		/* Logical queue index per PCP (0 = default). Logical q maps to
@@ -2314,19 +2336,20 @@ ut_ipsec_pcp_qsel_test(void)
 
 		ret = rte_pmd_cnxk_nix_inl_ipsec_vlan_cfg(portid, pcp_qsel);
 		if (ret) {
-			printf("Failed to configure PCP-to-CPTQ mapping: %d\n",
+			app_err("Failed to configure PCP-to-CPTQ mapping: %d\n",
 			       ret);
 			goto out;
 		}
-		printf("PCP-to-CPTQ mapping configured (PCP 0-3->Q2, 4-7->Q3)\n");
+		app_info("PCP-to-CPTQ mapping configured (PCP 0-3->Q2, 4-7->Q3)\n");
 	}
 
-	ret = create_pcp_qsel_flow(portid, spi, sa_lo, sa_hi);
+	ret = create_qsel_flow(portid, spi, sa_lo, sa_hi,
+			       RTE_PMD_CNXK_SEC_IPSEC_QSEL_VTAG0_PCP);
 	if (ret) {
-		printf("PCP qsel flow creation failed\n");
+		app_err("PCP qsel flow creation failed\n");
 		goto out;
 	}
-	printf("PCP qsel flow created successfully\n");
+	app_info("PCP qsel flow created successfully\n");
 
 	/* PCP=2 -> logical q1 -> expect CPT[2] */
 	memcpy(&vlan_pkt, &pkt_ipv4_vlan_plain, sizeof(vlan_pkt));
@@ -2334,7 +2357,7 @@ ut_ipsec_pcp_qsel_test(void)
 
 	ret = init_traffic(mbufpool[portid], &tx_pkts, &vlan_pkt);
 	if (ret) {
-		printf("Failed to init traffic for PCP=2\n");
+		app_err("Failed to init traffic for PCP=2\n");
 		goto out;
 	}
 
@@ -2348,9 +2371,9 @@ ut_ipsec_pcp_qsel_test(void)
 		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q1_before, 3);
 
 	nb_sent = rte_eth_tx_burst(portid, 0, &tx_pkts, 1);
-	printf("Sent %u pkts\n", nb_sent);
+	app_info("Sent %u pkts\n", nb_sent);
 	if (nb_sent != 1) {
-		printf("Failed to tx PCP=2 pkt\n");
+		app_err("Failed to tx PCP=2 pkt\n");
 		ret = -1;
 		goto out;
 	}
@@ -2362,7 +2385,7 @@ ut_ipsec_pcp_qsel_test(void)
 		nb_rx += rte_eth_rx_burst(portid, 0, &rx_pkts, 1);
 		rte_delay_ms(100);
 	}
-	printf("Recv %u pkts\n", nb_rx);
+	app_info("Recv %u pkts\n", nb_rx);
 
 	rte_pmd_cnxk_cpt_q_stats_get(portid,
 		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q0_after, 2);
@@ -2372,23 +2395,23 @@ ut_ipsec_pcp_qsel_test(void)
 	q0_delta = stats_q0_after.dec_pkts - stats_q0_before.dec_pkts;
 	q1_delta = stats_q1_after.dec_pkts - stats_q1_before.dec_pkts;
 
-	printf("PCP=2: CPT[2] dec_pkts delta=%lu, CPT[3] dec_pkts delta=%lu, "
+	app_info("PCP=2: CPT[2] dec_pkts delta=%lu, CPT[3] dec_pkts delta=%lu, "
 	       "rx=%u\n", q0_delta, q1_delta, nb_rx);
 
 	if (nb_rx < 1) {
-		printf("PCP=2: No packets received\n");
+		app_err("PCP=2: No packets received\n");
 		ret = -1;
 		goto out;
 	}
 
 	if (q0_delta != 1) {
-		printf("PCP=2: Expected CPT[2] dec_pkts=1, got %lu\n",
+		app_err("PCP=2: Expected CPT[2] dec_pkts=1, got %lu\n",
 		       q0_delta);
 		ret = -1;
 		goto out;
 	}
 	if (q1_delta != 0) {
-		printf("PCP=2: Expected CPT[3] dec_pkts=0, got %lu\n",
+		app_err("PCP=2: Expected CPT[3] dec_pkts=0, got %lu\n",
 		       q1_delta);
 		ret = -1;
 		goto out;
@@ -2403,7 +2426,7 @@ ut_ipsec_pcp_qsel_test(void)
 
 	ret = init_traffic(mbufpool[portid], &tx_pkts, &vlan_pkt);
 	if (ret) {
-		printf("Failed to init traffic for PCP=6\n");
+		app_err("Failed to init traffic for PCP=6\n");
 		goto out;
 	}
 
@@ -2417,9 +2440,9 @@ ut_ipsec_pcp_qsel_test(void)
 		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q1_before, 3);
 
 	nb_sent = rte_eth_tx_burst(portid, 0, &tx_pkts, 1);
-	printf("Sent %u pkts (PCP=6)\n", nb_sent);
+	app_info("Sent %u pkts (PCP=6)\n", nb_sent);
 	if (nb_sent != 1) {
-		printf("Failed to tx PCP=6 pkt\n");
+		app_err("Failed to tx PCP=6 pkt\n");
 		ret = -1;
 		goto out;
 	}
@@ -2431,7 +2454,7 @@ ut_ipsec_pcp_qsel_test(void)
 		nb_rx += rte_eth_rx_burst(portid, 0, &rx_pkts, 1);
 		rte_delay_ms(100);
 	}
-	printf("Recv %u pkts (PCP=6)\n", nb_rx);
+	app_info("Recv %u pkts (PCP=6)\n", nb_rx);
 
 	rte_pmd_cnxk_cpt_q_stats_get(portid,
 		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q0_after, 2);
@@ -2441,32 +2464,32 @@ ut_ipsec_pcp_qsel_test(void)
 	q0_delta = stats_q0_after.dec_pkts - stats_q0_before.dec_pkts;
 	q1_delta = stats_q1_after.dec_pkts - stats_q1_before.dec_pkts;
 
-	printf("PCP=6: CPT[2] dec_pkts delta=%lu, CPT[3] dec_pkts delta=%lu, "
+	app_info("PCP=6: CPT[2] dec_pkts delta=%lu, CPT[3] dec_pkts delta=%lu, "
 	       "rx=%u\n", q0_delta, q1_delta, nb_rx);
 
 	if (nb_rx < 1) {
-		printf("PCP=6: No packets received\n");
+		app_err("PCP=6: No packets received\n");
 		ret = -1;
 		goto out;
 	}
 
 	if (q1_delta != 1) {
-		printf("PCP=6: Expected CPT[3] dec_pkts=1, got %lu\n",
+		app_err("PCP=6: Expected CPT[3] dec_pkts=1, got %lu\n",
 		       q1_delta);
 		ret = -1;
 		goto out;
 	}
 	if (q0_delta != 0) {
-		printf("PCP=6: Expected CPT[2] dec_pkts=0, got %lu\n",
+		app_err("PCP=6: Expected CPT[2] dec_pkts=0, got %lu\n",
 		       q0_delta);
 		ret = -1;
 		goto out;
 	}
 
-	printf("PCP QSEL Test: PASS\n");
+	app_info("PCP QSEL Test: PASS\n");
 
 out:
-	destroy_pcp_qsel_flow(portid);
+	destroy_qsel_flow(portid, &pcp_qsel_flow[portid]);
 	cnxk_sa_index_free(portid, RTE_SECURITY_IPSEC_SA_DIR_EGRESS,
 			   out_sa_index, 1);
 	cnxk_sa_index_free(portid, RTE_SECURITY_IPSEC_SA_DIR_INGRESS,
@@ -2479,6 +2502,342 @@ out:
 		rte_pktmbuf_free(tx_pkts);
 	if (rx_pkts)
 		rte_pktmbuf_free(rx_pkts);
+	return ret;
+}
+
+#define IP_TOS_OFFSET 15
+
+static void
+set_ip_dscp(struct ipsec_test_packet *pkt, uint8_t dscp)
+{
+	pkt->data[IP_TOS_OFFSET] =
+		(pkt->data[IP_TOS_OFFSET] & 0x03) | ((dscp & 0x3f) << 2);
+}
+
+static int
+ut_ipsec_dscp_qsel_test(void)
+{
+	struct rte_security_session *out_ses = NULL, *in_ses = NULL;
+	struct rte_pmd_cnxk_cpt_q_stats stats_q0_before, stats_q1_before;
+	struct rte_pmd_cnxk_cpt_q_stats stats_q0_after, stats_q1_after;
+	uint32_t out_sa_index = 0, in_sa_index = 0;
+	struct rte_security_session_conf conf = {0};
+	struct rte_security_ctx *sec_ctx = NULL;
+	uint16_t lcore_id = rte_lcore_id();
+	struct ipsec_session_data sa_data;
+	struct ipsec_test_packet dscp_pkt;
+	uint16_t sa_hi = 0, sa_lo = 0;
+	unsigned int portid, nb_rx, j;
+	struct rte_mbuf *tx_pkts = NULL;
+	struct rte_mbuf *rx_pkts = NULL;
+	uint64_t q0_delta, q1_delta;
+	uint32_t spi, sa_index;
+	unsigned int nb_sent;
+	int ret = 0;
+
+	portid = lcore_cfg[lcore_id].portid;
+	sec_ctx = (struct rte_security_ctx *)rte_eth_dev_get_sec_ctx(portid);
+
+	out_sa_index =
+		cnxk_sa_index_alloc(portid, RTE_SECURITY_IPSEC_SA_DIR_EGRESS, 1);
+	in_sa_index =
+		cnxk_sa_index_alloc(portid, RTE_SECURITY_IPSEC_SA_DIR_INGRESS, 1);
+	sa_index = in_sa_index;
+	spi = (0x1 << 28 | in_sa_index);
+	sa_hi = (spi >> 16) & 0xffff;
+	sa_lo = 0x0;
+
+	app_info("DSCP QSEL: out_sa_index=%u in_sa_index=%u spi=0x%x\n",
+	       out_sa_index, in_sa_index, spi);
+
+	memcpy(&sa_data, sess_conf, sizeof(sa_data));
+	sa_data.ipsec_xform.spi = out_sa_index;
+	sa_data.ipsec_xform.tunnel.ipv4.dscp = 10;
+	ret = create_inline_ipsec_session(&sa_data, portid, &out_ses,
+					  RTE_SECURITY_IPSEC_SA_DIR_EGRESS,
+					  RTE_SECURITY_IPSEC_TUNNEL_IPV4);
+	if (ret) {
+		app_err("Failed to create outbound session\n");
+		goto out;
+	}
+	app_info("Created Outbound session with sa_index = 0x%x\n",
+	       sa_data.ipsec_xform.spi);
+
+	sa_data.ipsec_xform.spi = spi;
+	sa_data.ipsec_xform.direction = RTE_SECURITY_IPSEC_SA_DIR_EGRESS;
+	conf.action_type = RTE_SECURITY_ACTION_TYPE_INLINE_PROTOCOL;
+	conf.protocol = RTE_SECURITY_PROTOCOL_IPSEC;
+	memcpy(&conf.ipsec, &sa_data.ipsec_xform,
+	       sizeof(struct rte_security_ipsec_xform));
+	conf.crypto_xform = &sa_data.xform.aead;
+	ret = rte_security_session_update(sec_ctx, out_ses, &conf);
+	if (ret) {
+		app_err("Session update failed outbound\n");
+		goto out;
+	}
+	app_info("Updated Outbound session with SPI = 0x%x\n", spi);
+
+	memcpy(&sa_data, sess_conf, sizeof(sa_data));
+	sa_data.ipsec_xform.spi = sa_index;
+	sa_data.ipsec_xform.options.stats = 1;
+	ret = create_inline_ipsec_session(&sa_data, portid, &in_ses,
+					  RTE_SECURITY_IPSEC_SA_DIR_INGRESS,
+					  RTE_SECURITY_IPSEC_TUNNEL_IPV4);
+	if (ret) {
+		app_err("Failed to create inbound session\n");
+		goto out;
+	}
+	app_info("Created Inbound session with sa_index = 0x%x\n",
+	       sa_data.ipsec_xform.spi);
+
+	sa_data.ipsec_xform.spi = spi;
+	sa_data.ipsec_xform.direction = RTE_SECURITY_IPSEC_SA_DIR_INGRESS;
+	memset(&conf, 0, sizeof(conf));
+	conf.action_type = RTE_SECURITY_ACTION_TYPE_INLINE_PROTOCOL;
+	conf.protocol = RTE_SECURITY_PROTOCOL_IPSEC;
+	memcpy(&conf.ipsec, &sa_data.ipsec_xform,
+	       sizeof(struct rte_security_ipsec_xform));
+	conf.crypto_xform = &sa_data.xform.aead;
+	conf.userdata = (void *)(uint64_t)1;
+	ret = rte_security_session_update(sec_ctx, in_ses, &conf);
+	if (ret) {
+		app_err("Session update failed inbound\n");
+		goto out;
+	}
+	app_info("Updated Inbound session with SPI = 0x%x\n", spi);
+
+	/* DSCP 0-31 -> CPTQ 2, DSCP 32-63 -> CPTQ 3 (avoid default CPT[1]) */
+	{
+		uint64_t dscp_map[4] = {
+			0x2222222222222222ULL,
+			0x2222222222222222ULL,
+			0x3333333333333333ULL,
+			0x3333333333333333ULL,
+		};
+
+		ret = rte_pmd_cnxk_nix_inl_ipsec_dscp_cfg(portid, dscp_map);
+		if (ret) {
+			app_err("Failed to configure DSCP-to-CPTQ mapping: %d\n",
+			       ret);
+			goto out;
+		}
+		app_info("DSCP-to-CPTQ mapping configured\n");
+	}
+
+	ret = create_qsel_flow(portid, spi, sa_lo, sa_hi,
+			       RTE_PMD_CNXK_SEC_IPSEC_QSEL_OUTER_DSCP_MAP0);
+	if (ret) {
+		app_err("DSCP qsel flow creation failed\n");
+		goto out;
+	}
+	app_info("DSCP qsel flow created successfully\n");
+
+	/* DSCP=10 -> dscp_map[0] nibble 10 = 2 -> expect CPT queue 2 */
+	memcpy(&dscp_pkt, &pkt_ipv4_plain, sizeof(dscp_pkt));
+	set_ip_dscp(&dscp_pkt, 10);
+
+	ret = init_traffic(mbufpool[portid], &tx_pkts, &dscp_pkt);
+	if (ret) {
+		app_err("Failed to init traffic for DSCP=10\n");
+		goto out;
+	}
+
+	rte_security_set_pkt_metadata(sec_ctx, out_ses, tx_pkts, NULL);
+	tx_pkts->ol_flags |= RTE_MBUF_F_TX_SEC_OFFLOAD;
+	tx_pkts->l2_len = RTE_ETHER_HDR_LEN;
+
+	rte_pmd_cnxk_cpt_q_stats_get(portid,
+		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q0_before, 2);
+	rte_pmd_cnxk_cpt_q_stats_get(portid,
+		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q1_before, 3);
+
+	nb_sent = rte_eth_tx_burst(portid, 0, &tx_pkts, 1);
+	app_info("Sent %u pkts (DSCP=10)\n", nb_sent);
+	if (nb_sent != 1) {
+		app_err("Failed to tx DSCP=10 pkt\n");
+		ret = -1;
+		goto out;
+	}
+	tx_pkts = NULL;
+
+	rte_delay_ms(200);
+	nb_rx = 0;
+	for (j = 0; j < 10 && nb_rx < 1; j++) {
+		nb_rx += rte_eth_rx_burst(portid, 0, &rx_pkts, 1);
+		rte_delay_ms(100);
+	}
+	app_info("Recv %u pkts (DSCP=10)\n", nb_rx);
+
+	rte_pmd_cnxk_cpt_q_stats_get(portid,
+		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q0_after, 2);
+	rte_pmd_cnxk_cpt_q_stats_get(portid,
+		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q1_after, 3);
+
+	q0_delta = stats_q0_after.dec_pkts - stats_q0_before.dec_pkts;
+	q1_delta = stats_q1_after.dec_pkts - stats_q1_before.dec_pkts;
+
+	app_info("DSCP=10: CPT[2] dec_pkts delta=%lu, CPT[3] dec_pkts delta=%lu, "
+	       "rx=%u\n", q0_delta, q1_delta, nb_rx);
+
+	if (nb_rx < 1) {
+		app_err("DSCP=10: No packets received\n");
+		ret = -1;
+		goto out;
+	}
+
+	if (q0_delta != 1) {
+		app_err("DSCP=10: Expected CPT[2] dec_pkts=1, got %lu\n",
+		       q0_delta);
+		ret = -1;
+		goto out;
+	}
+	if (q1_delta != 0) {
+		app_err("DSCP=10: Expected CPT[3] dec_pkts=0, got %lu\n",
+		       q1_delta);
+		ret = -1;
+		goto out;
+	}
+
+	rte_pktmbuf_free(rx_pkts);
+	rx_pkts = NULL;
+
+	/* Destroy first session pair and create new ones with DSCP=40 */
+	rte_security_session_destroy(sec_ctx, out_ses);
+	rte_security_session_destroy(sec_ctx, in_ses);
+	out_ses = NULL;
+	in_ses = NULL;
+
+	memcpy(&sa_data, sess_conf, sizeof(sa_data));
+	sa_data.ipsec_xform.spi = out_sa_index;
+	sa_data.ipsec_xform.tunnel.ipv4.dscp = 40;
+	ret = create_inline_ipsec_session(&sa_data, portid, &out_ses,
+					  RTE_SECURITY_IPSEC_SA_DIR_EGRESS,
+					  RTE_SECURITY_IPSEC_TUNNEL_IPV4);
+	if (ret) {
+		app_err("Failed to create outbound session (DSCP=40)\n");
+		goto out;
+	}
+
+	sa_data.ipsec_xform.spi = spi;
+	sa_data.ipsec_xform.direction = RTE_SECURITY_IPSEC_SA_DIR_EGRESS;
+	memset(&conf, 0, sizeof(conf));
+	conf.action_type = RTE_SECURITY_ACTION_TYPE_INLINE_PROTOCOL;
+	conf.protocol = RTE_SECURITY_PROTOCOL_IPSEC;
+	memcpy(&conf.ipsec, &sa_data.ipsec_xform,
+	       sizeof(struct rte_security_ipsec_xform));
+	conf.crypto_xform = &sa_data.xform.aead;
+	ret = rte_security_session_update(sec_ctx, out_ses, &conf);
+	if (ret) {
+		app_err("Session update failed outbound (DSCP=40)\n");
+		goto out;
+	}
+
+	memcpy(&sa_data, sess_conf, sizeof(sa_data));
+	sa_data.ipsec_xform.spi = sa_index;
+	sa_data.ipsec_xform.options.stats = 1;
+	ret = create_inline_ipsec_session(&sa_data, portid, &in_ses,
+					  RTE_SECURITY_IPSEC_SA_DIR_INGRESS,
+					  RTE_SECURITY_IPSEC_TUNNEL_IPV4);
+	if (ret) {
+		app_err("Failed to create inbound session (DSCP=40)\n");
+		goto out;
+	}
+
+	sa_data.ipsec_xform.spi = spi;
+	sa_data.ipsec_xform.direction = RTE_SECURITY_IPSEC_SA_DIR_INGRESS;
+	memset(&conf, 0, sizeof(conf));
+	conf.action_type = RTE_SECURITY_ACTION_TYPE_INLINE_PROTOCOL;
+	conf.protocol = RTE_SECURITY_PROTOCOL_IPSEC;
+	memcpy(&conf.ipsec, &sa_data.ipsec_xform,
+	       sizeof(struct rte_security_ipsec_xform));
+	conf.crypto_xform = &sa_data.xform.aead;
+	conf.userdata = (void *)(uint64_t)1;
+	ret = rte_security_session_update(sec_ctx, in_ses, &conf);
+	if (ret) {
+		app_err("Session update failed inbound (DSCP=40)\n");
+		goto out;
+	}
+
+	/* DSCP=40 -> dscp_map[2] nibble 8 = 3 -> expect CPT queue 3 */
+	memcpy(&dscp_pkt, &pkt_ipv4_plain, sizeof(dscp_pkt));
+	set_ip_dscp(&dscp_pkt, 40);
+
+	ret = init_traffic(mbufpool[portid], &tx_pkts, &dscp_pkt);
+	if (ret) {
+		app_err("Failed to init traffic for DSCP=40\n");
+		goto out;
+	}
+
+	rte_security_set_pkt_metadata(sec_ctx, out_ses, tx_pkts, NULL);
+	tx_pkts->ol_flags |= RTE_MBUF_F_TX_SEC_OFFLOAD;
+	tx_pkts->l2_len = RTE_ETHER_HDR_LEN;
+
+	rte_pmd_cnxk_cpt_q_stats_get(portid,
+		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q0_before, 2);
+	rte_pmd_cnxk_cpt_q_stats_get(portid,
+		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q1_before, 3);
+
+	nb_sent = rte_eth_tx_burst(portid, 0, &tx_pkts, 1);
+	app_info("Sent %u pkts (DSCP=40)\n", nb_sent);
+	if (nb_sent != 1) {
+		app_err("Failed to tx DSCP=40 pkt\n");
+		ret = -1;
+		goto out;
+	}
+	tx_pkts = NULL;
+
+	rte_delay_ms(200);
+	nb_rx = 0;
+	for (j = 0; j < 10 && nb_rx < 1; j++) {
+		nb_rx += rte_eth_rx_burst(portid, 0, &rx_pkts, 1);
+		rte_delay_ms(100);
+	}
+	app_info("Recv %u pkts (DSCP=40)\n", nb_rx);
+
+	rte_pmd_cnxk_cpt_q_stats_get(portid,
+		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q0_after, 2);
+	rte_pmd_cnxk_cpt_q_stats_get(portid,
+		RTE_PMD_CNXK_CPT_Q_STATS_INL_DEV, &stats_q1_after, 3);
+
+	q0_delta = stats_q0_after.dec_pkts - stats_q0_before.dec_pkts;
+	q1_delta = stats_q1_after.dec_pkts - stats_q1_before.dec_pkts;
+
+	app_info("DSCP=40: CPT[2] dec_pkts delta=%lu, CPT[3] dec_pkts delta=%lu, "
+	       "rx=%u\n", q0_delta, q1_delta, nb_rx);
+
+	if (nb_rx < 1) {
+		app_err("DSCP=40: No packets received\n");
+		ret = -1;
+		goto out;
+	}
+
+	if (q1_delta != 1) {
+		app_err("DSCP=40: Expected CPT[3] dec_pkts=1, got %lu\n",
+		       q1_delta);
+		ret = -1;
+		goto out;
+	}
+	if (q0_delta != 0) {
+		app_err("DSCP=40: Expected CPT[2] dec_pkts=0, got %lu\n",
+		       q0_delta);
+		ret = -1;
+		goto out;
+	}
+
+	app_info("DSCP QSEL Test: PASS\n");
+
+out:
+	destroy_qsel_flow(portid, &dscp_qsel_flow[portid]);
+	cnxk_sa_index_free(portid, RTE_SECURITY_IPSEC_SA_DIR_EGRESS,
+			   out_sa_index, 1);
+	cnxk_sa_index_free(portid, RTE_SECURITY_IPSEC_SA_DIR_INGRESS,
+			   in_sa_index, 1);
+	if (out_ses)
+		rte_security_session_destroy(sec_ctx, out_ses);
+	if (in_ses)
+		rte_security_session_destroy(sec_ctx, in_ses);
+	rte_pktmbuf_free(tx_pkts);
+	rte_pktmbuf_free(rx_pkts);
 	return ret;
 }
 
@@ -3164,10 +3523,17 @@ main(int argc, char **argv)
 		app_info("Test %s: %s\n", ipsec_test_mode_to_string(testmode), rc ? "FAILED" : "PASS");
 		break;
 	case IPSEC_RTE_PMD_CNXK_PCP_QSEL_TEST:
-		printf("Model: %s Test Mode: %s\n", rte_pmd_cnxk_model_str_get(),
+		app_info("Model: %s Test Mode: %s\n", rte_pmd_cnxk_model_str_get(),
 		       ipsec_test_mode_to_string(testmode));
 		rc = ut_ipsec_pcp_qsel_test();
-		printf("Test %s: %s\n", ipsec_test_mode_to_string(testmode),
+		app_info("Test %s: %s\n", ipsec_test_mode_to_string(testmode),
+		       rc ? "FAILED" : "PASS");
+		break;
+	case IPSEC_RTE_PMD_CNXK_DSCP_QSEL_TEST:
+		app_info("Model: %s Test Mode: %s\n", rte_pmd_cnxk_model_str_get(),
+		       ipsec_test_mode_to_string(testmode));
+		rc = ut_ipsec_dscp_qsel_test();
+		app_info("Test %s: %s\n", ipsec_test_mode_to_string(testmode),
 		       rc ? "FAILED" : "PASS");
 		break;
 	}

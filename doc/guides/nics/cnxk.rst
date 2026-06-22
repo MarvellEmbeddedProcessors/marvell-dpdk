@@ -758,6 +758,34 @@ Runtime Config Options for inline device
    With the above configuration, driver would enable CPT completion queue
    for inline IPsec event delivery instead of using the err-ring poll thread.
 
+- ``Number of inline inbound CPT queues`` (default ``1``)
+
+   Number of dedicated CPT queues for inbound inline IPsec can be set
+   by ``nb_inl_inb_qs`` devargs parameter on the inline device.
+   This option is supported on OCTEON CN20K SoC family.
+
+   For example::
+
+      -a 0002:1d:00.0,nb_inl_inb_qs=4
+
+   With the above configuration, driver would allocate four inline inbound
+   CPT queues, each with a distinct BPID.
+
+- ``CPT credit backpressure threshold for inline IPsec`` (default ``0``)
+
+   Credit-based backpressure threshold for inbound inline IPsec CPT queues
+   can be set by ``inl_cpt_credit_th`` devargs parameter on the inline device
+   as a percentage (``1`` to ``100``) of the CPT credit pool.
+   This option is supported on OCTEON CN20K SoC family.
+
+   For example::
+
+      -a 0002:1d:00.0,inl_cpt_credit_th=50
+
+   With the above configuration, NIX asserts backpressure on the queue's BPID
+   when the available CPT credits drop below 50% of the pool. When unset
+   (``0``), credit-based backpressure is disabled.
+
 Port Representors
 -----------------
 

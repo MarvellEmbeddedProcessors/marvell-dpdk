@@ -23,6 +23,7 @@
 #define CNXK_NIX_CUSTOM_INB_SA	      "custom_inb_sa"
 #define CNXK_NIX_NB_INL_INB_QS        "nb_inl_inb_qs"
 #define CNXK_NIX_INL_CPT_CQ_ENABLE    "cpt_cq_enable"
+#define CNXK_NIX_INL_CPT_CREDIT_TH    "inl_cpt_credit_th"
 
 /* Default soft expiry poll freq in usec */
 #define CNXK_NIX_SOFT_EXP_POLL_FREQ_DFLT 100
@@ -783,6 +784,7 @@ nix_inl_parse_devargs(struct rte_devargs *devargs,
 	uint8_t rx_inj_ena = 0;
 	uint8_t selftest = 0;
 	uint8_t cpt_cq_enable = roc_feature_nix_has_cpt_cq_support() ? 1 : 0;
+	uint32_t inl_cpt_credit_th = 0;
 
 	memset(&cpt_channel, 0, sizeof(cpt_channel));
 
@@ -812,6 +814,7 @@ nix_inl_parse_devargs(struct rte_devargs *devargs,
 	rte_kvargs_process(kvlist, CNXK_NIX_CUSTOM_INB_SA, &parse_val_u8, &custom_inb_sa);
 	rte_kvargs_process(kvlist, CNXK_NIX_NB_INL_INB_QS, &parse_val_u32, &nb_inl_inb_qs);
 	rte_kvargs_process(kvlist, CNXK_NIX_INL_CPT_CQ_ENABLE, &parse_val_u8, &cpt_cq_enable);
+	rte_kvargs_process(kvlist, CNXK_NIX_INL_CPT_CREDIT_TH, &parse_val_u32, &inl_cpt_credit_th);
 	rte_kvargs_free(kvlist);
 
 null_devargs:
@@ -836,6 +839,11 @@ null_devargs:
 		inl_dev->nb_inb_cptlfs = nb_inl_inb_qs;
 	}
 	inl_dev->custom_inb_sa = custom_inb_sa;
+	if (inl_cpt_credit_th > 100) {
+		plt_err("inl_cpt_credit_th=%u must be a percentage (1-100)", inl_cpt_credit_th);
+		goto exit;
+	}
+	inl_dev->inb_cpt_credit_th = inl_cpt_credit_th;
 	return 0;
 exit:
 	return -EINVAL;
@@ -965,4 +973,5 @@ RTE_PMD_REGISTER_PARAM_STRING(cnxk_nix_inl,
 			      CNXK_MAX_IPSEC_RULES "=<1-4095>"
 			      CNXK_NIX_INL_RX_INJ_ENABLE "=1"
 			      CNXK_NIX_CUSTOM_INB_SA "=1"
-			      CNXK_NIX_NB_INL_INB_QS "=[0-16]");
+			      CNXK_NIX_NB_INL_INB_QS "=[0-16]"
+			      CNXK_NIX_INL_CPT_CREDIT_TH "=<1-100>");

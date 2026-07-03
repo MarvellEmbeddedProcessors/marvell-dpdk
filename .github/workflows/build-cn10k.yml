@@ -16,8 +16,6 @@ permissions:
 
 env:
   COMPONENT: dpdk
-  TVM_REPO_URL: "https://github.com/MarvellEmbeddedProcessors/tvm.git"
-  TVM_REF: "master"
 
 jobs:
   ubuntu-cn10k-build:
@@ -64,47 +62,6 @@ jobs:
             echo "COMPONENT=${COMPONENT}"
           } >> artifacts/env
 
-      - name: Build TVM runtime
-        id: tvm
-        run: |
-          set -xe
-          export DEBIAN_FRONTEND=noninteractive
-          sudo apt-get update -q -y
-          sudo apt-get install -y build-essential cmake g++-14 gcc-14 git
-          export CC=gcc-14 CXX=g++-14
-          TVM_PREFIX="${PWD}/tvm-prefix"
-          mkdir -p "$TVM_PREFIX"
-          git clone --recurse-submodules --depth=1 -b "${TVM_REF}" "${TVM_REPO_URL}" tvm-src
-
-          # dlpack (TVM submodule)
-          cmake -S tvm-src/3rdparty/dlpack -B tvm-build/dlpack \
-            -DCMAKE_INSTALL_PREFIX="$TVM_PREFIX" -DBUILD_MOCK=OFF \
-            -DCMAKE_C_FLAGS="-w" -DCMAKE_CXX_FLAGS="-w"
-          cmake --build tvm-build/dlpack -j"$(nproc)" && cmake --install tvm-build/dlpack
-
-          # dmlc-core (TVM submodule)
-          cmake -S tvm-src/3rdparty/dmlc-core -B tvm-build/dmlc-core \
-            -DCMAKE_INSTALL_PREFIX="$TVM_PREFIX" -DUSE_OPENMP=OFF \
-            -DCMAKE_C_FLAGS="-w" -DCMAKE_CXX_FLAGS="-w"
-          cmake --build tvm-build/dmlc-core -j"$(nproc)" && cmake --install tvm-build/dmlc-core
-
-          # TVM runtime.
-          cmake -S tvm-src -B tvm-build/tvm \
-            -DCMAKE_INSTALL_PREFIX="$TVM_PREFIX" \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_FLAGS="-w -Wno-incompatible-pointer-types" \
-            -DCMAKE_CXX_FLAGS="-w" \
-            -DUSE_MRVL=ON -DUSE_RPC=ON -DUSE_CPP_RPC=ON \
-            -DUSE_GRAPH_EXECUTOR=ON -DUSE_PROFILER=ON \
-            -DUSE_RANDOM=ON -DUSE_SORT=ON \
-            -DUSE_MICRO=ON -DUSE_MICRO_STANDALONE_RUNTIME=ON \
-            -DUSE_LLVM=OFF -DUSE_LIBBACKTRACE=AUTO \
-            -DBUILD_STATIC_RUNTIME=OFF -DUSE_ALTERNATIVE_LINKER=OFF \
-            -DSUMMARIZE=ON
-          cmake --build tvm-build/tvm -j"$(nproc)" && cmake --install tvm-build/tvm
-
-          echo "TVM_PREFIX=$TVM_PREFIX" >> $GITHUB_ENV
-
       - name: Build DPDK and generate package
         id: build
         run: |
@@ -118,15 +75,12 @@ jobs:
           sudo apt-get install -y libfdt-dev libjansson-dev
           sudo apt-get install -y libssl-dev ninja-build pkg-config python3-pip
           sudo apt-get install -y python3-pyelftools python3-setuptools python3-wheel zlib1g-dev meson gcc
-          sudo apt-get install -y gcc-14 g++-14 cmake
+          sudo apt-get install -y gcc-14
           export CC='ccache gcc-14'
           echo "cache_dir = ~/.ccache" > ~/.ccache/ccache.conf
           ccache -p
-          export PKG_CONFIG_PATH="${TVM_PREFIX}/lib/pkgconfig"
-          export CMAKE_PREFIX_PATH="${TVM_PREFIX}/lib/cmake/tvm:${TVM_PREFIX}/lib/cmake/dlpack:${TVM_PREFIX}/lib/cmake/dmlc"
           meson build -Dexamples=all -Denable_drivers="*/cnxk,raw/cnxk_emdev,net/ring,net/tap" -Dplatform=cn10k -Denable_iova_as_pa=false --prefix="${PWD}/install"
           ninja install -C build
-          cp -av "${TVM_PREFIX}/lib/"libtvm_runtime.so* "${PWD}/install/lib/aarch64-linux-gnu/"
           sed -i "s/prefix=.*/prefix=/g" "${PWD}/install/lib/aarch64-linux-gnu/pkgconfig/libdpdk.pc"
           sed -i "s/prefix=.*/prefix=/g" "${PWD}/install/lib/aarch64-linux-gnu/pkgconfig/libdpdk-libs.pc"
           PKG_VERSION_NAME=`cat VERSION | awk -F'.' '{print $1"."$2}'`
@@ -139,7 +93,7 @@ jobs:
           echo 'Source: dpdk' > debian/control
           echo 'Package: dpdk-'$PKG_VERSION_NAME'-cn10k'$PKG_POSTFIX >> DEBIAN/control
           echo 'Version: '$MRVL_PKG_VERSION >> DEBIAN/control
-          echo "Depends: `dpkg-shlibdeps -l"lib/aarch64-linux-gnu" -O bin/dpdk-testpmd | awk -F'Depends=' '{print $2}'`, libbsd-dev, libarchive-dev, libelf-dev, libjansson-dev, libacl1-dev, nettle-dev, liblzma-dev, libzstd-dev, liblz4-dev, libbz2-dev, libxml2-dev, libfdt-dev" >> DEBIAN/control
+          echo "Depends: `dpkg-shlibdeps -O bin/dpdk-testpmd | awk -F'Depends=' '{print $2}'`, libbsd-dev, libarchive-dev, libelf-dev, libjansson-dev, libacl1-dev, nettle-dev, liblzma-dev, libzstd-dev, liblz4-dev, libbz2-dev, libxml2-dev, libfdt-dev" >> DEBIAN/control
           echo "Maintainer: Jerin Jacob (jerinj@marvell.com)" >> DEBIAN/control
           echo "Architecture: arm64" >> DEBIAN/control
           echo "Homepage: https://www.dpdk.org/" >> DEBIAN/control

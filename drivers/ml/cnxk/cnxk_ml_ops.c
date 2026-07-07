@@ -1273,11 +1273,11 @@ cnxk_ml_model_load(struct rte_ml_dev *dev, struct rte_ml_model_params *params, u
 		if (model->type == ML_CNXK_MODEL_TYPE_GLOW)
 			cn10k_ml_model_unload(cnxk_mldev, model);
 #ifdef RTE_MLDEV_CNXK_ENABLE_TVMRT
-		else {
+		else
 			tvmrt_ml_model_unload(cnxk_mldev, model);
-			return -ENOMEM;
-		}
 #endif
+		ret = -ENOMEM;
+		goto error;
 	}
 	plt_spinlock_init(&model->lock);
 	model->state = ML_CNXK_MODEL_STATE_LOADED;
@@ -1288,6 +1288,7 @@ cnxk_ml_model_load(struct rte_ml_dev *dev, struct rte_ml_model_params *params, u
 	return 0;
 
 error:
+	dev->data->models[lcl_model_id] = NULL;
 	rte_memzone_free(mz);
 
 	return ret;

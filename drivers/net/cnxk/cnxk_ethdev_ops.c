@@ -1060,7 +1060,7 @@ cnxk_nix_eth_dev_priv_dump(struct rte_eth_dev *eth_dev, FILE *file)
 {
 	struct cnxk_eth_dev *dev = cnxk_eth_pmd_priv(eth_dev);
 	struct roc_nix *roc_nix = &dev->nix;
-	int i;
+	int i, rc;
 
 	roc_nix_dump(roc_nix, file);
 
@@ -1073,7 +1073,9 @@ cnxk_nix_eth_dev_priv_dump(struct rte_eth_dev *eth_dev, FILE *file)
 	for (i = 0; i < eth_dev->data->nb_tx_queues; i++)
 		roc_nix_sq_dump(&dev->sqs[i], file);
 
-	roc_nix_queues_ctx_dump(roc_nix, file);
+	rc = roc_nix_queues_ctx_dump(roc_nix, file);
+	if (rc)
+		plt_err("Failed to dump nix queues context, rc=%d", rc);
 
 	roc_nix_tm_dump(roc_nix, file);
 

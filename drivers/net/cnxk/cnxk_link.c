@@ -4,71 +4,92 @@
 
 #include "cnxk_ethdev.h"
 
-const enum roc_nix_link_mode mac_to_ethtool_mode[CGX_LMAC_TYPE_MAX][2] = {
-	[CGX_LMAC_TYPE_SGMII][ROC_NIX_LINK_DUPLEX_HALF] = ROC_NIX_LINK_MODE_1000BASET_HD,
-	[CGX_LMAC_TYPE_SGMII][ROC_NIX_LINK_DUPLEX_FULL] = ROC_NIX_LINK_MODE_1000BASET_FD,
-	[CGX_LMAC_TYPE_10G_R][ROC_NIX_LINK_DUPLEX_FULL] = ROC_NIX_LINK_MODE_10000BASESR_FD,
-	[CGX_LMAC_TYPE_QSGMII][ROC_NIX_LINK_DUPLEX_HALF] = ROC_NIX_LINK_MODE_1000BASET_HD,
-	[CGX_LMAC_TYPE_QSGMII][ROC_NIX_LINK_DUPLEX_FULL] = ROC_NIX_LINK_MODE_10000BASET_FD,
-};
-
-const enum roc_nix_link_mode rte_to_ethtool_mode[ROC_NIX_LINK_SPEED_MAX] = {
-	0,
-	ROC_NIX_LINK_MODE_10BASET_HD,
-	ROC_NIX_LINK_MODE_10BASET_FD,
-	ROC_NIX_LINK_MODE_100BASET_HD,
-	ROC_NIX_LINK_MODE_100BASET_FD,
-	ROC_NIX_LINK_MODE_1000BASET_FD,
-	ROC_NIX_LINK_MODE_2500BASEX_FD,
-	0,
-	ROC_NIX_LINK_MODE_10000BASESR_FD,
-	0,
-	ROC_NIX_LINK_MODE_25000BASESR_FD,
-	ROC_NIX_LINK_MODE_40000BASELR4_FD,
-	ROC_NIX_LINK_MODE_50000BASELR_ER_FR_FD,
-	0,
-	ROC_NIX_LINK_MODE_100000BASELR4_ER4_FD,
-	0,
-	0,
+/* For each requested speed, 'adv' is the link mode advertised to the firmware
+ * and 'cgx_mode' is the bit checked against the firmware supported modes bitmap.
+ * A speed may have several variants ordered as CR, KR and optical, and the first
+ * variant that the firmware reports as supported is the one that gets advertised.
+ */
+static const struct {
+	uint32_t rte_speed;
+	uint64_t adv;
+	uint8_t cgx_mode;
+} nix_link_modes[] = {
+	{RTE_ETH_LINK_SPEED_10M, ROC_NIX_LINK_MODE_10BASET_FD, ETH_MODE_SGMII_10M_BIT},
+	{RTE_ETH_LINK_SPEED_100M, ROC_NIX_LINK_MODE_100BASET_FD, ETH_MODE_SGMII_100M_BIT},
+	{RTE_ETH_LINK_SPEED_1G, ROC_NIX_LINK_MODE_1000BASEX_FD, CGX_MODE_1000_BASEX},
+	{RTE_ETH_LINK_SPEED_1G, ROC_NIX_LINK_MODE_1000BASEKX_FD, CGX_MODE_SFI_1G_BIT},
+	{RTE_ETH_LINK_SPEED_1G, ROC_NIX_LINK_MODE_1000BASET_FD, CGX_MODE_SGMII},
+	{RTE_ETH_LINK_SPEED_2_5G, ROC_NIX_LINK_MODE_2500BASEX_FD, ETH_MODE_2500_BASEX_BIT},
+	{RTE_ETH_LINK_SPEED_5G, ROC_NIX_LINK_MODE_5000BASET_FD, ETH_MODE_5000_BASEX_BIT},
+	{RTE_ETH_LINK_SPEED_10G, ROC_NIX_LINK_MODE_10000BASESR_FD, CGX_MODE_10G_C2C},
+	{RTE_ETH_LINK_SPEED_10G, ROC_NIX_LINK_MODE_10000BASELR_FD, CGX_MODE_10G_C2M},
+	{RTE_ETH_LINK_SPEED_10G, ROC_NIX_LINK_MODE_10000BASEKR_FD, CGX_MODE_10G_KR},
+	{RTE_ETH_LINK_SPEED_20G, ROC_NIX_LINK_MODE_20000BASEMLD2_FD, CGX_MODE_20G_C2C},
+	{RTE_ETH_LINK_SPEED_25G, ROC_NIX_LINK_MODE_25000BASECR_FD, CGX_MODE_25G_CR},
+	{RTE_ETH_LINK_SPEED_25G, ROC_NIX_LINK_MODE_25000BASECR_FD, CGX_MODE_25GBASE_CR_C_BIT},
+	{RTE_ETH_LINK_SPEED_25G, ROC_NIX_LINK_MODE_25000BASEKR_FD, CGX_MODE_25G_KR},
+	{RTE_ETH_LINK_SPEED_25G, ROC_NIX_LINK_MODE_25000BASEKR_FD, CGX_MODE_25GBASE_KR_C_BIT},
+	{RTE_ETH_LINK_SPEED_25G, ROC_NIX_LINK_MODE_25000BASESR_FD, CGX_MODE_25G_C2C},
+	{RTE_ETH_LINK_SPEED_25G, ROC_NIX_LINK_MODE_25000BASESR_FD, CGX_MODE_25G_C2M},
+	{RTE_ETH_LINK_SPEED_40G, ROC_NIX_LINK_MODE_40000BASECR4_FD, CGX_MODE_40G_CR4},
+	{RTE_ETH_LINK_SPEED_40G, ROC_NIX_LINK_MODE_40000BASEKR4_FD, CGX_MODE_40G_KR4},
+	{RTE_ETH_LINK_SPEED_40G, ROC_NIX_LINK_MODE_40000BASESR4_FD, CGX_MODE_40G_C2C},
+	{RTE_ETH_LINK_SPEED_40G, ROC_NIX_LINK_MODE_40000BASELR4_FD, CGX_MODE_40G_C2M},
+	{RTE_ETH_LINK_SPEED_50G, ROC_NIX_LINK_MODE_50000BASECR2_FD, CGX_MODE_50G_CR},
+	{RTE_ETH_LINK_SPEED_50G, ROC_NIX_LINK_MODE_50000BASEKR2_FD, CGX_MODE_50G_KR},
+	{RTE_ETH_LINK_SPEED_50G, ROC_NIX_LINK_MODE_50000BASESR2_FD, CGX_MODE_50G_C2C},
+	{RTE_ETH_LINK_SPEED_50G, ROC_NIX_LINK_MODE_50000BASEDR_FD, CGX_MODE_50G_C2M},
+	{RTE_ETH_LINK_SPEED_50G, ROC_NIX_LINK_MODE_50000BASECR_FD, CGX_MODE_50GBASE_CR2_C_BIT},
+	{RTE_ETH_LINK_SPEED_50G, ROC_NIX_LINK_MODE_50000BASEKR_FD, CGX_MODE_50GBASE_KR2_C_BIT},
+	{RTE_ETH_LINK_SPEED_50G, ROC_NIX_LINK_MODE_50000BASESR_FD, CGX_MODE_LAUI_2_C2C_BIT},
+	{RTE_ETH_LINK_SPEED_100G, ROC_NIX_LINK_MODE_100000BASECR4_FD, CGX_MODE_100G_CR4},
+	{RTE_ETH_LINK_SPEED_100G, ROC_NIX_LINK_MODE_100000BASEKR4_FD, CGX_MODE_100G_KR4},
+	{RTE_ETH_LINK_SPEED_100G, ROC_NIX_LINK_MODE_100000BASESR4_FD, CGX_MODE_100G_C2C},
+	{RTE_ETH_LINK_SPEED_100G, ROC_NIX_LINK_MODE_100000BASECR2_FD, CGX_MODE_100GBASE_CR2_BIT},
+	{RTE_ETH_LINK_SPEED_100G, ROC_NIX_LINK_MODE_100000BASEKR2_FD, CGX_MODE_100GBASE_KR2_BIT},
+	{RTE_ETH_LINK_SPEED_100G, ROC_NIX_LINK_MODE_100000BASESR2_FD, CGX_MODE_100GAUI_2_C2C_BIT},
 };
 
 static uint64_t
-nix_link_advertising_get(struct cnxk_eth_dev *dev, struct roc_nix_link_info *link_info)
+nix_link_advertising_get(struct cnxk_eth_dev *dev, uint32_t speed_bitmask, bool user_autoneg)
 {
 	struct roc_nix_mac_fwdata fwdata;
-	struct roc_nix_link_info linfo;
 	uint64_t advertise = 0;
-	int bit, rc;
+	uint32_t resolved = 0;
+	uint32_t i;
+	int rc;
 
 	memset(&fwdata, 0, sizeof(fwdata));
 	rc = roc_nix_mac_fwdata_get(&dev->nix, &fwdata);
 	if (rc) {
 		plt_err("Failed to get MAC firmware data");
-		goto exit;
+		return 0;
 	}
 
-	memset(&linfo, 0, sizeof(linfo));
-	rc = roc_nix_mac_link_info_get(&dev->nix, &linfo);
-	if (rc) {
-		plt_err("Failed to get MAC link info");
-		goto exit;
+	/* Reject only when the user explicitly asked for autoneg. A 1G link
+	 * enables autoneg internally, so it must not be blocked here.
+	 */
+	if (user_autoneg && !fwdata.supported_an) {
+		plt_err("Autoneg is not supported");
+		return 0;
 	}
 
-	if (link_info->autoneg) {
-		if (!fwdata.supported_an) {
-			plt_err("Autoneg is not supported");
-			goto exit;
-		} else {
-			for (bit = 0; bit < ROC_NIX_LINK_SPEED_MAX; bit++) {
-				if (link_info->speed_bitmask & BIT_ULL(bit))
-					advertise |= (uint64_t)rte_to_ethtool_mode[bit];
-			}
-			goto exit;
+	for (i = 0; i < RTE_DIM(nix_link_modes); i++) {
+		uint32_t speed = nix_link_modes[i].rte_speed;
+
+		/* Skip speeds the user did not request, and speeds that are
+		 * already resolved to a supported mode so the first variant wins.
+		 */
+		if (!(speed_bitmask & speed) || (resolved & speed))
+			continue;
+
+		/* Advertise this mode only if the firmware supports it */
+		if (fwdata.supported_link_modes & BIT_ULL(nix_link_modes[i].cgx_mode)) {
+			advertise |= nix_link_modes[i].adv;
+			resolved |= speed;
 		}
 	}
 
-	advertise |= (uint64_t)mac_to_ethtool_mode[linfo.lmac_type_id][link_info->full_duplex];
-exit:
 	return advertise;
 }
 
@@ -237,7 +258,9 @@ cnxk_nix_link_info_configure(struct rte_eth_dev *eth_dev)
 	struct roc_nix_link_info link_info = {0};
 	struct roc_nix *nix = &dev->nix;
 	uint32_t speed = link_speeds;
+	bool user_autoneg;
 	bool fixed;
+	int rc;
 
 	plt_info("User passed link configuration: %x", link_speeds);
 
@@ -260,15 +283,26 @@ cnxk_nix_link_info_configure(struct rte_eth_dev *eth_dev)
 	} else {
 		link_info.autoneg = 1;
 	}
+	user_autoneg = !fixed;
 
 	speed >>= 1;
 	link_info.speed = speed_map[rte_bsf32(speed) + 1];
 	link_info.speed_bitmask = link_speeds & ~RTE_ETH_LINK_SPEED_FIXED;
 	link_info.full_duplex = ((link_speeds & RTE_ETH_LINK_SPEED_10M_HD) ||
 				 (link_speeds & RTE_ETH_LINK_SPEED_100M_HD)) ?
-				  ROC_NIX_LINK_DUPLEX_HALF :
-				  ROC_NIX_LINK_DUPLEX_FULL;
-	link_info.advertising = nix_link_advertising_get(dev, &link_info);
+					ROC_NIX_LINK_DUPLEX_HALF :
+					ROC_NIX_LINK_DUPLEX_FULL;
+
+	/* A 1G link requires in-band negotiation with the peer during link bring up,
+	 * so autoneg must be enabled even when the user requested a FIXED speed.
+	 */
+	if ((link_info.speed_bitmask & RTE_ETH_LINK_SPEED_1G) && !link_info.autoneg) {
+		plt_info("Forcing autoneg for 1G");
+		link_info.autoneg = 1;
+	}
+
+	link_info.advertising =
+		nix_link_advertising_get(dev, link_info.speed_bitmask, user_autoneg);
 	if (link_info.advertising == 0) {
 		plt_err("advertising bitmap is not set");
 		return -EINVAL;
@@ -277,8 +311,28 @@ cnxk_nix_link_info_configure(struct rte_eth_dev *eth_dev)
 	plt_info("Following link settings are sent to firmware:");
 	plt_info("Advertised modes: %" PRIX64, link_info.advertising);
 	plt_info("speed: %u", link_info.speed);
-	plt_info("duplex: %s", link_info.full_duplex == ROC_NIX_LINK_DUPLEX_HALF ?
-						"half-duplex" : "full-duplex");
+	plt_info("duplex: %s",
+		 link_info.full_duplex == ROC_NIX_LINK_DUPLEX_HALF ? "half-duplex" : "full-duplex");
 	plt_info("autoneg: %s", link_info.autoneg ? "enabled" : "disabled");
-	return roc_nix_mac_link_info_set(nix, &link_info);
+
+	/* Bring the link down and up around the mode change so that the SerDes
+	 * retrains at the newly requested rate. These toggles are not fatal.
+	 */
+	rc = roc_nix_mac_link_state_set(nix, false);
+	if (rc)
+		plt_warn("Failed to bring link down before reconfigure, rc=%d", rc);
+
+	rc = roc_nix_mac_link_info_set(nix, &link_info);
+	if (rc) {
+		plt_err("Failed to set link mode, rc=%d", rc);
+		/* Try to restore the link after a failed mode change */
+		roc_nix_mac_link_state_set(nix, true);
+		return rc;
+	}
+
+	rc = roc_nix_mac_link_state_set(nix, true);
+	if (rc)
+		plt_warn("Failed to bring link up after reconfigure, rc=%d", rc);
+
+	return 0;
 }

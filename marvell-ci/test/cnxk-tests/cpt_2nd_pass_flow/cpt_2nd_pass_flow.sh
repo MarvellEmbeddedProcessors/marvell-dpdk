@@ -215,8 +215,8 @@ function configure_vm0()
 	ip netns exec vm0 ip link set $LBK1 up
 	ip netns exec vm0 ip link set $LBK1 address $VM0_MAC
 	ip netns exec vm0 ip route add 192.168.$Y.0/24 via 192.168.$X.1
-	ip netns exec vm0 arp -s 192.168.$X.1 $VM0_MAC
-	ip netns exec vm0 arp -s 1.1.$Y.2 $VM0_MAC
+	ip netns exec vm0 ip neigh replace 192.168.$X.1 lladdr $VM0_MAC dev $LBK1 nud permanent
+	ip netns exec vm0 ip neigh replace 1.1.$Y.2 lladdr $VM0_MAC dev $LBK1 nud permanent
 	ip netns exec vm0 ip xfrm state add src 1.1.$Y.1 dst 1.1.$Y.2 proto esp spi $Y reqid 0 mode tunnel ${CASE[$Y]}
 	ip netns exec vm0 ip xfrm state add src 1.1.$Y.2 dst 1.1.$Y.1 proto esp spi $X reqid 0 mode tunnel ${CASE[$Y]}
 	                                      #  inner ip                                  tunnel endpoint ip
@@ -232,7 +232,7 @@ function configure_vm2()
 	ip netns exec vm2 ip link set lo up
 	ip netns exec vm2 ip link set $LBK3 address $VM2_MAC
 	ip netns exec vm2 ip route add 192.168.$X.0/24 via 192.168.$Y.1
-	ip netns exec vm2 arp -s 192.168.$Y.1 $VM2_MAC
+	ip netns exec vm2 ip neigh replace 192.168.$Y.1 lladdr $VM2_MAC dev $LBK3 nud permanent
 }
 
 # Configure interfaces
@@ -265,15 +265,15 @@ function interfaces_cleanup()
 	echo -e "\ninterfaces_cleanup"
 	ip netns exec vm0 ip xfrm state deleteall
 	ip netns exec vm0 ip xfrm policy deleteall
-	ip netns exec vm0 arp -d 192.168.$X.1
-	ip netns exec vm0 arp -d 1.1.$Y.2
+	ip netns exec vm0 ip neigh del 192.168.$X.1 dev $LBK1
+	ip netns exec vm0 ip neigh del 1.1.$Y.2 dev $LBK1
 	ip netns exec vm0 ip route del 192.168.$Y.0/24
 	ip netns exec vm0 ip addr del 192.168.$X.2/24 dev $LBK1
 	ip netns exec vm0 ip addr del 1.1.$Y.1/24 dev $LBK1:1
 	ip netns exec vm0 ip link set $LBK1 down
 
 	ip netns exec vm2 ip route del 192.168.$X.0/24
-	ip netns exec vm2 arp -d 192.168.$Y.1
+	ip netns exec vm2 ip neigh del 192.168.$Y.1 dev $LBK3
 	ip netns exec vm2 ip addr del 192.168.$Y.2/24 dev $LBK3
 	ip netns exec vm2 ip link set $LBK3 down
 	ip netns exec vm2 ip link set lo down

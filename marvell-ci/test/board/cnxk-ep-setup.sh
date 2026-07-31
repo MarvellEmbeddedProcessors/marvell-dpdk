@@ -213,7 +213,7 @@ setup_board()
 
 	sdp_vf1=$(lspci -d :a0f7 | head -1 | awk -e '{ print $1 }')
 	sdp_vf1_if=$(ls /sys/bus/pci/devices/${sdp_vf1}/net)
-	ifconfig $sdp_vf1_if up
+	ip link set $sdp_vf1_if up
 	part=$(get_part)
 	if [[ "0x$part" == "$part_105" ]]; then
 		cfg="cnf105xx.cfg"

@@ -51,7 +51,7 @@ EOF
 	st=1
 	while [[ $i -ne 10 && $st -ne 0 ]]; do
 		sleep 1
-		ifconfig ${SGW_WAIT_DEV}
+		ip link show ${SGW_WAIT_DEV}
 		st=$?
 		let i++
 	done

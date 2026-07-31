@@ -45,8 +45,8 @@ do
 	secgw_start
 
 	# setup interfaces
-	ifconfig dtap0 up
-	ifconfig dtap1 up
+	ip link set dtap0 up
+	ip link set dtap1 up
 
 	# run the test
 	echo "Running test case: ${testcase}"

@@ -155,15 +155,17 @@ to be set for ${SGW_CRYPTO_FLBK} fallback test"
 set_local_mtu()
 {
 	mtu=$1
-	ifconfig ${LOCAL_IFACE} mtu ${mtu}
+	ip link set ${LOCAL_IFACE} mtu ${mtu}
 	sysctl -w net.ipv6.conf.${LOCAL_IFACE}.mtu=${mtu}
 }
 
 # configure local host/ifaces
 config_local_iface()
 {
-	ifconfig ${LOCAL_IFACE} ${LOCAL_IPV4}/24 up
-	ifconfig ${LOCAL_IFACE}
+	ip addr flush dev ${LOCAL_IFACE}
+	ip addr add ${LOCAL_IPV4}/24 dev ${LOCAL_IFACE}
+	ip link set ${LOCAL_IFACE} up
+	ip addr show dev ${LOCAL_IFACE}
 
 	ip neigh flush dev ${LOCAL_IFACE}
 	ip neigh add ${REMOTE_IPV4} dev ${LOCAL_IFACE} lladdr ${REMOTE_MAC}
@@ -184,9 +186,11 @@ config6_local_iface()
 # configure remote host/iface
 config_remote_iface()
 {
-	ssh ${REMOTE_HOST} ifconfig ${REMOTE_IFACE} down
-	ssh ${REMOTE_HOST} ifconfig ${REMOTE_IFACE} ${REMOTE_IPV4}/24 up
-	ssh ${REMOTE_HOST} ifconfig ${REMOTE_IFACE}
+	ssh ${REMOTE_HOST} ip link set ${REMOTE_IFACE} down
+	ssh ${REMOTE_HOST} ip addr flush dev ${REMOTE_IFACE}
+	ssh ${REMOTE_HOST} ip addr add ${REMOTE_IPV4}/24 dev ${REMOTE_IFACE}
+	ssh ${REMOTE_HOST} ip link set ${REMOTE_IFACE} up
+	ssh ${REMOTE_HOST} ip addr show dev ${REMOTE_IFACE}
 
 	ssh ${REMOTE_HOST} ip neigh flush dev ${REMOTE_IFACE}
 

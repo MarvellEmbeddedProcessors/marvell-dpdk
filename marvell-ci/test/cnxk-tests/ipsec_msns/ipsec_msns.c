@@ -1681,6 +1681,8 @@ parse_args(int argc, char **argv)
 
 		if (!strcmp(argv[0], "--config") && (argc > 1)) {
 			config_file = argv[1];
+			argc -= 2;
+			argv += 2;
 			continue;
 		}
 
@@ -2190,11 +2192,15 @@ print_stats(void)
 {
 	uint64_t last_rx = 0, last_tx = 0;
 	uint64_t curr_rx = 0, curr_tx = 0;
+	struct rte_security_ctx *sec_ctx;
+	struct rte_security_stats stats;
 	uint64_t curr_ipsec_failed = 0;
 	uint64_t curr_rx_ipsec = 0;
 	uint64_t curr_inb_sas = 0;
 	uint64_t last_inb_sas = 0;
+	uint32_t portid = 0;
 	uint16_t lcore_id;
+	int i;
 
 	while (!force_quit) {
 		curr_rx = 0;
@@ -2216,6 +2222,28 @@ print_stats(void)
 		       curr_rx_ipsec, (curr_tx - last_tx) / stats_tmo,
 		       curr_rx - curr_tx, curr_ipsec_failed,
 		       (curr_inb_sas - last_inb_sas) / stats_tmo);
+
+		if (ipsec_stats) {
+			sec_ctx = rte_eth_dev_get_sec_ctx(portid);
+			for (i = 0; i <= (int)num_sas; i++) {
+				if (inb_sas[i].sa) {
+					rte_security_session_stats_get(sec_ctx, inb_sas[i].sa,
+								       &stats);
+					printf("[SPI 0x%x] %" PRIu64 " inb_pkts, ",
+					       inb_sas[i].sa_data->spi, stats.ipsec.ipackets);
+				}
+				if (outb_sas[i].sa) {
+					rte_security_session_stats_get(sec_ctx, outb_sas[i].sa,
+								       &stats);
+					printf("[SPI 0x%x] %" PRIu64 " outb_pkts",
+					       outb_sas[i].sa_data->spi, stats.ipsec.opackets);
+				}
+
+				if (inb_sas[i].sa || outb_sas[i].sa)
+					printf("\n");
+			}
+			printf("\n");
+		}
 
 		sleep(stats_tmo);
 
@@ -2360,7 +2388,7 @@ free_event(struct rte_event *ev)
 	} else if (ev->event_type == RTE_EVENT_TYPE_VECTOR) {
 		vec = ev->vec;
 		for (i = 0; i < vec->nb_elem; i++)
-			rte_pktmbuf_free(vec->mbufs[i]);
+			rte_pktmbuf_free(vec->mbufs[vec->elem_offset + i]);
 		rte_mempool_put(rte_mempool_from_obj(vec), vec);
 	}
 }

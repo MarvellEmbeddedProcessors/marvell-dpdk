@@ -576,7 +576,9 @@ cn20k_eth_sec_sso_work_cb(uint64_t *gw, void *args, enum nix_inl_event_type type
 				if (inb_priv && inb_priv->eth_sec && inb_priv->eth_sec->eth_dev) {
 					eth_dev = inb_priv->eth_sec->eth_dev;
 				} else {
-					plt_err("Inbound CPT CQ event: no eth_dev in SA priv");
+					plt_nix_dbg("Inbound CPT CQ event: cc %x uc_cc %x fmt %x",
+						    cqs->w0.s.compcode, cqs->w0.s.uc_compcode,
+						    cqs->w2.s.fmt);
 					return;
 				}
 			} else if (type != NIX_INL_INB_CPT_CQ) {

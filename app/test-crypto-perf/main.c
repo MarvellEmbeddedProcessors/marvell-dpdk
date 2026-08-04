@@ -58,6 +58,8 @@ const char *cperf_op_type_strs[] = {
 	[CPERF_ASYM_MLKEM768] = "mlkem_768",
 	[CPERF_ASYM_MLKEM1024] = "mlkem_1024",
 	[CPERF_ASYM_MLDSA44] = "mldsa_44",
+	[CPERF_ASYM_MLDSA65] = "mldsa_65",
+	[CPERF_ASYM_MLDSA87] = "mldsa_87",
 };
 
 const char *cperf_rsa_priv_keytype_strs[] = {
@@ -253,6 +255,8 @@ cperf_initialize_cryptodev(struct cperf_options *opts, uint8_t *enabled_cdevs)
 		case CPERF_ASYM_MLKEM768:
 		case CPERF_ASYM_MLKEM1024:
 		case CPERF_ASYM_MLDSA44:
+		case CPERF_ASYM_MLDSA65:
+		case CPERF_ASYM_MLDSA87:
 		case CPERF_ASYM_MODEX:
 			conf.ff_disable |= (RTE_CRYPTODEV_FF_SECURITY |
 					    RTE_CRYPTODEV_FF_SYMMETRIC_CRYPTO);
@@ -522,30 +526,45 @@ cperf_verify_devices_capabilities(struct cperf_options *opts,
 				opts->sm2_data->sign_s.length = sm2_perf_data.sign_s.length;
 			}
 		}
-		if (opts->op_type == CPERF_ASYM_MLDSA44) {
+		if (opts->op_type == CPERF_ASYM_MLDSA44 ||
+			opts->op_type == CPERF_ASYM_MLDSA65 ||
+			opts->op_type == CPERF_ASYM_MLDSA87) {
+			uint8_t mldsa_idx = 0;
+
 			asym_cap_idx.type = RTE_CRYPTO_ASYM_XFORM_ML_DSA;
 			asym_capability = rte_cryptodev_asym_capability_get(cdev_id, &asym_cap_idx);
 			if (asym_capability == NULL)
 				return -1;
 
+			if (opts->op_type == CPERF_ASYM_MLDSA44)
+				mldsa_idx = 0;
+			else if (opts->op_type == CPERF_ASYM_MLDSA65)
+				mldsa_idx = 1;
+			else if (opts->op_type == CPERF_ASYM_MLDSA87)
+				mldsa_idx = 2;
+
 			if (opts->asym_op_type == RTE_CRYPTO_ASYM_OP_SIGN) {
-				switch (opts->mldsa_sign_iter) {
-				case 1:
-					opts->mldsa_data = &mldsa_sign_perf_data_1_iter[0];
-					break;
-				case 5:
-					opts->mldsa_data = &mldsa_sign_perf_data_5_iter[0];
-					break;
-				case 10:
-					opts->mldsa_data = &mldsa_sign_perf_data_10_iter[0];
-					break;
-				default:
-					opts->mldsa_data = &mldsa_sign_perf_data[0];
+				if (opts->op_type == CPERF_ASYM_MLDSA44) {
+					switch (opts->mldsa_sign_iter) {
+					case 1:
+						opts->mldsa_data = &mldsa_sign_perf_data_1_iter[0];
+						break;
+					case 5:
+						opts->mldsa_data = &mldsa_sign_perf_data_5_iter[0];
+						break;
+					case 10:
+						opts->mldsa_data = &mldsa_sign_perf_data_10_iter[0];
+						break;
+					default:
+						opts->mldsa_data = &mldsa_sign_perf_data[0];
+						break;
+					}
+				} else {
+					opts->mldsa_data = &mldsa_sign_perf_data[mldsa_idx];
 				}
-			}
-			else if (opts->asym_op_type == RTE_CRYPTO_ASYM_OP_VERIFY)
-				opts->mldsa_data = &mldsa_verify_perf_data[0];
-			else {
+			} else if (opts->asym_op_type == RTE_CRYPTO_ASYM_OP_VERIFY) {
+				opts->mldsa_data = &mldsa_verify_perf_data[mldsa_idx];
+			} else {
 				RTE_LOG(ERR, USER1, "Unsupported MLDSA operation type\n");
 				return -ENOTSUP;
 			}

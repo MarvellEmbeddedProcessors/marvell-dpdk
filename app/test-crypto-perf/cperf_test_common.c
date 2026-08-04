@@ -317,7 +317,9 @@ cperf_is_asym_test(const struct cperf_options *options)
 		options->op_type == CPERF_ASYM_MLKEM512 ||
 		options->op_type == CPERF_ASYM_MLKEM768 ||
 		options->op_type == CPERF_ASYM_MLKEM1024 ||
-		options->op_type == CPERF_ASYM_MLDSA44)
+		options->op_type == CPERF_ASYM_MLDSA44 ||
+		options->op_type == CPERF_ASYM_MLDSA65 ||
+		options->op_type == CPERF_ASYM_MLDSA87)
 		return true;
 
 	return false;

@@ -1322,12 +1322,14 @@ cperf_create_session(struct rte_mempool *sess_mp,
 		return asym_sess;
 	}
 
-	if (options->op_type == CPERF_ASYM_MLDSA44) {
+	switch (options->op_type) {
+	case CPERF_ASYM_MLDSA44:
+	case CPERF_ASYM_MLDSA65:
+	case CPERF_ASYM_MLDSA87:
 		xform.next = NULL;
 		xform.xform_type = RTE_CRYPTO_ASYM_XFORM_ML_DSA;
-		xform.mldsa.type = RTE_CRYPTO_ML_DSA_44;
-		xform.mldsa.sign_deterministic =
-		   options->mldsa_data->sign_deterministic;
+		xform.mldsa.type = options->mldsa_data->type;
+		xform.mldsa.sign_deterministic = options->mldsa_data->sign_deterministic;
 		xform.mldsa.sign_prehash = false;
 
 		ret = rte_cryptodev_asym_session_create(dev_id, &xform, sess_mp, &asym_sess);
@@ -1336,6 +1338,8 @@ cperf_create_session(struct rte_mempool *sess_mp,
 			return NULL;
 		}
 		return asym_sess;
+	default:
+		break;
 	}
 
 	switch (options->op_type) {
@@ -1673,6 +1677,8 @@ cperf_get_op_functions(const struct cperf_options *options,
 		op_fns->populate_ops = cperf_set_ops_asym_sm2;
 		break;
 	case CPERF_ASYM_MLDSA44:
+	case CPERF_ASYM_MLDSA65:
+	case CPERF_ASYM_MLDSA87:
 		op_fns->populate_ops = cperf_set_ops_asym_mldsa;
 		break;
 	case CPERF_ASYM_MLKEM512:

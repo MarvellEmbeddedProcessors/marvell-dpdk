@@ -1338,10 +1338,13 @@ cperf_create_session(struct rte_mempool *sess_mp,
 		return asym_sess;
 	}
 
-	if (options->op_type == CPERF_ASYM_MLKEM512) {
+	switch (options->op_type) {
+	case CPERF_ASYM_MLKEM512:
+	case CPERF_ASYM_MLKEM768:
+	case CPERF_ASYM_MLKEM1024:
 		xform.next = NULL;
 		xform.xform_type = RTE_CRYPTO_ASYM_XFORM_ML_KEM;
-		xform.mlkem.type = RTE_CRYPTO_ML_KEM_512;
+		xform.mlkem.type = options->mlkem_data->type;
 
 		ret = rte_cryptodev_asym_session_create(dev_id, &xform, sess_mp, &asym_sess);
 		if (ret < 0 || asym_sess == NULL) {
@@ -1349,8 +1352,9 @@ cperf_create_session(struct rte_mempool *sess_mp,
 			return NULL;
 		}
 		return asym_sess;
+	default:
+		break;
 	}
-
 
 #ifdef RTE_LIB_SECURITY
 	/*
@@ -1672,6 +1676,8 @@ cperf_get_op_functions(const struct cperf_options *options,
 		op_fns->populate_ops = cperf_set_ops_asym_mldsa;
 		break;
 	case CPERF_ASYM_MLKEM512:
+	case CPERF_ASYM_MLKEM768:
+	case CPERF_ASYM_MLKEM1024:
 		op_fns->populate_ops = cperf_set_ops_asym_mlkem;
 		break;
 #ifdef RTE_LIB_SECURITY

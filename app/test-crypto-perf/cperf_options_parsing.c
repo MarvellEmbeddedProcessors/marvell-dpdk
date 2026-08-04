@@ -41,7 +41,7 @@ usage(char *progname)
 		" --optype cipher-only / auth-only / cipher-then-auth / auth-then-cipher /\n"
 		"        aead / pdcp / docsis / ipsec / modex / rsa / secp192r1 /\n"
 		"        secp224r1 / secp256r1 / secp384r1 / secp521r1 / eddsa / sm2 /\n"
-		"        mlkem_512 / mldsa_44 /\n"
+		"        mlkem_512 / mlkem_768 / mlkem_1024 / mldsa_44 /\n"
 		"        tls-record : set operation type\n"
 		" --sessionless: enable session-less crypto operations\n"
 		" --shared-session: share 1 session across all queue pairs on crypto device\n"
@@ -568,6 +568,14 @@ parse_op_type(struct cperf_options *opts, const char *arg)
 		{
 			cperf_op_type_strs[CPERF_ASYM_MLKEM512],
 			CPERF_ASYM_MLKEM512
+		},
+		{
+			cperf_op_type_strs[CPERF_ASYM_MLKEM768],
+			CPERF_ASYM_MLKEM768
+		},
+		{
+			cperf_op_type_strs[CPERF_ASYM_MLKEM1024],
+			CPERF_ASYM_MLKEM1024
 		},
 		{
 			cperf_op_type_strs[CPERF_TLS],
@@ -1705,12 +1713,11 @@ cperf_options_check(struct cperf_options *options)
 		}
 	}
 
-	if (options->op_type == CPERF_ASYM_MLKEM512) {
-		if (options->asym_op_type == RTE_CRYPTO_ASYM_OP_ENCRYPT)
-			options->mlkem_data = &mlkem_encap_perf_data[0];
-		else if (options->asym_op_type == RTE_CRYPTO_ASYM_OP_DECRYPT)
-			options->mlkem_data = &mlkem_decap_perf_data[0];
-		else {
+	if (options->op_type == CPERF_ASYM_MLKEM512 ||
+		options->op_type == CPERF_ASYM_MLKEM768 ||
+		options->op_type == CPERF_ASYM_MLKEM1024) {
+		if (options->asym_op_type != RTE_CRYPTO_ASYM_OP_ENCRYPT &&
+			options->asym_op_type != RTE_CRYPTO_ASYM_OP_DECRYPT) {
 			RTE_LOG(ERR, USER1,
 				"ML-KEM operations only support encrypt (encapsulate) and decrypt (decapsulate)\n");
 			return -EINVAL;
@@ -1818,8 +1825,15 @@ cperf_options_dump(struct cperf_options *opts)
 			if (opts->asym_op_type == RTE_CRYPTO_ASYM_OP_SIGN)
 				printf("# mldsa sign iterations: %u\n", opts->mldsa_sign_iter);
 		}
-		if (opts->op_type == CPERF_ASYM_MLKEM512)
-			printf("# mlkem test name: %s\n", opts->mlkem_data->name);
+		switch (opts->op_type) {
+		case CPERF_ASYM_MLKEM512:
+		case CPERF_ASYM_MLKEM768:
+		case CPERF_ASYM_MLKEM1024:
+			printf("# mlkem algorithm: %s\n", cperf_op_type_strs[opts->op_type]);
+			break;
+		default:
+			break;
+		}
 	}
 	printf("# sessionless: %s\n", opts->sessionless ? "yes" : "no");
 	printf("# shared session: %s\n", opts->shared_session ? "yes" : "no");

@@ -55,6 +55,8 @@ const char *cperf_op_type_strs[] = {
 	[CPERF_ASYM_SM2] = "sm2",
 	[CPERF_TLS] = "tls-record",
 	[CPERF_ASYM_MLKEM512] = "mlkem_512",
+	[CPERF_ASYM_MLKEM768] = "mlkem_768",
+	[CPERF_ASYM_MLKEM1024] = "mlkem_1024",
 	[CPERF_ASYM_MLDSA44] = "mldsa_44",
 };
 
@@ -248,6 +250,8 @@ cperf_initialize_cryptodev(struct cperf_options *opts, uint8_t *enabled_cdevs)
 		case CPERF_ASYM_SM2:
 		case CPERF_ASYM_RSA:
 		case CPERF_ASYM_MLKEM512:
+		case CPERF_ASYM_MLKEM768:
+		case CPERF_ASYM_MLKEM1024:
 		case CPERF_ASYM_MLDSA44:
 		case CPERF_ASYM_MODEX:
 			conf.ff_disable |= (RTE_CRYPTODEV_FF_SECURITY |
@@ -547,21 +551,31 @@ cperf_verify_devices_capabilities(struct cperf_options *opts,
 			}
 		}
 
-		if (opts->op_type == CPERF_ASYM_MLKEM512) {
+		if (opts->op_type == CPERF_ASYM_MLKEM512 ||
+			opts->op_type == CPERF_ASYM_MLKEM768 ||
+			opts->op_type == CPERF_ASYM_MLKEM1024) {
+			uint8_t index = 0;
+
 			asym_cap_idx.type = RTE_CRYPTO_ASYM_XFORM_ML_KEM;
 			asym_capability = rte_cryptodev_asym_capability_get(cdev_id, &asym_cap_idx);
 			if (asym_capability == NULL)
 				return -1;
 
+			if (opts->op_type == CPERF_ASYM_MLKEM512)
+				index = 0;
+			else if (opts->op_type == CPERF_ASYM_MLKEM768)
+				index = 1;
+			else if (opts->op_type == CPERF_ASYM_MLKEM1024)
+				index = 2;
+
 			if (opts->asym_op_type == RTE_CRYPTO_ASYM_OP_ENCRYPT)
-				opts->mlkem_data = &mlkem_encap_perf_data[0];
+				opts->mlkem_data = &mlkem_encap_perf_data[index];
 			else if (opts->asym_op_type == RTE_CRYPTO_ASYM_OP_DECRYPT)
-				opts->mlkem_data = &mlkem_decap_perf_data[0];
+				opts->mlkem_data = &mlkem_decap_perf_data[index];
 			else {
 				RTE_LOG(ERR, USER1, "Unsupported MLKEM operation type\n");
 				return -ENOTSUP;
 			}
-
 		}
 
 		if (opts->op_type == CPERF_AUTH_ONLY ||

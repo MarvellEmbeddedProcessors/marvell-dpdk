@@ -181,7 +181,8 @@ cn20k_nix_tx_compl_setup(struct cnxk_eth_dev *dev, struct cn20k_eth_txq *txq, st
 	txq->tx_compl.nb_desc_mask = (2 * rte_align32pow2(nb_desc)) - 1;
 	txq->tx_compl.ena = true;
 
-	txq->tx_compl.ptr = (struct rte_mbuf **)plt_zmalloc(txq->tx_compl.nb_desc_mask *
+	/* nb_desc_mask is an all-ones mask, so index range is [0, nb_desc_mask]. */
+	txq->tx_compl.ptr = (struct rte_mbuf **)plt_zmalloc((txq->tx_compl.nb_desc_mask + 1) *
 							    sizeof(struct rte_mbuf *), 0);
 	if (!txq->tx_compl.ptr)
 		return -1;

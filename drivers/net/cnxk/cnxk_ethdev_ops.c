@@ -1437,18 +1437,33 @@ cnxk_ethdev_fec_to_roc(uint32_t fec_capa)
 		return ROC_FEC_RS;
 	if (fec_capa & RTE_ETH_FEC_MODE_CAPA_MASK(BASER))
 		return ROC_FEC_BASER;
+	if (fec_capa & RTE_ETH_FEC_MODE_CAPA_MASK(NOFEC))
+		return ROC_FEC_OFF;
 	return ROC_FEC_NONE;
 }
 
 static uint32_t
 cnxk_fec_capa_from_supported(uint64_t supported_fec)
 {
-	uint32_t capa = RTE_ETH_FEC_MODE_CAPA_MASK(NOFEC) | RTE_ETH_FEC_MODE_CAPA_MASK(AUTO);
+	uint32_t capa = RTE_ETH_FEC_MODE_CAPA_MASK(NOFEC);
 
-	if (supported_fec & (1ULL << ROC_FEC_BASER))
+	/* CGX fwdata.supported_fec is an index (see otx2 ethtool), not a bitmask:
+	 * 0 = none, 1 = baser, 2 = rs, 3 = baser | rs
+	 */
+	switch (supported_fec) {
+	case ROC_FEC_BASER:
 		capa |= RTE_ETH_FEC_MODE_CAPA_MASK(BASER);
-	if (supported_fec & (1ULL << ROC_FEC_RS))
+		break;
+	case ROC_FEC_RS:
 		capa |= RTE_ETH_FEC_MODE_CAPA_MASK(RS);
+		break;
+	case ROC_FEC_BASER | ROC_FEC_RS:
+		capa |= RTE_ETH_FEC_MODE_CAPA_MASK(BASER);
+		capa |= RTE_ETH_FEC_MODE_CAPA_MASK(RS);
+		break;
+	default:
+		break;
+	}
 
 	return capa;
 }
@@ -1503,10 +1518,7 @@ cnxk_nix_fec_set(struct rte_eth_dev *eth_dev, uint32_t fec_capa)
 	struct roc_nix *nix = &dev->nix;
 	int roc_fec;
 
-	if (fec_capa & RTE_ETH_FEC_MODE_CAPA_MASK(AUTO))
-		roc_fec = ROC_FEC_RS;
-	else
-		roc_fec = cnxk_ethdev_fec_to_roc(fec_capa);
+	roc_fec = cnxk_ethdev_fec_to_roc(fec_capa);
 
 	return roc_nix_mac_fec_set(nix, roc_fec);
 }

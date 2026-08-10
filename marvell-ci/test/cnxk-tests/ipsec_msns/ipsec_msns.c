@@ -14,6 +14,7 @@
 #include <rte_cycles.h>
 #include <rte_ethdev.h>
 #include <rte_hexdump.h>
+#include <rte_ip4.h>
 #include <rte_ipsec.h>
 #include <rte_malloc.h>
 #include <rte_pmd_cnxk.h>
@@ -46,6 +47,7 @@
 
 #define NB_MBUF 10240U
 #define MAX_PKT_BURST 32
+#define MAX_TX_FIRST_SZ 4096
 
 int create_default_flow(uint16_t port_id, enum rte_pmd_cnxk_sec_action_alg alg, uint32_t spi,
 			       uint16_t sa_lo, uint16_t sa_hi, uint32_t sa_index);
@@ -78,6 +80,8 @@ static uint16_t vector_en;
 static uint16_t vector_sz = VECTOR_SIZE_DEFAULT;
 int ip_reassembly_dynfield_offset = -1;
 uint64_t ip_reassembly_dynflag;
+
+static int pcap_portid = -1;
 
 static struct rte_eth_conf port_conf = {
 	.rxmode = {
@@ -127,6 +131,10 @@ struct lcore_cfg {
 	uint64_t reass_failed;
 	uint64_t num_inb_sas;
 	uint64_t num_outb_sas;
+
+	/* Tx first */
+	struct rte_mbuf *tx_first[MAX_TX_FIRST_SZ];
+	uint16_t tx_first_cnt;
 };
 
 static struct lcore_cfg lcore_cfg[RTE_MAX_LCORE];
@@ -181,6 +189,7 @@ static volatile bool force_quit;
 static uint32_t nb_bufs = 0;
 static enum test_mode testmode;
 static bool loopback;
+static bool rx_only;
 static bool event_en;
 static bool poll_mode;
 static bool pfc;
@@ -780,7 +789,7 @@ create_ipsec_perf_session(struct ipsec_session_data *sa, uint16_t portid,
 	sess_conf.crypto_xform->aead.key.data = sa->key.data;
 
 	dip = sa->ipsec_xform.spi;
-	dst_v4 = rte_cpu_to_be_32(RTE_IPV4(192, 18, dip, 1));
+	dst_v4 = rte_cpu_to_be_32(RTE_IPV4(192, 168, dip, 1));
 
 	/* Save SA as userdata for the security session. When
 	 * the packet is received, this userdata will be
@@ -1318,6 +1327,10 @@ ut_eventdev_setup(void)
 	RTE_ETH_FOREACH_DEV(portid) {
 		if ((ethdev_port_mask & RTE_BIT64(portid)) == 0)
 			continue;
+
+		if (portid == pcap_portid)
+			continue;
+
 		/* Setup queue conf */
 		memset(&queue_conf, 0, sizeof(queue_conf));
 		queue_conf.ev.queue_id = portid % nb_event_queues;
@@ -1504,6 +1517,7 @@ print_usage(const char *name)
 		"\t[--plain-reass-ena]     Enable plain reassembly\n"
 		"\t[--algo <aes_128_gcm|aes_256_gcm>] Cipher algorithm to use\n"
 		"\t[--lpbk]               Enable loopback mode\n"
+		"\t[--rx-only]            inbound-only perf: free pkts in software\n"
 		"\t[--config <file>]      Configuration file for flow rules\n"
 		"\t[--reass-timeout <ms>] Reassembly timeout in milliseconds\n"
 		"\t[--algo <aes_128_gcm|aes_256_gcm>] Cipher algorithm to use\n",
@@ -1679,6 +1693,13 @@ parse_args(int argc, char **argv)
 			continue;
 		}
 
+		if (!strcmp(argv[0], "--rx-only")) {
+			rx_only = true;
+			argc--;
+			argv++;
+			continue;
+		}
+
 		if (!strcmp(argv[0], "--config") && (argc > 1)) {
 			config_file = argv[1];
 			argc -= 2;
@@ -1740,6 +1761,13 @@ port_init(uint16_t portid, uint32_t nb_mbufs, uint16_t nb_rx_queue, uint16_t nb_
 	if (testmode == POLL_REASSEMBLY_INB_PERF || testmode == EVENT_REASSEMBLY_INB_PERF)
 		port_conf.txmode.offloads |= RTE_ETH_TX_OFFLOAD_MULTI_SEGS;
 
+	if (portid == pcap_portid) {
+		port_conf.txmode.offloads = 0;
+		port_conf.rxmode.offloads = 0;
+		nb_rx_queue = 1;
+		nb_tx_queue = 1;
+	}
+
 	if (nb_rx_queue > 1) {
 		port_conf.rxmode.mq_mode = RTE_ETH_MQ_RX_RSS;
 		port_conf.rx_adv_conf.rss_conf.rss_hf = RTE_ETH_RSS_IP;
@@ -1762,6 +1790,32 @@ port_init(uint16_t portid, uint32_t nb_mbufs, uint16_t nb_rx_queue, uint16_t nb_
 	printf("Port %u ", portid);
 	print_ethaddr("Address:", &ports_eth_addr[portid]);
 	printf("\n");
+
+	if (portid == pcap_portid) {
+		/* init TX queue */
+		printf("Setup pcap txq=%d,0\n", portid);
+		ret = rte_eth_tx_queue_setup(portid, 0, nb_txd, socketid, &tx_conf);
+		if (ret < 0) {
+			printf("rte_eth_tx_queue_setup: err=%d, port=%d\n", ret, portid);
+			return ret;
+		}
+
+		printf("Setup pcap rxq=%d,0\n", portid);
+		ret = rte_eth_rx_queue_setup(portid, 0, nb_rxd, socketid, &rx_conf,
+					     mbufpool[portid]);
+		if (ret < 0) {
+			printf("rte_eth_rx_queue_setup: err=%d, port=%d\n", ret, portid);
+			return ret;
+		}
+
+		/* Start device */
+		ret = rte_eth_dev_start(portid);
+		if (ret < 0) {
+			printf("rte_eth_dev_start: err=%d, port=%d\n", ret, portid);
+			return ret;
+		}
+		return 0;
+	}
 
 	queueid = 0;
 	for (lcore_id = 0; lcore_id < RTE_MAX_LCORE; lcore_id++) {
@@ -1809,6 +1863,29 @@ port_init(uint16_t portid, uint32_t nb_mbufs, uint16_t nb_rx_queue, uint16_t nb_
 	if (ret) {
 		printf("egress sa index init failed: err=%d, port=%d\n", ret, portid);
 		return ret;
+	}
+
+	return 0;
+}
+
+/*
+ * Read a burst of packets from the pcap vdev port for every worker lcore
+ * and stash them into that lcore's tx_first[] array. Each worker, before
+ * entering its main Rx loop, transmits these packets first.
+ */
+static int
+pcap_fetch(void)
+{
+	struct lcore_cfg *lconf;
+	uint16_t lcore_id;
+	uint16_t nb_pkts;
+
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
+		lconf = &lcore_cfg[lcore_id];
+		nb_pkts = rte_eth_rx_burst(pcap_portid, 0, lconf->tx_first, MAX_TX_FIRST_SZ);
+		lconf->tx_first_cnt = nb_pkts;
+		printf("Read %u packets from pcap port %d for lcore %u\n", nb_pkts, pcap_portid,
+		       lcore_id);
 	}
 
 	return 0;
@@ -1863,6 +1940,20 @@ ut_setup(int argc, char **argv)
 							   nb_lcores * MEMPOOL_CACHE_SIZE),
 					       NB_MBUF);
 
+	RTE_ETH_FOREACH_DEV(portid) {
+		char port_name[RTE_ETH_NAME_MAX_LEN] = {0};
+
+		if ((ethdev_port_mask & RTE_BIT64(portid)) == 0)
+			continue;
+
+		rte_eth_dev_get_name_by_port(portid, port_name);
+		if (strncmp(port_name, "net_pcap", strlen("net_pcap")) == 0) {
+			pcap_portid = portid;
+			printf("Detected pcap port %d (%s)\n", pcap_portid, port_name);
+			break;
+		}
+	}
+
 	/* Setup all available ports */
 	RTE_ETH_FOREACH_DEV(portid) {
 		if ((ethdev_port_mask & RTE_BIT64(portid)) == 0)
@@ -1901,6 +1992,11 @@ ut_setup(int argc, char **argv)
 	RTE_ETH_FOREACH_DEV(portid) {
 		if ((ethdev_port_mask & RTE_BIT64(portid)) == 0)
 			continue;
+
+		/* pcap port is already configured and started in port_init() */
+		if (portid == pcap_portid)
+			continue;
+
 		/* Enable PFC if requested */
 		if (pfc) {
 			struct rte_eth_pfc_queue_conf pfc_conf;
@@ -1967,8 +2063,13 @@ ut_setup(int argc, char **argv)
 		}
 	}
 
-	check_all_ports_link_status(ethdev_port_mask);
+	check_all_ports_link_status(pcap_portid == -1 ? ethdev_port_mask :
+				     ethdev_port_mask & ~RTE_BIT64(pcap_portid));
 	flow_init();
+
+	if (pcap_portid != -1)
+		pcap_fetch();
+
 	return 0;
 }
 
@@ -1997,7 +2098,7 @@ ut_teardown(void)
 
 	/* port tear down */
 	RTE_ETH_FOREACH_DEV(portid) {
-		if ((ethdev_port_mask & RTE_BIT64(portid)) == 0)
+		if (((ethdev_port_mask & RTE_BIT64(portid)) == 0) || (portid == pcap_portid))
 			continue;
 		ret = rte_eth_dev_reset(portid);
 		if (ret != 0)
@@ -2133,7 +2234,7 @@ print_inb_outb_stats(void)
 		       "%" PRIu64 " drops, %" PRIu64 " ipsec_failed, " "%" PRIu64 " Inb SAs ps, "
 		       "%" PRIu64 " Outb SAs ps\n", (curr_rx - last_rx) / stats_tmo,
 		       curr_rx_ipsec, (curr_tx - last_tx) / stats_tmo,
-		       curr_rx - curr_tx, curr_ipsec_failed,
+		       curr_rx > curr_tx ? curr_rx - curr_tx : 0, curr_ipsec_failed,
 		       (curr_inb_sas - last_inb_sas) / stats_tmo,
 		       (curr_outb_sas - last_outb_sas) / stats_tmo);
 
@@ -2220,7 +2321,7 @@ print_stats(void)
 		       "%" PRIu64 " drops, %" PRIu64 " ipsec_failed, " "%" PRIu64
 		       " Inb SAs ps,\n\n", (curr_rx - last_rx) / stats_tmo,
 		       curr_rx_ipsec, (curr_tx - last_tx) / stats_tmo,
-		       curr_rx - curr_tx, curr_ipsec_failed,
+		       curr_rx > curr_tx ? curr_rx - curr_tx : 0, curr_ipsec_failed,
 		       (curr_inb_sas - last_inb_sas) / stats_tmo);
 
 		if (ipsec_stats) {
@@ -2313,6 +2414,35 @@ poll_mode_inb_outb_worker(void *args)
 
 	portid = lconf->portid;
 	sec_ctx = rte_eth_dev_get_sec_ctx(portid);
+
+	if (lconf->tx_first_cnt) {
+		printf("IPSEC: sending first %u packets on lcore %u\n",
+		       lconf->tx_first_cnt, lcore_id);
+
+		/* Send pcap-seeded packets first, protected via outbound SAs */
+		sa_index = 1;
+		for (j = 0; j < lconf->tx_first_cnt; j++) {
+			pkt = lconf->tx_first[j];
+
+			sa = outb_sas[sa_index].sa;
+			if (sa == NULL) {
+				rte_pktmbuf_free(pkt);
+				continue;
+			}
+			rte_security_set_pkt_metadata(sec_ctx, sa, pkt, NULL);
+			pkt->ol_flags = RTE_MBUF_F_TX_SEC_OFFLOAD;
+			pkt->l2_len = RTE_ETHER_HDR_LEN;
+
+			nb_tx = rte_eth_tx_burst(portid, queueid, &pkt, 1);
+			if (!nb_tx)
+				rte_pktmbuf_free(pkt);
+			lconf->tx_pkts++;
+
+			sa_index++;
+			if (sa_index > num_sas)
+				sa_index = 1;
+		}
+	}
 
 	while (!force_quit) {
 
@@ -2554,9 +2684,11 @@ event_inb_outb_worker(void *args)
 	uint32_t lcore_id = rte_lcore_id();
 	struct lcore_cfg *info = &lcore_cfg[lcore_id];
 	struct rte_security_ctx *sec_ctx;
+	struct rte_security_session *sa;
 	struct rte_event_vector *vec;
 	unsigned int nb_rx = 0, nb_tx;
 	uint16_t sa_counter = 0;
+	uint16_t sa_index;
 	struct rte_mbuf *pkt;
 	struct rte_event ev;
 	uint16_t i, j;
@@ -2567,6 +2699,41 @@ event_inb_outb_worker(void *args)
 
 	printf("Launching event mode worker on lcore=%u, event_port_id=%u\n", lcore_id,
 	       info->event_port_id);
+
+	if (info->tx_first_cnt) {
+		printf("IPSEC: sending first %u packets on lcore %u\n",
+		       info->tx_first_cnt, lcore_id);
+
+		/* Send pcap-seeded packets first, protected via outbound SAs */
+		sa_index = 1;
+		memset(&ev, 0, sizeof(ev));
+		for (j = 0; j < info->tx_first_cnt; j++) {
+			pkt = info->tx_first[j];
+
+			sa = outb_sas[sa_index].sa;
+			if (sa == NULL) {
+				rte_pktmbuf_free(pkt);
+				continue;
+			}
+			rte_security_set_pkt_metadata(sec_ctx, sa, pkt, NULL);
+			pkt->ol_flags = RTE_MBUF_F_TX_SEC_OFFLOAD;
+			pkt->l2_len = RTE_ETHER_HDR_LEN;
+
+			ev.event_type = RTE_EVENT_TYPE_ETHDEV;
+			ev.mbuf = pkt;
+			ev.sched_type = RTE_SCHED_TYPE_PARALLEL;
+			if (!rte_event_eth_tx_adapter_enqueue(info->eventdev_id,
+							      info->event_port_id, &ev, 1, 0)) {
+				rte_pktmbuf_free(pkt);
+			} else {
+				info->tx_pkts++;
+			}
+
+			sa_index++;
+			if (sa_index > num_sas)
+				sa_index = 1;
+		}
+	}
 
 	while (!force_quit) {
 		/* Read packet from event queues */
@@ -2778,6 +2945,27 @@ event_inb_worker(void *args)
 	return 0;
 }
 
+/*
+ * Under loopback, a packet transmitted with outbound IPsec (ESP) offload
+ * comes back on Rx grown by the ESP overhead and with next_proto_id set to
+ * the security protocol. Reset it back to the original plaintext length
+ * (pkt_len, captured before the first outbound encap) so it can be resent
+ * through outbound processing again in the next iteration.
+ */
+static __rte_always_inline void
+fixup_ip_hdr(struct rte_mbuf *pkt, uint16_t pkt_len)
+{
+	struct rte_ipv4_hdr *hdr;
+
+	pkt->packet_type = RTE_PTYPE_L3_IPV4;
+	hdr = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, RTE_ETHER_HDR_LEN);
+	hdr->total_length = rte_cpu_to_be_16(pkt_len - RTE_ETHER_HDR_LEN);
+	hdr->next_proto_id = 0;
+	hdr->hdr_checksum = rte_ipv4_cksum_simple(hdr);
+	pkt->data_len = pkt_len;
+	pkt->pkt_len = pkt_len;
+}
+
 static __rte_always_inline int
 handle_outb_event(uint32_t lcore_id, struct rte_security_ctx *sec_ctx, struct rte_mbuf *pkt,
 		  uint16_t *sa_counter)
@@ -2902,6 +3090,149 @@ event_outb_worker(void *args)
 }
 
 static int
+event_outb_loopback_worker(void *args)
+{
+	uint32_t lcore_id = rte_lcore_id();
+	struct lcore_cfg *info = &lcore_cfg[lcore_id];
+	struct rte_security_ctx *sec_ctx;
+	struct rte_security_session *sa;
+	unsigned int nb_rx = 0, nb_tx;
+	struct rte_event_vector *vec;
+	uint16_t sa_counter = 0;
+	uint16_t sa_index;
+	struct rte_mbuf *pkt;
+	struct rte_event ev;
+	uint16_t pkt_len = 64;
+	uint16_t i, j;
+
+	(void)args;
+
+	sec_ctx = rte_eth_dev_get_sec_ctx(lcore_cfg[lcore_id].portid);
+
+	printf("Launching event mode loopback worker on lcore=%u, event_port_id=%u\n", lcore_id,
+	       info->event_port_id);
+
+	if (info->tx_first_cnt) {
+		printf("IPSEC: sending first %u packets on lcore %u\n",
+		       info->tx_first_cnt, lcore_id);
+
+		/* Send pcap-seeded packets first, protected via outbound SAs */
+		sa_index = 1;
+		memset(&ev, 0, sizeof(ev));
+		for (j = 0; j < info->tx_first_cnt; j++) {
+			pkt = info->tx_first[j];
+
+			sa = outb_sas[sa_index].sa;
+			if (sa == NULL) {
+				rte_pktmbuf_free(pkt);
+				continue;
+			}
+			rte_security_set_pkt_metadata(sec_ctx, sa, pkt, NULL);
+			pkt->ol_flags = RTE_MBUF_F_TX_SEC_OFFLOAD;
+			pkt->l2_len = RTE_ETHER_HDR_LEN;
+
+			ev.event_type = RTE_EVENT_TYPE_ETHDEV;
+			ev.mbuf = pkt;
+			ev.sched_type = RTE_SCHED_TYPE_PARALLEL;
+			if (!rte_event_eth_tx_adapter_enqueue(info->eventdev_id,
+							      info->event_port_id, &ev, 1, 0)) {
+				rte_pktmbuf_free(pkt);
+			} else {
+				info->tx_pkts++;
+			}
+
+			sa_index++;
+			if (sa_index > num_sas)
+				sa_index = 1;
+			pkt_len = pkt->pkt_len;
+		}
+	}
+
+	while (!force_quit) {
+		/* Read packet from event queues */
+		nb_rx = rte_event_dequeue_burst(info->eventdev_id, info->event_port_id,
+						&ev, 1, 0);
+		if (nb_rx == 0)
+			continue;
+
+		switch (ev.event_type) {
+		case RTE_EVENT_TYPE_ETHDEV:
+		case RTE_EVENT_TYPE_VECTOR:
+			break;
+		default:
+			printf("Invalid event type %u", ev.event_type);
+			continue;
+		}
+
+		if (ev.event_type == RTE_EVENT_TYPE_VECTOR) {
+			vec = ev.vec;
+			nb_rx = vec->nb_elem;
+			info->rx_pkts += nb_rx;
+			pkt = vec->mbufs[0];
+			vec->attr_valid = 1;
+			vec->port = pkt->port;
+
+			/* Process vector events */
+			j = 0;
+			for (i = 0; i < nb_rx; i++) {
+				pkt = vec->mbufs[i];
+				fixup_ip_hdr(pkt, pkt_len);
+				if (unlikely(handle_outb_event(lcore_id, sec_ctx, pkt,
+							       &sa_counter)))
+					continue;
+				vec->mbufs[j++] = pkt;
+			}
+			if (unlikely(!j)) {
+				/* All packets were dropped */
+				rte_mempool_put(rte_mempool_from_obj(vec), vec);
+				continue;
+			}
+			vec->nb_elem = j;
+			nb_tx = j;
+		} else {
+			/* Process single event */
+			info->rx_pkts += nb_rx;
+			pkt = ev.mbuf;
+			rte_prefetch0(rte_pktmbuf_mtod(pkt, void *));
+
+			fixup_ip_hdr(pkt, pkt_len);
+			if (unlikely(handle_outb_event(lcore_id, sec_ctx, pkt,
+						       &sa_counter)))
+				continue;
+
+			/* Save eth queue for Tx */
+			rte_event_eth_tx_adapter_txq_set(pkt, 0);
+			nb_tx = 1;
+		}
+
+		/*
+		 * Since tx internal port is available, events can be
+		 * directly enqueued to the adapter and it would be
+		 * internally submitted to the eth device.
+		 */
+		if (!rte_event_eth_tx_adapter_enqueue(info->eventdev_id,
+						      info->event_port_id,
+						      &ev, /* events */
+						      1,   /* nb_events */
+						      0 /* flags */)) {
+			free_event(&ev);
+			continue;
+		}
+		info->tx_pkts += nb_tx;
+	}
+
+	if (ev.u64) {
+		ev.op = RTE_EVENT_OP_RELEASE;
+		rte_event_enqueue_burst(info->eventdev_id,
+					info->event_port_id, &ev, 1);
+	}
+
+	rte_event_port_quiesce(info->eventdev_id, info->event_port_id,
+			       ipsec_event_port_flush, NULL);
+	return 0;
+}
+
+static int
 poll_mode_inb_worker(void *args)
 {
 	struct rte_mbuf *pkts[MAX_PKT_BURST], *pkt;
@@ -2969,6 +3300,71 @@ poll_mode_inb_worker(void *args)
 				rte_pktmbuf_free(tx_pkts[nb_tx]);
 			} while (++nb_tx < k);
 		}
+	}
+
+	return 0;
+}
+
+static int
+poll_mode_inb_rxonly_worker(void *args)
+{
+	struct rte_mbuf *pkts[MAX_PKT_BURST], *pkt;
+	struct rte_mbuf *free_pkts[MAX_PKT_BURST];
+	uint32_t nb_rx, j, k;
+	struct lcore_cfg *lconf;
+	uint64_t ol_flags;
+	uint32_t lcore_id;
+	uint16_t portid;
+	uint16_t queueid;
+
+	(void)args;
+	lcore_id = rte_lcore_id();
+	lconf = &lcore_cfg[lcore_id];
+	queueid = lconf->queueid;
+
+	printf("IPSEC: entering main loop on lcore %u\n", lcore_id);
+
+	portid = lconf->portid;
+
+	while (!force_quit) {
+
+		/* Read packets from RX queues */
+		nb_rx = rte_eth_rx_burst(portid, queueid,
+					 pkts, MAX_PKT_BURST);
+
+		if (nb_rx <= 0)
+			continue;
+
+		lconf->rx_pkts += nb_rx;
+
+		for (j = 0, k = 0; j < nb_rx; j++) {
+			pkt = pkts[j];
+			ol_flags = pkt->ol_flags;
+			lconf->rx_ipsec_pkts += !!(ol_flags & RTE_MBUF_F_RX_SEC_OFFLOAD);
+			/* Drop packets received with offload failure */
+			if (unlikely(ol_flags & RTE_MBUF_F_RX_SEC_OFFLOAD_FAILED)) {
+				lconf->ipsec_failed += 1;
+#if !defined(MSNS_CN9K)
+				union rte_pmd_cnxk_cpt_res_s *res;
+
+				res = rte_pmd_cnxk_inl_ipsec_res(pkt);
+				if (res && verbose)
+					printf("uc_compcode = %x compcode = %x\n",
+					       res->cn10k.uc_compcode, res->cn10k.compcode);
+#endif
+				continue;
+			}
+
+#if !defined(MSNS_CN9K)
+			if (unlikely((ol_flags & RTE_MBUF_F_RX_SEC_OFFLOAD) && inl_inb_oop))
+				handle_inb_oop(pkt);
+#endif
+
+			free_pkts[k++] = pkt;
+		}
+
+		/* No Tx: free in software (bulk) to save Tx bandwidth */
+		rte_pktmbuf_free_bulk(free_pkts, k);
 	}
 
 	return 0;
@@ -3209,6 +3605,103 @@ poll_mode_outb_worker(void *args)
 		/* Send pkts out */
 		for (j = 0, k = 0; j < nb_rx; j++) {
 			pkt = pkts[j];
+			sa_index = num_sas > 1 ?
+				(sa_counter % num_sas) + 1 : 1;
+			sa_counter += 1;
+
+			sa = outb_sas[sa_index].sa;
+			rte_security_set_pkt_metadata(sec_ctx, sa, pkt, NULL);
+			pkt->ol_flags = RTE_MBUF_F_TX_SEC_OFFLOAD;
+			pkt->l2_len = RTE_ETHER_HDR_LEN;
+
+			tx_pkts[k++] = pkt;
+		}
+		nb_tx = rte_eth_tx_burst(portid, queueid, tx_pkts, k);
+
+		lconf->tx_pkts += nb_tx;
+
+		if (unlikely(nb_tx < k)) {
+			do {
+				rte_pktmbuf_free(tx_pkts[nb_tx]);
+			} while (++nb_tx < k);
+		}
+	}
+
+	return 0;
+}
+
+static int
+poll_mode_outb_loopback_worker(void *args)
+{
+	struct rte_mbuf *pkts[MAX_PKT_BURST], *pkt;
+	struct rte_mbuf *tx_pkts[MAX_PKT_BURST];
+	struct rte_security_ctx *sec_ctx;
+	struct rte_security_session *sa;
+	uint32_t nb_rx, nb_tx, j, k;
+	uint16_t sa_counter = 0;
+	struct lcore_cfg *lconf;
+	uint16_t sa_index = 0;
+	uint32_t lcore_id;
+	uint16_t portid;
+	uint16_t queueid;
+	uint16_t pkt_len = 64;
+
+	(void)args;
+	lcore_id = rte_lcore_id();
+	lconf = &lcore_cfg[lcore_id];
+	queueid = lconf->queueid;
+
+	printf("IPSEC: entering main loop on lcore %u\n", lcore_id);
+
+	portid = lconf->portid;
+	sec_ctx = rte_eth_dev_get_sec_ctx(portid);
+
+	if (lconf->tx_first_cnt) {
+		printf("IPSEC: sending first %u packets on lcore %u\n",
+		       lconf->tx_first_cnt, lcore_id);
+
+		/* Send pcap-seeded packets first, protected via outbound SAs */
+		sa_index = 1;
+		for (j = 0; j < lconf->tx_first_cnt; j++) {
+			pkt = lconf->tx_first[j];
+
+			sa = outb_sas[sa_index].sa;
+			if (sa == NULL) {
+				rte_pktmbuf_free(pkt);
+				continue;
+			}
+			rte_security_set_pkt_metadata(sec_ctx, sa, pkt, NULL);
+			pkt->ol_flags = RTE_MBUF_F_TX_SEC_OFFLOAD;
+			pkt->l2_len = RTE_ETHER_HDR_LEN;
+
+			nb_tx = rte_eth_tx_burst(portid, queueid, &pkt, 1);
+			if (!nb_tx)
+				rte_pktmbuf_free(pkt);
+			lconf->tx_pkts++;
+
+			sa_index++;
+			if (sa_index > num_sas)
+				sa_index = 1;
+			pkt_len = pkt->pkt_len;
+		}
+	}
+
+	while (!force_quit) {
+
+		/* Read packets from RX queues */
+		nb_rx = rte_eth_rx_burst(portid, queueid,
+					 pkts, MAX_PKT_BURST);
+
+		if (nb_rx <= 0)
+			continue;
+
+		lconf->rx_pkts += nb_rx;
+
+		/* Send pkts out */
+		for (j = 0, k = 0; j < nb_rx; j++) {
+			pkt = pkts[j];
+			fixup_ip_hdr(pkt, pkt_len);
+
 			sa_index = num_sas > 1 ?
 				(sa_counter % num_sas) + 1 : 1;
 			sa_counter += 1;
@@ -3699,7 +4192,10 @@ ipsec_inb_perf(void)
 		rte_eal_mp_remote_launch(event_inb_worker, NULL, SKIP_MAIN);
 	} else if (poll_mode) {
 		/* launch per-lcore init on every lcore */
-		rte_eal_mp_remote_launch(poll_mode_inb_worker, NULL, SKIP_MAIN);
+		if (rx_only)
+			rte_eal_mp_remote_launch(poll_mode_inb_rxonly_worker, NULL, SKIP_MAIN);
+		else
+			rte_eal_mp_remote_launch(poll_mode_inb_worker, NULL, SKIP_MAIN);
 	}
 
 	/* Print stats */
@@ -3755,9 +4251,15 @@ ipsec_outb_perf(void)
 		/* Start event dev */
 		ut_eventdev_start();
 
-		rte_eal_mp_remote_launch(event_outb_worker, NULL, SKIP_MAIN);
+		if (loopback && pcap_portid != -1)
+			rte_eal_mp_remote_launch(event_outb_loopback_worker, NULL, SKIP_MAIN);
+		else
+			rte_eal_mp_remote_launch(event_outb_worker, NULL, SKIP_MAIN);
 	} else if (poll_mode) {
-		rte_eal_mp_remote_launch(poll_mode_outb_worker, NULL, SKIP_MAIN);
+		if (loopback && pcap_portid != -1)
+			rte_eal_mp_remote_launch(poll_mode_outb_loopback_worker, NULL, SKIP_MAIN);
+		else
+			rte_eal_mp_remote_launch(poll_mode_outb_worker, NULL, SKIP_MAIN);
 	}
 
 	/* Print stats */

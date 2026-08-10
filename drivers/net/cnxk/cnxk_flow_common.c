@@ -35,19 +35,27 @@ cnxk_mtr_configure(struct rte_eth_dev *eth_dev, const struct rte_flow_action act
 	for (i = 0; actions[i].type != RTE_FLOW_ACTION_TYPE_END; i++) {
 		if (actions[i].type == RTE_FLOW_ACTION_TYPE_METER) {
 			mtr_conf = (const struct rte_flow_action_meter *)(actions[i].conf);
+			if (!mtr_conf)
+				return -EINVAL;
 			mtr_id = mtr_conf->mtr_id;
 			is_mtr_act = true;
 		}
 		if (actions[i].type == RTE_FLOW_ACTION_TYPE_QUEUE) {
 			q_conf = (const struct rte_flow_action_queue *)(actions[i].conf);
-			if (is_mtr_act)
-				nix_mtr_rq_update(eth_dev, mtr_id, 1, &q_conf->index);
+			if (is_mtr_act) {
+				rc = nix_mtr_rq_update(eth_dev, mtr_id, 1, &q_conf->index);
+				if (rc)
+					return rc;
+			}
 		}
 		if (actions[i].type == RTE_FLOW_ACTION_TYPE_RSS) {
 			rss_conf = (const struct rte_flow_action_rss *)(actions[i].conf);
-			if (is_mtr_act)
-				nix_mtr_rq_update(eth_dev, mtr_id, rss_conf->queue_num,
-						  rss_conf->queue);
+			if (is_mtr_act) {
+				rc = nix_mtr_rq_update(eth_dev, mtr_id, rss_conf->queue_num,
+						       rss_conf->queue);
+				if (rc)
+					return rc;
+			}
 		}
 	}
 
@@ -146,18 +154,29 @@ cnxk_flow_create(struct rte_eth_dev *eth_dev, const struct rte_flow_attr *attr,
 	if (req_act & ROC_NPC_ACTION_TYPE_METER) {
 		if ((req_act & ROC_NPC_ACTION_TYPE_RSS) &&
 		    ((req_act & ROC_NPC_ACTION_TYPE_QUEUE))) {
+			rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ACTION, NULL,
+					   "Meter action cannot be combined with both QUEUE and RSS");
 			return NULL;
 		}
 		if (req_act & ROC_NPC_ACTION_TYPE_RSS) {
 			rc = cnxk_rss_action_validate(eth_dev, attr, action_rss);
-			if (rc)
+			if (rc) {
+				rte_flow_error_set(error, -rc, RTE_FLOW_ERROR_TYPE_ACTION, NULL,
+						   "RSS action validation failed");
 				return NULL;
+			}
 		} else if (req_act & ROC_NPC_ACTION_TYPE_QUEUE) {
 			const struct rte_flow_action_queue *act_queue;
+
 			act_queue = (const struct rte_flow_action_queue *)act_q->conf;
-			if (act_queue->index > eth_dev->data->nb_rx_queues)
+			if (act_queue->index >= eth_dev->data->nb_rx_queues) {
+				rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ACTION,
+						   NULL, "Invalid queue index");
 				return NULL;
+			}
 		} else {
+			rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ACTION, NULL,
+					   "Meter action requires QUEUE or RSS action");
 			return NULL;
 		}
 	}
@@ -166,8 +185,8 @@ cnxk_flow_create(struct rte_eth_dev *eth_dev, const struct rte_flow_attr *attr,
 			mtr = (const struct rte_flow_action_meter *)actions[i].conf;
 			rc = cnxk_mtr_configure(eth_dev, actions);
 			if (rc) {
-				rte_flow_error_set(error, rc, RTE_FLOW_ERROR_TYPE_ACTION, NULL,
-						   "Failed to configure mtr ");
+				rte_flow_error_set(error, -rc, RTE_FLOW_ERROR_TYPE_ACTION, NULL,
+						   "Failed to configure meter");
 				return NULL;
 			}
 			break;

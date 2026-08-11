@@ -916,6 +916,26 @@ cnxk_ep_bb_droq_read_packet(struct cnxk_ep_bb_device *cnxk_ep_bb_vf,
 	info->length = rte_bswap64(info->length);
 	/* Deduce the actual data size */
 	total_pkt_len = info->length + INFO_SIZE;
+
+	/* total_pkt_len is derived from the device-DMA'd info->length. Bound it
+	 * against the ring capacity before it is used to drive the reassembly
+	 * loop below; an oversized value would otherwise walk the entire ring,
+	 * consume already-NULLed slots and dereference a NULL first_buf.
+	 */
+	if (unlikely(total_pkt_len > (uint64_t)droq->nb_desc * droq->buffer_size)) {
+		cnxk_ep_bb_err("OQ[%d]: invalid device length %" PRIu64 ", dropping pkt",
+			       droq->q_no, (uint64_t)info->length);
+		droq_pkt = droq->recv_buf_list[droq->read_idx];
+		if (droq_pkt != NULL)
+			rte_pktmbuf_free(droq_pkt);
+		droq->recv_buf_list[droq->read_idx] = NULL;
+		droq->read_idx = cnxk_ep_bb_incr_index(droq->read_idx, 1,
+						   droq->nb_desc);
+		droq->refill_count++;
+		droq->stats.rx_err++;
+		goto oq_read_fail;
+	}
+
 	if (total_pkt_len <= droq->buffer_size) {
 		info->length -=  rh_size[cnxk_ep_bb_vf->sdp_packet_mode];
 		droq_pkt  = droq->recv_buf_list[droq->read_idx];
@@ -936,12 +956,27 @@ cnxk_ep_bb_droq_read_packet(struct cnxk_ep_bb_device *cnxk_ep_bb_vf,
 	} else {
 		struct rte_mbuf *first_buf = NULL;
 		struct rte_mbuf *last_buf = NULL;
+		uint32_t nsegs = 0;
 
 		/* initiating a csr read helps to flush pending dma */
 		droq->sent_reg_val = rte_read32(droq->pkts_sent_reg);
 		rte_rmb();
 		while (pkt_len < total_pkt_len) {
 			int cpy_len = 0;
+
+			/* A packet can never legitimately span more buffers than
+			 * the ring holds; bail out instead of looping unbounded.
+			 * rte_pktmbuf_free(NULL) is a no-op, so the partial chain
+			 * is released safely.
+			 */
+			if (unlikely(nsegs >= droq->nb_desc)) {
+				cnxk_ep_bb_err("OQ[%d]: jumbo pkt exceeds ring, dropping",
+					   droq->q_no);
+				rte_pktmbuf_free(first_buf);
+				first_buf = NULL;
+				break;
+			}
+			nsegs++;
 
 			cpy_len = ((pkt_len + droq->buffer_size) >
 					total_pkt_len)
@@ -950,39 +985,46 @@ cnxk_ep_bb_droq_read_packet(struct cnxk_ep_bb_device *cnxk_ep_bb_vf,
 					: droq->buffer_size;
 
 			droq_pkt = droq->recv_buf_list[droq->read_idx];
+
+			/* Device claimed more data than was delivered: drop the
+			 * partially-reassembled packet instead of dereferencing a
+			 * missing buffer (the old assert(0) is a no-op under NDEBUG).
+			 */
+			if (unlikely(droq_pkt == NULL)) {
+				cnxk_ep_bb_err("OQ[%d]: no recvbuf in jumbo processing, dropping",
+					   droq->q_no);
+				rte_pktmbuf_free(first_buf);
+				first_buf = NULL;
+				break;
+			}
 			droq->recv_buf_list[droq->read_idx] = NULL;
 
-			if (likely(droq_pkt != NULL)) {
-				/* Note the first seg */
-				if (!pkt_len)
-					first_buf = droq_pkt;
+			/* Note the first seg */
+			if (!pkt_len)
+				first_buf = droq_pkt;
 
-				droq_pkt->port = cnxk_ep_bb_vf->port_id;
-				if (!pkt_len) {
-					droq_pkt->data_off +=
-						info_size;
-					droq_pkt->pkt_len =
-						cpy_len - info_size;
-					droq_pkt->data_len =
-						cpy_len - info_size;
-				} else {
-					droq_pkt->pkt_len = cpy_len;
-					droq_pkt->data_len = cpy_len;
-				}
-
-				if (pkt_len) {
-					first_buf->nb_segs++;
-					first_buf->pkt_len += droq_pkt->pkt_len;
-				}
-
-				if (last_buf)
-					last_buf->next = droq_pkt;
-
-				last_buf = droq_pkt;
+			droq_pkt->port = cnxk_ep_bb_vf->port_id;
+			if (!pkt_len) {
+				droq_pkt->data_off +=
+					info_size;
+				droq_pkt->pkt_len =
+					cpy_len - info_size;
+				droq_pkt->data_len =
+					cpy_len - info_size;
 			} else {
-				cnxk_ep_bb_err("no recvbuf in jumbo processing");
-				assert(0);
+				droq_pkt->pkt_len = cpy_len;
+				droq_pkt->data_len = cpy_len;
 			}
+
+			if (pkt_len) {
+				first_buf->nb_segs++;
+				first_buf->pkt_len += droq_pkt->pkt_len;
+			}
+
+			if (last_buf)
+				last_buf->next = droq_pkt;
+
+			last_buf = droq_pkt;
 
 			pkt_len += cpy_len;
 			droq->read_idx = cnxk_ep_bb_incr_index(droq->read_idx, 1,
@@ -990,6 +1032,12 @@ cnxk_ep_bb_droq_read_packet(struct cnxk_ep_bb_device *cnxk_ep_bb_vf,
 			droq->refill_count++;
 		}
 		droq_pkt = first_buf;
+	}
+
+	/* A dropped/aborted reassembly leaves droq_pkt NULL; do not deref it. */
+	if (unlikely(droq_pkt == NULL)) {
+		droq->stats.rx_err++;
+		goto oq_read_fail;
 	}
 	if (droq_pkt->pkt_len > cnxk_ep_bb_vf->max_rx_pktlen) {
 		rte_pktmbuf_free(droq_pkt);

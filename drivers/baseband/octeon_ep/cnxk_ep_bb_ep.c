@@ -285,6 +285,16 @@ cnxk_ep_bb_dev_init(struct cnxk_ep_bb_device *cnxk_ep_bb_vf)
 		goto setup_fail;
 	}
 	ethdev_queues = (uint32_t)(cnxk_ep_bb_vf->sriov_info.rings_per_vf);
+	/* rings_per_vf originates from a device register and
+	 * must never exceed the fixed-size droq[]/instr_queue[] arrays
+	 * (CNXK_EP_BB_MAX_IOQS_PER_VF), else queue setup writes out of bounds.
+	 */
+	if (ethdev_queues == 0 || ethdev_queues > CNXK_EP_BB_MAX_IOQS_PER_VF) {
+		cnxk_ep_bb_err("Invalid queue count %u from device (max %u)",
+			       ethdev_queues, CNXK_EP_BB_MAX_IOQS_PER_VF);
+		ret = -EINVAL;
+		goto setup_fail;
+	}
 	cnxk_ep_bb_vf->max_rx_queues = ethdev_queues;
 	cnxk_ep_bb_vf->max_tx_queues = ethdev_queues;
 	cnxk_ep_bb_vf->fn_list.register_interrupt(cnxk_ep_bb_vf, cnxk_ep_bb_interrupt_handler,

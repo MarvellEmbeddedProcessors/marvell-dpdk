@@ -413,6 +413,19 @@ cnxk_ep_bb_vf_setup_device(struct cnxk_ep_bb_device *cnxk_ep_bb_vf)
 		((reg_val >> CNXK_EP_R_IN_CTL_RPVF_POS) &
 		 CNXK_EP_R_IN_CTL_RPVF_MASK);
 
+	/* rings_per_vf comes from a device BAR register field (0-15). The per-VF
+	 * queue arrays (droq[]/instr_queue[]) are sized CNXK_EP_BB_MAX_IOQS_PER_VF,
+	 * so a device/firmware reporting a larger count must be rejected here to
+	 * avoid out-of-bounds writes into the device private structure.
+	 */
+	if (cnxk_ep_bb_vf->sriov_info.rings_per_vf == 0 ||
+	    cnxk_ep_bb_vf->sriov_info.rings_per_vf > CNXK_EP_BB_MAX_IOQS_PER_VF) {
+		cnxk_ep_bb_err("Invalid rings_per_vf %u from device (max %u)",
+			       cnxk_ep_bb_vf->sriov_info.rings_per_vf,
+			       CNXK_EP_BB_MAX_IOQS_PER_VF);
+		return -EINVAL;
+	}
+
 	cnxk_ep_bb_info("SDP RPVF: %d", cnxk_ep_bb_vf->sriov_info.rings_per_vf);
 
 	cnxk_ep_bb_vf->fn_list.setup_iq_regs		= cnxk_ep_bb_vf_setup_iq_regs;

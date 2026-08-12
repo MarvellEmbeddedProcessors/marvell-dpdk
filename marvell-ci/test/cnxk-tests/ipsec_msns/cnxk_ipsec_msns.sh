@@ -18,7 +18,7 @@ rm -rf $LOG
 timeout 15 stdbuf -o 0 ./cnxk_ipsec_msns_api \
 	-a $IF0,custom_sa_act=1 \
 	-a 0002:1d:00.0 \
-	-a 0002:20:00.1 > $LOG &
+	-a 0002:20:00.1 >$LOG 2>&1 &
 
 echo "================================"
 while [[ ! -f $LOG ]]; do
@@ -78,7 +78,7 @@ $VFIO_DEVBIND -b vfio-pci 0002:1e:00.0
 timeout 15 stdbuf -o 0 ./cnxk_ipsec_msns_api \
 	-a $IF0,custom_inb_sa=1 \
 	-a 0002:1d:00.0,custom_inb_sa=1 \
-	-a 0002:20:00.1 -a 0002:1e:00.0 -- --testmode 1 > $LOG &
+	-a 0002:20:00.1 -a 0002:1e:00.0 -- --testmode 1 >$LOG 2>&1 &
 
 echo "================================"
 while [[ ! -f $LOG ]]; do

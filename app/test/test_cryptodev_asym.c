@@ -4280,7 +4280,7 @@ mldsa_sign(const void *test_data)
 	const uint8_t dev_id = params->valid_devs[0];
 	struct rte_crypto_asym_xform xform = {0};
 	struct rte_cryptodev_info dev_info;
-	uint8_t sign[TEST_DATA_SIZE] = {0};
+	uint8_t sign[MLDSA_MAX_SIGN_LEN] = {0};
 	size_t sign_len;
 
 	xform.mldsa.type = vector->type;
@@ -4405,7 +4405,7 @@ mldsa_verify(const void *test_data)
 	const uint8_t dev_id = params->valid_devs[0];
 	struct rte_crypto_asym_xform xform = {0};
 	struct rte_cryptodev_info dev_info;
-	uint8_t sign[TEST_DATA_SIZE] = {0};
+	uint8_t sign[MLDSA_MAX_SIGN_LEN] = {0};
 	size_t sign_len;
 
 	xform.mldsa.type = vector->type;

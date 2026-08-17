@@ -309,6 +309,7 @@ cnxk_nix_tm_shaper_profile_add(struct rte_eth_dev *eth_dev, uint32_t id,
 	if (rc) {
 		error->type = roc_nix_tm_err_to_rte_err(rc);
 		error->message = roc_error_msg_get(rc);
+		rte_free(profile);
 	}
 
 	return rc;
@@ -395,6 +396,7 @@ cnxk_nix_tm_node_add(struct rte_eth_dev *eth_dev, uint32_t node_id,
 	if (rc < 0) {
 		error->type = roc_nix_tm_err_to_rte_err(rc);
 		error->message = roc_error_msg_get(rc);
+		rte_free(node);
 		return rc;
 	}
 	error->type = RTE_TM_ERROR_TYPE_NONE;

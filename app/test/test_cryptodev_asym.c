@@ -4221,8 +4221,8 @@ mldsa_keygen(const void *test_data)
 	const struct crypto_testsuite_mldsa_params *vector = test_data;
 	const uint8_t dev_id = params->valid_devs[0];
 	struct rte_crypto_asym_xform xform = {0};
-	uint8_t privkey[TEST_DATA_SIZE] = {0};
-	uint8_t pubkey[TEST_DATA_SIZE] = {0};
+	uint8_t privkey[MLDSA_MAX_SIGN_LEN] = {0};
+	uint8_t pubkey[MLDSA_MAX_SIGN_LEN] = {0};
 
 	xform.mldsa.type = vector->type;
 	xform.xform_type = RTE_CRYPTO_ASYM_XFORM_ML_DSA;

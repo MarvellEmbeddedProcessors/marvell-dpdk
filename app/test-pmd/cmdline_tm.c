@@ -1678,6 +1678,23 @@ static void cmd_add_port_tm_nonleaf_node_parsed(void *parsed_result,
 	memset(&np, 0, sizeof(struct rte_tm_node_params));
 	memset(&error, 0, sizeof(struct rte_tm_error));
 
+	/* A non-leaf node must be added at a non-leaf level, else the driver
+	 * misreads the non-leaf parameters as leaf parameters (they share
+	 * memory in struct rte_tm_node_params), so reject that here.
+	 */
+	if (res->level_id != RTE_TM_NODE_LEVEL_ID_ANY) {
+		struct rte_tm_level_capabilities lcap;
+
+		memset(&lcap, 0, sizeof(lcap));
+		if (rte_tm_level_capabilities_get(port_id, res->level_id, &lcap,
+						  &error) == 0 &&
+		    lcap.n_nodes_nonleaf_max == 0) {
+			fprintf(stderr, " Level %u is not a non-leaf level\n",
+				res->level_id);
+			return;
+		}
+	}
+
 	/* Node parameters */
 	if (res->parent_node_id < 0)
 		parent_node_id = UINT32_MAX;
@@ -2020,6 +2037,24 @@ static void cmd_add_port_tm_leaf_node_parsed(void *parsed_result,
 
 	memset(&np, 0, sizeof(struct rte_tm_node_params));
 	memset(&error, 0, sizeof(struct rte_tm_error));
+
+	/* A leaf node must be added at a leaf level. Adding it at a non-leaf
+	 * level makes the driver misread the leaf-only cman/wred parameters as
+	 * non-leaf scheduling parameters (they share memory in struct
+	 * rte_tm_node_params), so reject that here.
+	 */
+	if (res->level_id != RTE_TM_NODE_LEVEL_ID_ANY) {
+		struct rte_tm_level_capabilities lcap;
+
+		memset(&lcap, 0, sizeof(lcap));
+		if (rte_tm_level_capabilities_get(port_id, res->level_id, &lcap,
+						  &error) == 0 &&
+		    lcap.n_nodes_leaf_max == 0) {
+			fprintf(stderr, " Level %u is not a leaf level\n",
+				res->level_id);
+			return;
+		}
+	}
 
 	/* Node parameters */
 	if (res->parent_node_id < 0)

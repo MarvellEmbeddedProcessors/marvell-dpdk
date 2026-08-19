@@ -1412,7 +1412,39 @@ cnxk_nix_tx_descriptor_dump(const struct rte_eth_dev *eth_dev, uint16_t qid, uin
 			    uint16_t num, FILE *file)
 {
 	struct cnxk_eth_dev *dev = cnxk_eth_pmd_priv(eth_dev);
+	void *txq = eth_dev->data->tx_queues[qid];
+	struct cnxk_eth_txq_sp *txq_sp;
 	struct roc_nix *nix = &dev->nix;
+	uint32_t head = ~0u, tail = ~0u;
+
+	if (num == 0)
+		return 0;
+
+	if (txq == NULL)
+		return -EINVAL;
+	txq_sp = cnxk_eth_txq_to_sp(txq);
+
+	/* Print configured depth only and not the available count. The count would be
+	 * a register snapshot separate from the mailbox SQE walk and could disagree.
+	 */
+	fprintf(file, "TxQ#%u configured depth=%u\n", qid, txq_sp->qconf.nb_desc);
+
+	/* roc_nix_sq_head_tail_get() leaves head/tail untouched on a SQ status
+	 * read error. Fail if head/tail is unchanged.
+	 */
+	roc_nix_sq_head_tail_get(nix, txq_sp->qid, &head, &tail);
+	if (head == ~0u || tail == ~0u) {
+		plt_err("Failed to read SQ head/tail for qid %u", qid);
+		return -EIO;
+	}
+
+	/* An empty SQ is a valid runtime state, e.g. an idle interface.
+	 * Treat it as an empty dump.
+	 */
+	if (head == tail) {
+		fprintf(file, "No available descriptors\n");
+		return 0;
+	}
 
 	return roc_nix_sq_desc_dump(nix, qid, offset, num, file);
 }

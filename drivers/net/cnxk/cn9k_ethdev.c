@@ -721,17 +721,33 @@ cn9k_rx_descriptor_dump(const struct rte_eth_dev *eth_dev, uint16_t qid,
 
 	available_pkts = cn9k_nix_rx_avail_get(rxq);
 
-	if ((offset + num - 1) >= available_pkts) {
-		plt_err("Invalid BD num=%u", num);
+	if (num == 0)
+		return 0;
+
+	fprintf(file, "RxQ#%u configured depth=%u, available=%d\n", qid,
+		cnxk_eth_rxq_to_sp(rxq)->qconf.nb_desc, available_pkts);
+
+	/* An empty CQ is a valid runtime state, e.g. an idle interface.
+	 * Treat it as an empty dump.
+	 */
+	if (available_pkts == 0) {
+		fprintf(file, "No available descriptors\n");
+		return 0;
+	}
+
+	if (offset >= available_pkts) {
+		plt_err("Invalid BD offset=%u, available=%d", offset, available_pkts);
 		return -EINVAL;
 	}
 
+	/* Dump only the currently available subset if the request exceeds it. */
+	if (num > available_pkts - offset)
+		num = available_pkts - offset;
+
 	while (count < num) {
-		cq = (struct nix_cqe_hdr_s *)(desc + CQE_SZ(head) +
-					      count + offset);
+		cq = (struct nix_cqe_hdr_s *)(desc + CQE_SZ((head + offset + count) & qmask));
 		roc_nix_cqe_dump(file, cq);
 		count++;
-		head &= qmask;
 	}
 	return 0;
 }

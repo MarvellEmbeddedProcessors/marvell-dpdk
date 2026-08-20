@@ -19,6 +19,12 @@ struct batch_op_mem {
 	unsigned int sz;
 	enum batch_op_status status;
 	alignas(ROC_ALIGN) uint64_t objs[BATCH_ALLOC_SZ];
+	/* Persistent, per-lcore scratch used by cn10k_mempool_deq() to keep the
+	 * cache-refill dequeue off the data-plane stack. Sized to the largest
+	 * possible refill (cache->size + remaining <= RTE_MEMPOOL_CACHE_MAX_SIZE
+	 * * 2, i.e. the capacity of rte_mempool_cache::objs[]).
+	 */
+	alignas(ROC_ALIGN) void *scratch[RTE_MEMPOOL_CACHE_MAX_SIZE * 2];
 };
 
 struct batch_op_data {
@@ -326,26 +332,41 @@ mempool_deq_batch_sync(struct rte_mempool *mp, void **obj_table, unsigned int n)
 int __rte_hot
 cn10k_mempool_deq(struct rte_mempool *mp, void **obj_table, unsigned int n)
 {
+	unsigned int lcore_id = rte_lcore_id();
+	struct rte_mempool_cache *cache;
 	struct batch_op_data *op_data;
+	void **deq_table = obj_table;
 	unsigned int count = 0;
 
 	/* For non-EAL threads, rte_lcore_id() will not be valid. Hence
 	 * fallback to bulk alloc
 	 */
-	if (unlikely(rte_lcore_id() == LCORE_ID_ANY))
+	if (unlikely(lcore_id == LCORE_ID_ANY))
 		return cnxk_mempool_deq(mp, obj_table, n);
 
 	op_data = batch_op_data_get(mp->pool_id);
+	cache = rte_mempool_default_cache(mp, lcore_id);
+
+	/* Divert only the cache-refill dequeue into the per-lcore scratch. */
+	if (cache != NULL && obj_table == cache->objs)
+		deq_table = op_data->mem[lcore_id].scratch;
+
 	if (op_data->max_async_batch)
-		count = mempool_deq_batch_async(mp, obj_table, n);
+		count = mempool_deq_batch_async(mp, deq_table, n);
 	else
-		count = mempool_deq_batch_sync(mp, obj_table, n);
+		count = mempool_deq_batch_sync(mp, deq_table, n);
 
 	if (unlikely(count != n)) {
-		/* No partial alloc allowed. Free up allocated pointers */
-		cn10k_mempool_enq(mp, obj_table, count);
+		/* No partial alloc allowed. Free up allocated pointers. When
+		 * diverted, obj_table (== cache->objs) is left untouched, so a
+		 * failed cache refill cannot corrupt the caller's mempool cache.
+		 */
+		cn10k_mempool_enq(mp, deq_table, count);
 		return -ENOENT;
 	}
+
+	if (deq_table != obj_table)
+		memcpy(obj_table, deq_table, n * sizeof(void *));
 
 	return 0;
 }

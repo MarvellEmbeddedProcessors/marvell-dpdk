@@ -50,7 +50,7 @@
 #define MAX_TX_FIRST_SZ 4096
 
 int create_default_flow(uint16_t port_id, enum rte_pmd_cnxk_sec_action_alg alg, uint32_t spi,
-			       uint16_t sa_lo, uint16_t sa_hi, uint32_t sa_index);
+			uint16_t sa_lo, uint16_t sa_hi, uint32_t sa_index, bool sa_xor);
 enum test_mode {
 	EVENT_IPSEC_INB_MSNS_PERF,
 	EVENT_IPSEC_INB_PERF,
@@ -840,7 +840,7 @@ create_ipsec_perf_session(struct ipsec_session_data *sa, uint16_t portid,
 		/* Create all flow rules on port 0 and it would get applied on all ports due
 		 * to channel mask.
 		 */
-		ret = create_default_flow(portid, action_alg, spi, sa_lo, sa_hi, sa_index);
+		ret = create_default_flow(portid, action_alg, spi, sa_lo, sa_hi, sa_index, true);
 		if (ret) {
 			printf("Flow creation failed\n");
 			return -1;
@@ -1077,7 +1077,7 @@ create_default_ipsec_oop_flow(uint16_t port_id, void *ses)
 
 int
 create_default_flow(uint16_t port_id, enum rte_pmd_cnxk_sec_action_alg alg, uint32_t spi,
-		    uint16_t sa_lo, uint16_t sa_hi, uint32_t sa_index)
+		    uint16_t sa_lo, uint16_t sa_hi, uint32_t sa_index, bool sa_xor)
 {
 	struct rte_pmd_cnxk_sec_action sec = {0};
 	struct rte_flow_action_mark mark = {0};
@@ -1111,28 +1111,28 @@ create_default_flow(uint16_t port_id, enum rte_pmd_cnxk_sec_action_alg alg, uint
 	case RTE_PMD_CNXK_SEC_ACTION_ALG0:
 		/* SPI = 0x10000001, sa_index = 0 */
 		sec.alg = RTE_PMD_CNXK_SEC_ACTION_ALG0;
-		sec.sa_xor = 1;
+		sec.sa_xor = sa_xor;
 		sec.sa_hi = sa_hi;
 		sec.sa_lo = sa_lo;
 		break;
 	case RTE_PMD_CNXK_SEC_ACTION_ALG1:
 		/* SPI = 0x10000001, sa_index = 1 */
 		sec.alg = RTE_PMD_CNXK_SEC_ACTION_ALG1;
-		sec.sa_xor = 1;
+		sec.sa_xor = sa_xor;
 		sec.sa_hi = sa_hi;
 		sec.sa_lo = sa_lo;
 		break;
 	case RTE_PMD_CNXK_SEC_ACTION_ALG2:
 		/* SPI = 0x04000001, sa_index = 2 */
 		sec.alg = RTE_PMD_CNXK_SEC_ACTION_ALG2;
-		sec.sa_xor = 1;
+		sec.sa_xor = sa_xor;
 		sec.sa_hi = sa_hi;
 		sec.sa_lo = sa_lo;
 		break;
 	case RTE_PMD_CNXK_SEC_ACTION_ALG3:
 		/* SPI = 0x04000001, sa_index = 2 */
 		sec.alg = RTE_PMD_CNXK_SEC_ACTION_ALG3;
-		sec.sa_xor = 1;
+		sec.sa_xor = sa_xor;
 		sec.sa_hi = sa_hi;
 		sec.sa_lo = sa_lo;
 		break;
@@ -4295,6 +4295,7 @@ event_ipsec_inb_msns_perf(void)
 	struct ipsec_session_data sa_data;
 	unsigned int portid;
 	uint16_t sa_hi = 0, sa_lo = 0;
+	bool sa_xor = true;
 	uint16_t lcore_id;
 	uint32_t spi = 0;
 	int ret = 0;
@@ -4319,33 +4320,37 @@ event_ipsec_inb_msns_perf(void)
 
 			switch (alg) {
 			case RTE_PMD_CNXK_SEC_ACTION_ALG0:
-				spi = (0x2 << 28 | sa_index);
+				spi = (0x2 << 28);
+				spi |= sa_xor ? 3 : sa_index;
 				sa_hi = (spi >> 16) & 0xffff;
-				sa_lo = 0x0;
+				sa_lo = sa_xor ? 3 ^ sa_index : 0;
 				break;
 			case RTE_PMD_CNXK_SEC_ACTION_ALG1:
 				/* Only SPI[31:28] are considered as SA[3:0] hence use.
 				 * rest from SPI[15:4].
 				 */
-				spi = ((sa_index & 0xF) << 28) | ((sa_index >> 4) << 4);
+				spi = (sa_index << 28);
+				spi |= sa_xor ? 3 : 0;
 				sa_hi = (spi >> 16) & 0xffff;
-				sa_lo = 0x0000;
+				sa_lo = sa_xor ? 3 : 0x0;
 				break;
 			case RTE_PMD_CNXK_SEC_ACTION_ALG2:
 				/* Only SPI[27:25] are considered as SA[2:0] hence use.
 				 * rest from SPI[15:3].
 				 */
-				spi = ((sa_index & 0x7) << 25) | ((sa_index >> 3) << 3);
+				spi = (sa_index << 25);
+				spi |= sa_xor ? 5 : 0;
 				sa_hi = (spi >> 16) & 0xffff;
-				sa_lo = 0x0000;
+				sa_lo = sa_xor ? 5 : 0x0;
 				break;
 			case RTE_PMD_CNXK_SEC_ACTION_ALG3:
 				/* Only SPI[28:25] are considered as SA[3:0] hence use.
 				 * rest from SPI[15:4].
 				 */
-				spi = ((sa_index & 0xF) << 25) | ((sa_index >> 4) << 4);
+				spi = (sa_index << 25);
+				spi |= sa_xor ? 9 : 0;
 				sa_hi = (spi >> 16) & 0xffff;
-				sa_lo = 0x0000;
+				sa_lo = sa_xor ? 9 : 0x0;
 				break;
 			default:
 				break;
@@ -4380,7 +4385,7 @@ event_ipsec_inb_msns_perf(void)
 			 * to channel mask.
 			 */
 			ret = create_default_flow(portid, alg, sa_data.ipsec_xform.spi,
-						  sa_lo, sa_hi, sa_index);
+						  sa_lo, sa_hi, sa_index, true);
 			if (ret) {
 				printf("Flow creation failed\n");
 				goto out;

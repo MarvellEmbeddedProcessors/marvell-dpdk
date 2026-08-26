@@ -389,7 +389,8 @@ otx_epdev_init(struct otx_ep_device *otx_epvf)
 		ret = -EINVAL;
 		goto setup_fail;
 	}
-	ethdev_queues = (uint32_t)(otx_epvf->sriov_info.rings_per_vf);
+	ethdev_queues = RTE_MIN(otx_epvf->sriov_info.rings_per_vf,
+				(uint32_t)OTX_EP_MAX_IOQS_PER_VF);
 	otx_epvf->max_rx_queues = ethdev_queues;
 	otx_epvf->max_tx_queues = ethdev_queues;
 

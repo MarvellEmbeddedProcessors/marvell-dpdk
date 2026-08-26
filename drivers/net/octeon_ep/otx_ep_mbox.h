@@ -72,7 +72,7 @@ enum otx_ep_link_autoneg {
 #define OTX_EP_MBOX_TIMEOUT_MS     2500
 #define OTX_EP_MBOX_MAX_RETRIES    2
 #define OTX_EP_MBOX_MAX_DATA_SIZE  6
-#define OTX_EP_MBOX_MAX_DATA_BUF_SIZE 256
+#define OTX_EP_MBOX_MAX_DATA_BUF_SIZE 320
 #define OTX_EP_MBOX_MORE_FRAG_FLAG 1
 #define OTX_EP_MBOX_WRITE_WAIT_TIME msecs_to_jiffies(1)
 

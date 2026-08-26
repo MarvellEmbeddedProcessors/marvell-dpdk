@@ -103,7 +103,7 @@ otx_ep_send_mbox_cmd(struct otx_ep_device *otx_ep,
 static int
 otx_ep_mbox_bulk_read(struct otx_ep_device *otx_ep,
 		      enum otx_ep_mbox_opcode opcode,
-		      uint8_t *data, int32_t *size)
+		      uint8_t *data, int32_t *size, int32_t max_size)
 {
 	union otx_ep_mbox_word cmd;
 	union otx_ep_mbox_word rsp;
@@ -125,6 +125,12 @@ otx_ep_mbox_bulk_read(struct otx_ep_device *otx_ep,
 	 *  in  ACK
 	 */
 	memcpy(&data_len, rsp.s_data.data, sizeof(data_len));
+	if (data_len <= 0 || data_len > max_size ||
+	    data_len > (int32_t)OTX_EP_MBOX_MAX_DATA_BUF_SIZE) {
+		otx_ep_err("mbox bulk read invalid data length %d", data_len);
+		rte_spinlock_unlock(&otx_ep->mbox_lock);
+		return -EINVAL;
+	}
 	tmp_len = data_len;
 	cmd.u64 = 0;
 	rsp.u64 = 0;
@@ -147,6 +153,14 @@ otx_ep_mbox_bulk_read(struct otx_ep_device *otx_ep,
 			data_len = 0;
 		}
 		for (i = 0; i < read_cnt; i++) {
+			if (otx_ep->mbox_data_index >= OTX_EP_MBOX_MAX_DATA_BUF_SIZE) {
+				otx_ep_err("mbox bulk read buffer overflow");
+				otx_ep->mbox_data_index = 0;
+				memset(otx_ep->mbox_data_buf, 0,
+				       OTX_EP_MBOX_MAX_DATA_BUF_SIZE);
+				rte_spinlock_unlock(&otx_ep->mbox_lock);
+				return -EINVAL;
+			}
 			otx_ep->mbox_data_buf[otx_ep->mbox_data_index] =
 				rsp.s_data.data[i];
 			otx_ep->mbox_data_index++;
@@ -265,7 +279,8 @@ int otx_ep_mbox_get_link_info(struct rte_eth_dev *eth_dev,
 		(struct otx_ep_device *)(eth_dev)->data->dev_private;
 	memset(&link_info, 0, sizeof(struct otx_ep_iface_link_info));
 	ret = otx_ep_mbox_bulk_read(otx_ep, OTX_EP_MBOX_CMD_GET_LINK_INFO,
-				      (uint8_t *)&link_info, (int32_t *)&size);
+				    (uint8_t *)&link_info, &size,
+				    sizeof(struct otx_ep_iface_link_info));
 	if (ret) {
 		otx_ep_err("Get link info failed");
 		return ret;

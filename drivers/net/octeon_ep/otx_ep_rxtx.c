@@ -598,7 +598,8 @@ prepare_xmit_gather_list(struct otx_ep_instr_queue *iq, struct rte_mbuf *m, uint
 	frags = m->nb_segs;
 	num_sg = (frags + mask) / OTX_EP_NUM_SG_PTRS;
 
-	if (unlikely(pkt_len > OTX_EP_MAX_PKT_SZ && num_sg > OTX_EP_MAX_SG_LISTS)) {
+	if (unlikely(pkt_len > OTX_EP_MAX_PKT_SZ ||
+		     num_sg > OTX_EP_MAX_SG_LISTS)) {
 		otx_ep_err("Failed to xmit the pkt, pkt_len is higher or pkt has more segments");
 		goto exit;
 	}

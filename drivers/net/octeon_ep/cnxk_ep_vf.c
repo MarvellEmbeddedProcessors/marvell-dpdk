@@ -407,8 +407,9 @@ cnxk_ep_vf_setup_device(struct otx_ep_device *otx_ep)
 	if (reg_val == UINT64_MAX)
 		return -ENODEV;
 
-	otx_ep->sriov_info.rings_per_vf =
-		((reg_val >> CNXK_EP_R_IN_CTL_RPVF_POS) & CNXK_EP_R_IN_CTL_RPVF_MASK);
+	otx_ep->sriov_info.rings_per_vf = RTE_MIN((uint32_t)((reg_val >> CNXK_EP_R_IN_CTL_RPVF_POS)
+						  & CNXK_EP_R_IN_CTL_RPVF_MASK),
+						  (uint32_t)OTX_EP_MAX_IOQS_PER_VF);
 
 	otx_ep_info("SDP RPVF: %d", otx_ep->sriov_info.rings_per_vf);
 

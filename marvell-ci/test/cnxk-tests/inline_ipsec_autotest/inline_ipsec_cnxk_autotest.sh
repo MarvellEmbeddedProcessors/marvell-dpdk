@@ -6,6 +6,10 @@ set -uo pipefail
 
 SCRIPTPATH="$( cd -- "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
 
+if cat /proc/device-tree/compatible 2>/dev/null | grep -q "cn20k"; then
+	PLAT=cn20k
+fi
+
 NIX_INL_DEV=${NIX_INL_DEV:-$(lspci -d :a0f0 | tail -1 | awk -e '{ print $1 }')}
 NIX_INL_DEVICE="$NIX_INL_DEV"
 
@@ -47,7 +51,10 @@ run_cn10k_inline_ipsec_tests() {
 	local parse=log_ipsec_parse_out.txt
 	total_fail_cnt=0
 	for test in ${!cn10k_inline_ipsec_test_args[@]}; do
-		DPDK_TEST=$test $unbuffer $DPDK_TEST_BIN ${cn10k_inline_ipsec_test_args[$test]} >$out 2>&1
+		# Key may carry a "::variant" suffix to run the same test with different args
+		dpdk_test=${test%%::*}
+		args=${cn10k_inline_ipsec_test_args[$test]}
+		DPDK_TEST=$dpdk_test $unbuffer $DPDK_TEST_BIN $args >$out 2>&1
 		cat $out
 		grep -E "\+ TestCase \[.*\] :.*failed" $out > temp_2.txt
 		fail_cnt=`cat $out | grep "Tests Failed :" | awk '{print $5}'`
@@ -72,7 +79,7 @@ run_cn10k_inline_ipsec_tests() {
 
 run_inline_ipsec_tests() {
 	case $PLAT in
-		cn10*) run_cn10k_inline_ipsec_tests ;;
+		cn10*|cn20*) run_cn10k_inline_ipsec_tests ;;
 	esac
 }
 
@@ -81,8 +88,9 @@ run_inline_ipsec_tests() {
 register_cn10k_inline_ipsec_test	inline_ipsec_autotest	"-a $ETHERNET_DEVICE,rx_inj_ena=1 -a $NIX_INL_DEVICE,rx_inj_ena=1 -a $CRYPTO_DEVICE"
 register_cn10k_inline_ipsec_test	event_inline_ipsec_autotest	"-a $ETHERNET_DEVICE,rx_inj_ena=1 -a $NIX_INL_DEVICE,rx_inj_ena=1 -a $CRYPTO_DEVICE -a $EVENT_DEVICE"
 
-if [[ $PLAT == "cn10k" && $PART_106B0 == "B0" ]]; then
+if [[ ( $PLAT == "cn10k" && $PART_106B0 == "B0" ) || $PLAT == "cn20k" ]]; then
 register_cn10k_inline_ipsec_test	inline_ipsec_sg_autotest	"-a $ETHERNET_DEVICE,rx_inj_ena=1 -a $NIX_INL_DEVICE,rx_inj_ena=1 -a $CRYPTO_DEVICE"
+register_cn10k_inline_ipsec_test	inline_ipsec_autotest::no_inl_dev	"-a $ETHERNET_DEVICE,rx_inj_ena=1,no_inl_dev=1 -a $NIX_INL_DEVICE,rx_inj_ena=1 -a $CRYPTO_DEVICE"
 fi
 
 case $TEST_TYPE in

@@ -115,6 +115,7 @@ function sig_handler()
 	trap - EXIT
 	if [[ $status -ne 0 ]]; then
 		echo "$1 Handler"
+		cat $out
 	fi
 
 	testpmd_quit $PRFX

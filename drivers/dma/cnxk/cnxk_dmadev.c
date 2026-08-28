@@ -436,13 +436,25 @@ cnxk_dmadev_completed(void *dev_private, uint16_t vchan, const uint16_t nb_cpls,
 		      bool *has_error)
 {
 	struct cnxk_dpi_vf_s *dpivf = dev_private;
-	struct cnxk_dpi_conf *dpi_conf = &dpivf->conf[vchan];
-	struct cnxk_dpi_cdesc_data_s *c_desc = &dpi_conf->c_desc;
-	const uint16_t max_cnt = c_desc->max_cnt;
+	struct cnxk_dpi_conf *dpi_conf;
+	struct cnxk_dpi_cdesc_data_s *c_desc;
+	uint16_t max_cnt;
+	uint16_t space;
 	uint8_t status;
 	int cnt;
 
-	for (cnt = 0; cnt < nb_cpls; cnt++) {
+	if (unlikely(cnxk_dmadev_vchan_invalid(dpivf, vchan)))
+		return 0;
+
+	dpi_conf = &dpivf->conf[vchan];
+	c_desc = &dpi_conf->c_desc;
+	max_cnt = c_desc->max_cnt;
+
+	space = (c_desc->tail - c_desc->head) & max_cnt;
+	space = RTE_MIN(nb_cpls, space);
+
+	for (cnt = 0; cnt < space; cnt++) {
+		rte_rmb();
 		status = c_desc->compl_ptr[(c_desc->head & max_cnt) * CNXK_DPI_COMPL_OFFSET];
 		if (status) {
 			if (status == CNXK_DPI_REQ_CDATA)
@@ -470,12 +482,24 @@ cnxk_dmadev_completed_status(void *dev_private, uint16_t vchan, const uint16_t n
 			     uint16_t *last_idx, enum rte_dma_status_code *status)
 {
 	struct cnxk_dpi_vf_s *dpivf = dev_private;
-	struct cnxk_dpi_conf *dpi_conf = &dpivf->conf[vchan];
-	struct cnxk_dpi_cdesc_data_s *c_desc = &dpi_conf->c_desc;
-	const uint16_t max_cnt = dpi_conf->c_desc.max_cnt;
+	struct cnxk_dpi_conf *dpi_conf;
+	struct cnxk_dpi_cdesc_data_s *c_desc;
+	uint16_t max_cnt;
+	uint16_t space;
 	int cnt;
 
-	for (cnt = 0; cnt < nb_cpls; cnt++) {
+	if (unlikely(cnxk_dmadev_vchan_invalid(dpivf, vchan)))
+		return 0;
+
+	dpi_conf = &dpivf->conf[vchan];
+	c_desc = &dpi_conf->c_desc;
+	max_cnt = dpi_conf->c_desc.max_cnt;
+
+	space = (c_desc->tail - c_desc->head) & max_cnt;
+	space = RTE_MIN(nb_cpls, space);
+
+	for (cnt = 0; cnt < space; cnt++) {
+		rte_rmb();
 		status[cnt] = c_desc->compl_ptr[(c_desc->head & max_cnt) * CNXK_DPI_COMPL_OFFSET];
 		if (status[cnt]) {
 			if (status[cnt] == CNXK_DPI_REQ_CDATA)
@@ -498,8 +522,13 @@ static uint16_t
 cnxk_damdev_burst_capacity(const void *dev_private, uint16_t vchan)
 {
 	const struct cnxk_dpi_vf_s *dpivf = (const struct cnxk_dpi_vf_s *)dev_private;
-	const struct cnxk_dpi_conf *dpi_conf = &dpivf->conf[vchan];
+	const struct cnxk_dpi_conf *dpi_conf;
 	uint16_t burst_cap;
+
+	if (unlikely(cnxk_dmadev_vchan_invalid(dpivf, vchan)))
+		return 0;
+
+	dpi_conf = &dpivf->conf[vchan];
 
 	burst_cap = dpi_conf->c_desc.max_cnt -
 		    (dpi_conf->stats.submitted - dpi_conf->stats.completed) + 1;

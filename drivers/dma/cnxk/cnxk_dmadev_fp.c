@@ -38,7 +38,7 @@ __dpi_cpy_vector_sg(const struct rte_dma_sge *src, uint64_t *dst, uint16_t n)
 {
 	uint64x2_t mask = {0xFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL};
 	uint64x2_t vec;
-	uint8_t i;
+	uint16_t i;
 
 	for (i = 0; i < n; i++) {
 		vec = vld1q_u64((const uint64_t *)&src[i]);
@@ -54,7 +54,7 @@ __dpi_cpy_vector_sg_lmt(const struct rte_dma_sge *src, uint64_t *dst, uint16_t n
 {
 	uint64x2_t mask = {0xFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL};
 	uint64x2_t vec;
-	uint8_t i;
+	uint16_t i;
 
 	for (i = 0; i < n && lmt; i++) {
 		vec = vld1q_u64((const uint64_t *)&src[i]);
@@ -71,7 +71,7 @@ __dpi_cpy_vector_sg_lmt(const struct rte_dma_sge *src, uint64_t *dst, uint16_t n
 static __plt_always_inline void
 __dpi_cpy_scalar_sg(const struct rte_dma_sge *src, uint64_t *dst, uint16_t n)
 {
-	uint8_t i;
+	uint16_t i;
 
 	for (i = 0; i < n; i++) {
 		*dst++ = src[i].length;
@@ -82,7 +82,7 @@ __dpi_cpy_scalar_sg(const struct rte_dma_sge *src, uint64_t *dst, uint16_t n)
 static __plt_always_inline uint8_t
 __dpi_cpy_scalar_sg_lmt(const struct rte_dma_sge *src, uint64_t *dst, uint16_t n, uint16_t lmt)
 {
-	uint8_t i;
+	uint16_t i;
 
 	for (i = 0; i < n && lmt; i++) {
 		*dst++ = src[i].length;
@@ -174,7 +174,7 @@ static __plt_always_inline int
 __dpi_queue_write_sg(struct cnxk_dpi_vf_s *dpi, uint64_t *hdr, const struct rte_dma_sge *src,
 		     const struct rte_dma_sge *dst, uint16_t nb_src, uint16_t nb_dst)
 {
-	uint8_t cmd_len = CNXK_DPI_CMD_LEN(nb_src, nb_dst);
+	uint16_t cmd_len = CNXK_DPI_CMD_LEN(nb_src, nb_dst);
 	uint64_t *ptr = dpi->chunk_base;
 
 	/* Check if command fits in the current chunk. */
@@ -212,7 +212,7 @@ __dpi_queue_write_sg(struct cnxk_dpi_vf_s *dpi, uint64_t *hdr, const struct rte_
 			__dpi_cpy(&hdr[count], buf, 4);
 			buf += (4 - count);
 		} else {
-			uint8_t i;
+			uint16_t i;
 
 			__dpi_cpy(hdr, ptr, 4);
 			ptr += 4;
@@ -249,11 +249,17 @@ cnxk_dmadev_copy(void *dev_private, uint16_t vchan, rte_iova_t src, rte_iova_t d
 		 uint64_t flags)
 {
 	struct cnxk_dpi_vf_s *dpivf = dev_private;
-	struct cnxk_dpi_conf *dpi_conf = &dpivf->conf[vchan];
+	struct cnxk_dpi_conf *dpi_conf;
 	uint64_t cmd[CNXK_DPI_DW_PER_SINGLE_CMD];
-	const uint16_t max_cnt = dpi_conf->c_desc.max_cnt;
+	uint16_t max_cnt;
 	uint8_t *comp_ptr;
 	int rc;
+
+	if (unlikely(cnxk_dmadev_vchan_invalid(dpivf, vchan)))
+		return -EINVAL;
+
+	dpi_conf = &dpivf->conf[vchan];
+	max_cnt = dpi_conf->c_desc.max_cnt;
 
 	if (unlikely(((dpi_conf->c_desc.tail + 1) & max_cnt) == (dpi_conf->c_desc.head & max_cnt)))
 		return -ENOSPC;
@@ -305,12 +311,21 @@ cnxk_dmadev_copy_sg(void *dev_private, uint16_t vchan, const struct rte_dma_sge 
 		    const struct rte_dma_sge *dst, uint16_t nb_src, uint16_t nb_dst, uint64_t flags)
 {
 	struct cnxk_dpi_vf_s *dpivf = dev_private;
-	struct cnxk_dpi_conf *dpi_conf = &dpivf->conf[vchan];
-	const uint16_t max_cnt = dpi_conf->c_desc.max_cnt;
+	struct cnxk_dpi_conf *dpi_conf;
+	uint16_t max_cnt;
 	const struct rte_dma_sge *fptr, *lptr;
 	uint8_t *comp_ptr;
 	uint64_t hdr[4];
 	int rc;
+
+	if (unlikely(cnxk_dmadev_vchan_invalid(dpivf, vchan)))
+		return -EINVAL;
+
+	if (unlikely(cnxk_dmadev_sg_count_invalid(nb_src, nb_dst)))
+		return -EINVAL;
+
+	dpi_conf = &dpivf->conf[vchan];
+	max_cnt = dpi_conf->c_desc.max_cnt;
 
 	if (unlikely(((dpi_conf->c_desc.tail + 1) & max_cnt) == (dpi_conf->c_desc.head & max_cnt)))
 		return -ENOSPC;
@@ -361,11 +376,17 @@ cn10k_dmadev_copy(void *dev_private, uint16_t vchan, rte_iova_t src, rte_iova_t 
 		  uint32_t length, uint64_t flags)
 {
 	struct cnxk_dpi_vf_s *dpivf = dev_private;
-	struct cnxk_dpi_conf *dpi_conf = &dpivf->conf[vchan];
-	const uint16_t max_cnt = dpi_conf->c_desc.max_cnt;
+	struct cnxk_dpi_conf *dpi_conf;
+	uint16_t max_cnt;
 	uint64_t cmd[CNXK_DPI_DW_PER_SINGLE_CMD];
 	uint8_t *comp_ptr;
 	int rc;
+
+	if (unlikely(cnxk_dmadev_vchan_invalid(dpivf, vchan)))
+		return -EINVAL;
+
+	dpi_conf = &dpivf->conf[vchan];
+	max_cnt = dpi_conf->c_desc.max_cnt;
 
 	if (unlikely(((dpi_conf->c_desc.tail + 1) & max_cnt) == (dpi_conf->c_desc.head & max_cnt)))
 		return -ENOSPC;
@@ -408,11 +429,20 @@ cn10k_dmadev_copy_sg(void *dev_private, uint16_t vchan, const struct rte_dma_sge
 		     uint64_t flags)
 {
 	struct cnxk_dpi_vf_s *dpivf = dev_private;
-	struct cnxk_dpi_conf *dpi_conf = &dpivf->conf[vchan];
-	const uint16_t max_cnt = dpi_conf->c_desc.max_cnt;
+	struct cnxk_dpi_conf *dpi_conf;
+	uint16_t max_cnt;
 	uint8_t *comp_ptr;
 	uint64_t hdr[4];
 	int rc;
+
+	if (unlikely(cnxk_dmadev_vchan_invalid(dpivf, vchan)))
+		return -EINVAL;
+
+	if (unlikely(cnxk_dmadev_sg_count_invalid(nb_src, nb_dst)))
+		return -EINVAL;
+
+	dpi_conf = &dpivf->conf[vchan];
+	max_cnt = dpi_conf->c_desc.max_cnt;
 
 	if (unlikely(((dpi_conf->c_desc.tail + 1) & max_cnt) == (dpi_conf->c_desc.head & max_cnt)))
 		return -ENOSPC;
@@ -475,10 +505,14 @@ cn10k_dma_adapter_enqueue(void *ws, struct rte_event ev[], uint16_t nb_events)
 	for (count = 0; count < nb_events; count++) {
 		op = ev[count].event_ptr;
 		dpivf = rte_dma_fp_objs[op->dma_dev_id].dev_private;
+		if (unlikely(cnxk_dmadev_vchan_invalid(dpivf, op->vchan)))
+			return count;
+		if (unlikely(cnxk_dmadev_sg_count_invalid(op->nb_src, op->nb_dst)))
+			return count;
 		dpi_conf = &dpivf->conf[op->vchan];
 
-		nb_src = op->nb_src & CNXK_DPI_MAX_POINTER;
-		nb_dst = op->nb_dst & CNXK_DPI_MAX_POINTER;
+		nb_src = op->nb_src;
+		nb_dst = op->nb_dst;
 
 		hdr[0] = dpi_conf->cmd.u | ((uint64_t)DPI_HDR_PT_WQP << 54);
 		hdr[0] |= (nb_dst << 6) | nb_src;
@@ -535,16 +569,19 @@ cn9k_dma_adapter_dual_enqueue(void *ws, struct rte_event ev[], uint16_t nb_event
 
 	for (count = 0; count < nb_events; count++) {
 		op = ev[count].event_ptr;
-		rsp_info = (struct rte_event *)((uint8_t *)op +
-						sizeof(struct rte_dma_op));
+		rsp_info = (struct rte_event *)((uint8_t *)op + sizeof(struct rte_dma_op));
 		dpivf = rte_dma_fp_objs[op->dma_dev_id].dev_private;
+		if (unlikely(cnxk_dmadev_vchan_invalid(dpivf, op->vchan)))
+			return count;
+		if (unlikely(cnxk_dmadev_sg_count_invalid(op->nb_src, op->nb_dst)))
+			return count;
 		dpi_conf = &dpivf->conf[op->vchan];
 
 		hdr[1] = dpi_conf->cmd.u | ((uint64_t)DPI_HDR_PT_WQP << 36);
 		hdr[2] = (uint64_t)op;
 
-		nb_src = op->nb_src & CNXK_DPI_MAX_POINTER;
-		nb_dst = op->nb_dst & CNXK_DPI_MAX_POINTER;
+		nb_src = op->nb_src;
+		nb_dst = op->nb_dst;
 		/*
 		 * For inbound case, src pointers are last pointers.
 		 * For all other cases, src pointers are first pointers.
@@ -606,13 +643,17 @@ cn9k_dma_adapter_enqueue(void *ws, struct rte_event ev[], uint16_t nb_events)
 	for (count = 0; count < nb_events; count++) {
 		op = ev[count].event_ptr;
 		dpivf = rte_dma_fp_objs[op->dma_dev_id].dev_private;
+		if (unlikely(cnxk_dmadev_vchan_invalid(dpivf, op->vchan)))
+			return count;
+		if (unlikely(cnxk_dmadev_sg_count_invalid(op->nb_src, op->nb_dst)))
+			return count;
 		dpi_conf = &dpivf->conf[op->vchan];
 
 		hdr[1] = dpi_conf->cmd.u | ((uint64_t)DPI_HDR_PT_WQP << 36);
 		hdr[2] = (uint64_t)op;
 
-		nb_src = op->nb_src & CNXK_DPI_MAX_POINTER;
-		nb_dst = op->nb_dst & CNXK_DPI_MAX_POINTER;
+		nb_src = op->nb_src;
+		nb_dst = op->nb_dst;
 		/*
 		 * For inbound case, src pointers are last pointers.
 		 * For all other cases, src pointers are first pointers.
@@ -664,6 +705,8 @@ cnxk_dma_adapter_dequeue(uintptr_t get_work1)
 
 	op = (struct rte_dma_op *)get_work1;
 	dpivf = rte_dma_fp_objs[op->dma_dev_id].dev_private;
+	if (unlikely(cnxk_dmadev_vchan_invalid(dpivf, op->vchan)))
+		return (uintptr_t)op;
 	dpi_conf = &dpivf->conf[op->vchan];
 
 	if (rte_atomic_load_explicit((RTE_ATOMIC(uint64_t) *)&op->impl_opaque[0],
@@ -684,8 +727,8 @@ uint16_t
 cnxk_dma_ops_enqueue(void *dev_private, uint16_t vchan, struct rte_dma_op **ops, uint16_t nb_ops)
 {
 	struct cnxk_dpi_vf_s *dpivf = dev_private;
-	struct cnxk_dpi_conf *dpi_conf = &dpivf->conf[vchan];
-	const uint16_t max_cnt = dpi_conf->c_desc.max_cnt;
+	struct cnxk_dpi_conf *dpi_conf;
+	uint16_t max_cnt;
 	const struct rte_dma_sge *fptr, *lptr;
 	uint16_t src, dst, nwords = 0;
 	struct rte_dma_op *op;
@@ -694,12 +737,21 @@ cnxk_dma_ops_enqueue(void *dev_private, uint16_t vchan, struct rte_dma_op **ops,
 	uint64_t hdr[4];
 	int rc;
 
+	if (unlikely(cnxk_dmadev_vchan_invalid(dpivf, vchan)))
+		return 0;
+
+	dpi_conf = &dpivf->conf[vchan];
+	max_cnt = dpi_conf->c_desc.max_cnt;
+
 	space = ((dpi_conf->c_desc.max_cnt + dpi_conf->c_desc.head - dpi_conf->c_desc.tail) &
 		 max_cnt);
 	space = RTE_MIN(space, nb_ops);
 
 	for (i = 0; i < space; i++) {
 		op = ops[i];
+		if (unlikely(cnxk_dmadev_sg_count_invalid(op->nb_src, op->nb_dst)))
+			goto done;
+
 		comp_ptr = &dpi_conf->c_desc.compl_ptr[(dpi_conf->c_desc.tail & max_cnt) *
 						       CNXK_DPI_COMPL_OFFSET];
 		dpi_conf->c_desc.ops[dpi_conf->c_desc.tail & max_cnt] = op;
@@ -746,8 +798,8 @@ uint16_t
 cn10k_dma_ops_enqueue(void *dev_private, uint16_t vchan, struct rte_dma_op **ops, uint16_t nb_ops)
 {
 	struct cnxk_dpi_vf_s *dpivf = dev_private;
-	struct cnxk_dpi_conf *dpi_conf = &dpivf->conf[vchan];
-	const uint16_t max_cnt = dpi_conf->c_desc.max_cnt;
+	struct cnxk_dpi_conf *dpi_conf;
+	uint16_t max_cnt;
 	uint16_t space, i, nwords = 0;
 	struct rte_dma_op *op;
 	uint16_t src, dst;
@@ -755,11 +807,20 @@ cn10k_dma_ops_enqueue(void *dev_private, uint16_t vchan, struct rte_dma_op **ops
 	uint64_t hdr[4];
 	int rc;
 
+	if (unlikely(cnxk_dmadev_vchan_invalid(dpivf, vchan)))
+		return 0;
+
+	dpi_conf = &dpivf->conf[vchan];
+	max_cnt = dpi_conf->c_desc.max_cnt;
+
 	space = (max_cnt + dpi_conf->c_desc.head - dpi_conf->c_desc.tail) & max_cnt;
 	space = RTE_MIN(space, nb_ops);
 
 	for (i = 0; i < space; i++) {
 		op = ops[i];
+		if (unlikely(cnxk_dmadev_sg_count_invalid(op->nb_src, op->nb_dst)))
+			goto done;
+
 		src = op->nb_src;
 		dst = op->nb_dst;
 
@@ -795,17 +856,25 @@ uint16_t
 cnxk_dma_ops_dequeue(void *dev_private, uint16_t vchan, struct rte_dma_op **ops, uint16_t nb_ops)
 {
 	struct cnxk_dpi_vf_s *dpivf = dev_private;
-	struct cnxk_dpi_conf *dpi_conf = &dpivf->conf[vchan];
-	struct cnxk_dpi_cdesc_data_s *c_desc = &dpi_conf->c_desc;
-	const uint16_t max_cnt = c_desc->max_cnt;
+	struct cnxk_dpi_conf *dpi_conf;
+	struct cnxk_dpi_cdesc_data_s *c_desc;
+	uint16_t max_cnt;
 	struct rte_dma_op *op;
 	uint16_t space, cnt;
 	uint8_t status;
+
+	if (unlikely(cnxk_dmadev_vchan_invalid(dpivf, vchan)))
+		return 0;
+
+	dpi_conf = &dpivf->conf[vchan];
+	c_desc = &dpi_conf->c_desc;
+	max_cnt = c_desc->max_cnt;
 
 	space = (c_desc->tail - c_desc->head) & max_cnt;
 	space = RTE_MIN(nb_ops, space);
 
 	for (cnt = 0; cnt < space; cnt++) {
+		rte_rmb();
 		status = c_desc->compl_ptr[(c_desc->head & max_cnt) * CNXK_DPI_COMPL_OFFSET];
 		op = c_desc->ops[c_desc->head & max_cnt];
 		if (status) {

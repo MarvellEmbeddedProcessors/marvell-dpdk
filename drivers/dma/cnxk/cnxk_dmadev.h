@@ -126,6 +126,18 @@ struct cnxk_dpi_vf_s {
 	uint16_t flag;
 } __plt_cache_aligned;
 
+static __plt_always_inline bool
+cnxk_dmadev_vchan_invalid(const struct cnxk_dpi_vf_s *dpivf, uint16_t vchan)
+{
+	return (uint32_t)vchan >= dpivf->num_vchans;
+}
+
+static __plt_always_inline bool
+cnxk_dmadev_sg_count_invalid(uint16_t nb_src, uint16_t nb_dst)
+{
+	return nb_src > CNXK_DPI_MAX_POINTER || nb_dst > CNXK_DPI_MAX_POINTER;
+}
+
 int cnxk_dmadev_copy(void *dev_private, uint16_t vchan, rte_iova_t src, rte_iova_t dst,
 		     uint32_t length, uint64_t flags);
 int cnxk_dmadev_copy_sg(void *dev_private, uint16_t vchan, const struct rte_dma_sge *src,

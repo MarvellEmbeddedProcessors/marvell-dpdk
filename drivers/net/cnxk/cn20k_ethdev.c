@@ -279,8 +279,10 @@ cn20k_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid, uint16_t nb_
 {
 	struct cnxk_eth_dev *dev = cnxk_eth_pmd_priv(eth_dev);
 	struct cn20k_eth_rxq *rxq;
+	struct cnxk_eth_rxq_sp *rxq_sp;
 	struct roc_nix_rq *rq;
 	struct roc_nix_cq *cq;
+	struct rte_mempool *buf_mp = mp;
 	int rc;
 
 	RTE_SET_USED(socket);
@@ -323,8 +325,13 @@ cn20k_nix_rx_queue_setup(struct rte_eth_dev *eth_dev, uint16_t qid, uint16_t nb_
 	/* Data offset from data to start of mbuf is first_skip */
 	rxq->data_off = rq->first_skip;
 	rxq->mbuf_initializer = cnxk_nix_rxq_mbuf_setup(dev);
-	rxq->mp_buf_sz = (mp->elt_size + mp->header_size + mp->trailer_size) & 0xFFFFFFFF;
-	rxq->mp_buf_sz |= (uint64_t)mp->header_size << 32;
+	if (buf_mp == NULL) {
+		rxq_sp = cnxk_eth_rxq_to_sp(rxq);
+		buf_mp = rxq_sp->qconf.mp;
+	}
+	rxq->mp_buf_sz =
+		(buf_mp->elt_size + buf_mp->header_size + buf_mp->trailer_size) & 0xFFFFFFFF;
+	rxq->mp_buf_sz |= (uint64_t)buf_mp->header_size << 32;
 
 	/* Setup security related info */
 	if (dev->rx_offload_flags & NIX_RX_OFFLOAD_SECURITY_F) {

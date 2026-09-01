@@ -171,6 +171,8 @@
 #define RVU_BLOCK_ADDR_R_START (0x14ull)
 #define RVU_BLOCK_ADDR_REE0    (0x14ull)
 #define RVU_BLOCK_ADDR_REE1    (0x15ull)
+#define RVU_BLOCK_ADDR_DPI0    (0x18ULL)
+#define RVU_BLOCK_ADDR_DPI1    (0x19ULL)
 #define RVU_BLOCK_ADDR_ML      (0x1aull)
 #define RVU_BLOCK_ADDR_MBOX    (0x1bULL)
 

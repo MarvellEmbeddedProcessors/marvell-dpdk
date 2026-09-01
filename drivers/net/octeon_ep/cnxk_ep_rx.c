@@ -8,56 +8,94 @@ static __rte_always_inline void
 cnxk_ep_process_pkts_scalar_mseg(struct rte_mbuf **rx_pkts, struct otx_ep_droq *droq,
 				 uint16_t new_pkts)
 {
+	struct otx_ep_droq_desc *desc_ring = droq->desc_ring;
 	struct rte_mbuf **recv_buf_list = droq->recv_buf_list;
 	uint32_t total_pkt_len, bytes_rsvd = 0;
 	uint16_t nb_desc = droq->nb_desc;
 	uint16_t pkts;
 
 	for (pkts = 0; pkts < new_pkts; pkts++) {
+		union cn20k_ep_rx_compl_t compl;
 		struct otx_ep_droq_info *info;
 		struct rte_mbuf *first_buf = NULL;
 		struct rte_mbuf *last_buf = NULL;
 		struct rte_mbuf *mbuf;
-		uint32_t pkt_len = 0;
+		uint32_t i, pkt_len = 0;
 
 		mbuf = recv_buf_list[droq->read_idx];
-		info = cnxk_pktmbuf_mtod(mbuf, struct otx_ep_droq_info *);
 
-		total_pkt_len = rte_bswap16(info->length >> 48) + OTX_EP_INFO_SIZE;
+		if (droq->chip_gen == OTX_EP_CN20XX) {
+			uint32_t num_bufs;
 
-		while (pkt_len < total_pkt_len) {
-			int cpy_len;
+			compl.u = rte_bswap64(desc_ring[droq->read_idx].info_ptr);
+			num_bufs = compl.s.num_buf;
 
-			cpy_len = ((pkt_len + droq->buffer_size) > total_pkt_len)
-					? ((uint32_t)total_pkt_len - pkt_len) : droq->buffer_size;
+			first_buf = mbuf;
+			*(uint64_t *)&first_buf->rearm_data = droq->rearm_data;
+			first_buf->pkt_len = compl.s.pkt_len;
+			first_buf->nb_segs = num_bufs;
 
-			mbuf = droq->recv_buf_list[droq->read_idx];
+			first_buf->data_len = droq->buffer_size;
+			last_buf = first_buf;
 
-			if (!pkt_len) {
-				/* Note the first seg */
-				first_buf = mbuf;
-				*(uint64_t *)&mbuf->rearm_data = droq->rearm_data;
-				mbuf->pkt_len = cpy_len - OTX_EP_INFO_SIZE;
-				mbuf->data_len = cpy_len - OTX_EP_INFO_SIZE;
-			} else {
-				mbuf->pkt_len = cpy_len;
-				mbuf->data_len = cpy_len;
-				first_buf->nb_segs++;
-				first_buf->pkt_len += mbuf->pkt_len;
-			}
+			for (i = 1; i < num_bufs; i++) {
+				droq->read_idx = otx_ep_incr_index(droq->read_idx, 1,
+								   nb_desc);
+				mbuf = recv_buf_list[droq->read_idx];
+				if (unlikely(!mbuf))
+					break;
 
-			if (last_buf)
+				if (i == (num_bufs - 1))
+					mbuf->data_len = compl.s.last_buf_len;
+				else
+					mbuf->data_len = droq->buffer_size;
+
 				last_buf->next = mbuf;
+				last_buf = mbuf;
+			}
+			last_buf->next = NULL;
 
-			last_buf = mbuf;
-
-			pkt_len += cpy_len;
 			droq->read_idx = otx_ep_incr_index(droq->read_idx, 1, nb_desc);
-			droq->refill_count++;
+			droq->refill_count += num_bufs;
+		} else {
+			info = rte_pktmbuf_mtod(mbuf, struct otx_ep_droq_info *);
+			total_pkt_len = rte_bswap16(info->length >> 48) + OTX_EP_INFO_SIZE;
+
+			while (pkt_len < total_pkt_len) {
+				int cpy_len;
+
+				cpy_len = ((pkt_len + droq->buffer_size) > total_pkt_len)
+						? ((uint32_t)total_pkt_len - pkt_len) :
+						 droq->buffer_size;
+
+				mbuf = droq->recv_buf_list[droq->read_idx];
+
+				if (!pkt_len) {
+					/* Note the first seg */
+					first_buf = mbuf;
+					mbuf->data_off += OTX_EP_INFO_SIZE;
+					mbuf->pkt_len = cpy_len - OTX_EP_INFO_SIZE;
+					mbuf->data_len = cpy_len - OTX_EP_INFO_SIZE;
+				} else {
+					mbuf->pkt_len = cpy_len;
+					mbuf->data_len = cpy_len;
+					first_buf->nb_segs++;
+					first_buf->pkt_len += mbuf->pkt_len;
+				}
+
+				if (last_buf)
+					last_buf->next = mbuf;
+
+				last_buf = mbuf;
+
+				pkt_len += cpy_len;
+				droq->read_idx = otx_ep_incr_index(droq->read_idx, 1, nb_desc);
+				droq->refill_count++;
+			}
 		}
 		mbuf = first_buf;
 		rx_pkts[pkts] = mbuf;
-		bytes_rsvd += pkt_len;
+		bytes_rsvd += mbuf->pkt_len;
 	}
 
 	droq->pkts_pending -= pkts;

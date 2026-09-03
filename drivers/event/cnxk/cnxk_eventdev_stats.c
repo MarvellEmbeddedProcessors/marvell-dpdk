@@ -157,6 +157,8 @@ cnxk_sso_xstats_get(const struct rte_eventdev *event_dev,
 	};
 
 	for (i = 0; i < n && i < xstats_mode_count; i++) {
+		if (ids[i] < start_offset || (ids[i] - start_offset) >= xstats_mode_count)
+			goto invalid_value;
 		xstat = &xstats[ids[i] - start_offset];
 		value = *(uint64_t *)((char *)rsp + xstat->offset);
 		value = (value >> xstat->shift) & xstat->mask;
@@ -221,14 +223,27 @@ cnxk_sso_xstats_reset(struct rte_eventdev *event_dev,
 		goto invalid_value;
 	};
 
+	if (ids == NULL) {
+		for (i = 0; i < xstats_mode_count; i++) {
+			xstat = &xstats[i];
+			value = *(uint64_t *)((char *)rsp + xstat->offset);
+			value = (value >> xstat->shift) & xstat->mask;
+
+			xstat->reset_snap[queue_port_id] = value;
+		}
+		return 0;
+	}
+
 	for (i = 0; i < n && i < xstats_mode_count; i++) {
+		if (ids[i] < start_offset || (ids[i] - start_offset) >= xstats_mode_count)
+			goto invalid_value;
 		xstat = &xstats[ids[i] - start_offset];
 		value = *(uint64_t *)((char *)rsp + xstat->offset);
 		value = (value >> xstat->shift) & xstat->mask;
 
 		xstat->reset_snap[queue_port_id] = value;
 	}
-	return i;
+	return 0;
 invalid_value:
 	return -EINVAL;
 }

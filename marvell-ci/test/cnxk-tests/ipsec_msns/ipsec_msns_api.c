@@ -51,6 +51,7 @@
 #define RTE_LOGTYPE_APP RTE_LOGTYPE_USER1
 #define app_err(...)  RTE_LOG(ERR, APP, __VA_ARGS__)
 #define app_info(...) RTE_LOG(INFO, APP, __VA_ARGS__)
+#define app_dbg(...)  RTE_LOG(DEBUG, APP, __VA_ARGS__)
 
 static int create_custom_flow(uint16_t port_id, enum rte_pmd_cnxk_sec_action_alg alg,
 			      uint16_t profile_id, uint32_t spi, uint16_t sa_hi, uint16_t sa_lo,
@@ -68,6 +69,8 @@ enum test_mode {
 	IPSEC_RTE_PMD_CNXK_PCP_QSEL_TEST,
 	/* DSCP-based CPT queue selection test (CN20K only) */
 	IPSEC_RTE_PMD_CNXK_DSCP_QSEL_TEST,
+	/* Inbound AES-GCM AR test */
+	IPSEC_RTE_PMD_CNXK_INB_AR_TEST,
 };
 
 static struct rte_mempool *mbufpool[RTE_MAX_ETHPORTS];
@@ -161,6 +164,7 @@ static int nb_event_ports;
 static uint32_t num_sas = 1;
 static bool inl_inb_oop;
 static struct ipsec_session_data *sess_conf = &conf_aes_128_gcm;
+static bool pkt_input_mode;
 
 static void
 signal_handler(int signum)
@@ -188,6 +192,8 @@ ipsec_test_mode_to_string(enum test_mode testmode)
 		return "IPSEC_RTE_PMD_CNXK_PCP_QSEL_TEST";
 	case IPSEC_RTE_PMD_CNXK_DSCP_QSEL_TEST:
 		return "IPSEC_RTE_PMD_CNXK_DSCP_QSEL_TEST";
+	case IPSEC_RTE_PMD_CNXK_INB_AR_TEST:
+		return "IPSEC_RTE_PMD_CNXK_INB_AR_TEST";
 	}
 	return NULL;
 }
@@ -628,6 +634,7 @@ print_usage(const char *name)
 		"\t\t\t3: CUSTOM_PROFILE_RTE_PMD_CNXK_MSNS_TEST\n"
 		"\t\t\t4: IPSEC_RTE_PMD_CNXK_PCP_QSEL_TEST (CN20K)\n"
 		"\t\t\t5: IPSEC_RTE_PMD_CNXK_DSCP_QSEL_TEST (CN20K)\n"
+		"\t\t\t6: IPSEC_RTE_PMD_CNXK_INB_AR_TEST\n"
 		"\t[--portmask]	          Port mask to enable\n"
 		"\t[--nb-mbufs <count >]  MBUFs per packet pool\n"
 		"\t[--num-sas <count>]    Number of SA's to create\n"
@@ -636,6 +643,7 @@ print_usage(const char *name)
 		"\t[--vector-sz <size>]   Set vector size. Default is 32.\n"
 		"\t[--algo <aes_128_gcm|aes_256_gcm>] Cipher algorithm to use\n"
 		"\t[--lpbk]               Enable loopback mode\n"
+		"\t[--pkt-input]          Auto-test vs external traffic\n"
 		"\t[--config <file>]      Configuration file for flow rules\n",
 		name);
 }
@@ -675,6 +683,13 @@ parse_args(int argc, char **argv)
 
 		if (!strcmp(argv[0], "--inl-inb-oop")) {
 			inl_inb_oop = true;
+			argc--;
+			argv++;
+			continue;
+		}
+
+		if (!strcmp(argv[0], "--pkt-input")) {
+			pkt_input_mode = true;
 			argc--;
 			argv++;
 			continue;
@@ -835,12 +850,13 @@ cnxk_sa_index_init(int port_id, enum rte_security_ipsec_sa_direction dir, uint32
 }
 
 /*
- * Custom profile tests require the ethdev to be probed with the cnxk devargs
- * "custom_inb_sa=1" and "custom_sa_act=1". Verify both are present in the
- * port's devargs before running those tests.
+ * Custom-SA tests require the ethdev to be probed with the cnxk devarg
+ * "custom_inb_sa=1". The custom-profile tests additionally need
+ * "custom_sa_act=1" (pass need_sa_act=true);.
+ * Verify the required devargs are present on the port.
  */
 static bool
-ethdev_has_custom_sa_devargs(uint16_t portid)
+ethdev_has_custom_sa_devargs(uint16_t portid, bool need_sa_act)
 {
 	struct rte_eth_dev_info dev_info;
 	const struct rte_devargs *devargs;
@@ -859,8 +875,35 @@ ethdev_has_custom_sa_devargs(uint16_t portid)
 	if (args == NULL)
 		return false;
 
-	return strstr(args, "custom_inb_sa=1") != NULL &&
-	       strstr(args, "custom_sa_act=1") != NULL;
+	if (strstr(args, "custom_inb_sa=1") == NULL)
+		return false;
+
+	if (need_sa_act && strstr(args, "custom_sa_act=1") == NULL)
+		return false;
+
+	return true;
+}
+
+static bool
+inldev_has_custom_inb_sa(uint16_t portid)
+{
+	struct rte_eth_dev_info dev_info;
+	const struct rte_devargs *da;
+	const char *port_name = NULL;
+
+	if (rte_eth_dev_info_get(portid, &dev_info) == 0 && dev_info.device != NULL)
+		port_name = rte_dev_name(dev_info.device);
+
+	RTE_EAL_DEVARGS_FOREACH(NULL, da) {
+		if (da->args == NULL || strstr(da->args, "custom_inb_sa=1") == NULL)
+			continue;
+		/* Skip the NIX port itself; we want the separate inline device. */
+		if (port_name != NULL && !strcmp(da->name, port_name))
+			continue;
+		return true;
+	}
+
+	return false;
 }
 
 static int
@@ -1055,11 +1098,26 @@ ut_setup(int argc, char **argv)
 
 		if ((testmode == CUSTOM_PROFILE_RTE_PMD_CNXK_API_TEST ||
 		     testmode == CUSTOM_PROFILE_RTE_PMD_CNXK_MSNS_TEST) &&
-		    !ethdev_has_custom_sa_devargs(portid)) {
+		    !ethdev_has_custom_sa_devargs(portid, true)) {
 			app_err("Skipping %s: port %u devargs missing "
 				"\"custom_inb_sa=1\" and \"custom_sa_act=1\"\n",
 				ipsec_test_mode_to_string(testmode), portid);
 			return -ENOTSUP;
+		}
+
+		if (testmode == IPSEC_RTE_PMD_CNXK_INB_AR_TEST) {
+			if (!ethdev_has_custom_sa_devargs(portid, false)) {
+				app_err("Skipping %s: NIX port %u devargs missing "
+					"\"custom_inb_sa=1\"\n",
+					ipsec_test_mode_to_string(testmode), portid);
+				return -ENOTSUP;
+			}
+			if (!inldev_has_custom_inb_sa(portid)) {
+				app_err("Skipping %s: inline device devargs missing "
+					"\"custom_inb_sa=1\"\n",
+					ipsec_test_mode_to_string(testmode));
+				return -ENOTSUP;
+			}
 		}
 
 		if (testmode == CUSTOM_PROFILE_RTE_PMD_CNXK_API_TEST) {
@@ -1619,6 +1677,7 @@ exit:
 }
 
 #define CUSTOM_SA_SZ  512
+
 static int
 pmd_cnxk_api_test(void)
 {
@@ -1655,6 +1714,271 @@ pmd_cnxk_api_test(void)
 	rc = pmd_cnxk_api_custom_inb_sa_verify();
 
 exit:
+	/* Destroy the SA */
+	ipsec_inb_sa_init(&sa_dptr.inb);
+	if (rte_pmd_cnxk_hw_sa_write(portid, sa, &sa_dptr, CUSTOM_SA_SZ, true))
+		app_err("Couldn't destroy the SA\n");
+
+	return rc;
+}
+
+#define UCC_SUCCESS_PKT_IP_BADCSUM 0xed	/* ROC_IE_OW_UCC_SUCCESS_PKT_IP_BADCSUM */
+static inline bool
+uc_compcode_is_success(uint8_t ucc)
+{
+	return (uint8_t)(ucc - 1u) >= (uint8_t)(UCC_SUCCESS_PKT_IP_BADCSUM - 1u);
+}
+
+/*
+ * Flush + read back the SA context and dump the anti-replay window
+ */
+static int
+sa_read_dump_ar(unsigned int portid, void *sa, const char *label,
+		bool check_clear, bool sa_dump,
+		struct rte_pmd_cnxk_ipsec_inb_ctx_update_reg *ar_out)
+{
+	struct rte_pmd_cnxk_ipsec_inb_ctx_update_reg *c;
+	union rte_pmd_cnxk_ipsec_hw_sa rd;
+	char verdict[24] = "";
+	int rc;
+
+	rc = rte_pmd_cnxk_hw_sa_read(portid, sa, &rd, CUSTOM_SA_SZ, true);
+	if (rc != 0) {
+		app_err("%s SA flush/read failed rc=%d\n", label, rc);
+		return rc;
+	}
+
+	/* GCM inbound ctx is relocated to hmac_opad_ipad (byte 120) */
+	c = RTE_PTR_ADD(&rd, offsetof(struct rte_pmd_cnxk_ipsec_inb_sa, hmac_opad_ipad));
+
+	if (ar_out)
+		*ar_out = *c;
+
+	if (check_clear) {
+		bool clear = (c->ar_base == 0 && c->ar_valid_mask == 0 &&
+			      c->ar_winbits[0] == 0 && c->ar_winbits[1] == 0 &&
+			      c->ar_winbits[2] == 0 && c->ar_winbits[3] == 0 &&
+			      c->ar_winbits[4] == 0 && c->ar_winbits[5] == 0 &&
+			      c->ar_winbits[6] == 0 && c->ar_winbits[7] == 0);
+
+		snprintf(verdict, sizeof(verdict), " -> %s",
+			 clear ? "ALL CLEAR" : "NOT CLEAR!");
+	}
+
+	app_dbg("%s AR: ar_base=%" PRIu64 " ar_valid_mask=0x%" PRIx64
+		" winbits[0..7]=0x%" PRIx64 " 0x%" PRIx64 " 0x%" PRIx64
+		" 0x%" PRIx64 " 0x%" PRIx64 " 0x%" PRIx64 " 0x%" PRIx64
+		" 0x%" PRIx64 "%s\n",
+		label, c->ar_base, c->ar_valid_mask,
+		c->ar_winbits[0], c->ar_winbits[1], c->ar_winbits[2],
+		c->ar_winbits[3], c->ar_winbits[4], c->ar_winbits[5],
+		c->ar_winbits[6], c->ar_winbits[7], verdict);
+
+	if (sa_dump && rte_log_can_log(RTE_LOGTYPE_APP, RTE_LOG_DEBUG)) {
+		app_dbg("  SA base=%p dump_start=%p\n", sa, RTE_PTR_ADD(&rd, 112));
+		rte_hexdump(stdout, "SA read-back [112..256]", RTE_PTR_ADD(&rd, 112), 144);
+	}
+
+	return 0;
+}
+
+/*
+ * Basic inbound AES-GCM anti-replay monitor: create an inbound SA at SPI=1 with
+ * the 1024-bit anti-replay window enabled, route external ESP traffic to it,
+ * and for every decrypted packet flush the SA context (CPT_LF_CTX_FLUSH) and
+ * read it back from DDR to watch ar_base / ar_valid_mask / ar_winbits[] evolve
+ * as sequence numbers arrive.
+ */
+#define NB_IPSEC_INB_AR_TEST_PKT 2
+static int
+pmd_cnxk_api_inb_ar_test(void)
+{
+	struct rte_mbuf *rx_pkts_burst[NB_IPSEC_INB_AR_TEST_PKT];
+	uint16_t lcore_id = rte_lcore_id();
+	struct lcore_cfg *info = &lcore_cfg[lcore_id];
+	union rte_pmd_cnxk_ipsec_hw_sa *sa, sa_dptr;
+	uint64_t rx_count = 0, decrypt_ok = 0;
+	uint8_t compcode, uc_compcode;
+	struct rte_mbuf *m = NULL;
+	uint16_t nb_tx, nb_rx;
+	uint64_t ph_w0, ph_w3;
+	unsigned int portid;
+	uint32_t cookie, j;
+	size_t ctx_bytes;
+	uint8_t *cpth;
+	int rc = 0;
+
+	portid = info->portid;
+
+	sa = rte_pmd_cnxk_hw_session_base_get(portid, true);
+	sa = RTE_PTR_ADD(sa, CUSTOM_SA_SZ);
+	memset(sa, 0, CUSTOM_SA_SZ);
+
+	pmd_cnxk_api_inb_session_fill(&sa_dptr.inb);
+	sa_dptr.inb.w0.s.count_glb_octets = 0;
+	sa_dptr.inb.w0.s.count_glb_pkts = 0;
+	sa_dptr.inb.w0.s.ar_win = MSNS_SA_AR_WIN_1024;
+	ctx_bytes = offsetof(struct rte_pmd_cnxk_ipsec_inb_sa, ctx) +
+			offsetof(struct rte_pmd_cnxk_ipsec_inb_ctx_update_reg, ar_winbits) +
+			(1u << (MSNS_SA_AR_WIN_1024 - 1)) * sizeof(uint64_t);
+	sa_dptr.inb.w0.s.ctx_size = RTE_ALIGN_CEIL(ctx_bytes, 128) / 128 - 1;
+	sa_dptr.inb.w0.s.hw_ctx_off =
+		offsetof(struct rte_pmd_cnxk_ipsec_inb_sa, hmac_opad_ipad) / 8;
+	sa_dptr.inb.w0.s.ctx_push_size = sa_dptr.inb.w0.s.hw_ctx_off + 1;
+	memcpy(sa, &sa_dptr.inb, 8);
+	sa_dptr.inb.w2.s.valid = 1;
+
+	rc = rte_pmd_cnxk_hw_sa_write(portid, sa, &sa_dptr, CUSTOM_SA_SZ, true);
+	if (rc) {
+		app_err("Couldn't create the inbound AES-GCM SA\n");
+		return rc;
+	}
+	app_info("Inbound AES-GCM SA (SPI=1, 1024-bit AR window) created @%p\n", sa);
+
+	create_default_ipsec_flow(portid);
+
+	if (!pkt_input_mode) {
+		/* -------- Auto test (default) ----------------------------------
+		 * Self-generate two known consecutive ESP packets (SPI=1, seq=1216
+		 * and seq=1217) and TX them.
+		 * expected ar_winbits[3] = 3 for ESP 1216 and 1217.
+		 */
+		struct ipsec_test_packet *auto_vec[NB_IPSEC_INB_AR_TEST_PKT] = {
+			&pkt_ipv4_gcm128_spi1_seq1216,
+			&pkt_ipv4_gcm128_spi1_seq1217,
+		};
+		struct rte_mbuf *tx_pkts[NB_IPSEC_INB_AR_TEST_PKT] = {NULL};
+		struct rte_pmd_cnxk_ipsec_inb_ctx_update_reg ar = {0};
+
+		for (j = 0; j < NB_IPSEC_INB_AR_TEST_PKT; j++) {
+			if (init_traffic(mbufpool[portid], &tx_pkts[j], auto_vec[j]) != 0) {
+				app_err("Auto test: failed to build %u mbuf\n", j);
+				while (j-- > 0)
+					rte_pktmbuf_free(tx_pkts[j]);
+				rc = -1;
+				goto destroy_flow;
+			}
+		}
+
+		app_dbg("Auto test: TX known ESP packets (SPI=1, seq=1216,1217) for decrypt\n");
+		nb_tx = rte_eth_tx_burst(portid, 0, tx_pkts, NB_IPSEC_INB_AR_TEST_PKT);
+		if (nb_tx != NB_IPSEC_INB_AR_TEST_PKT) {
+			app_err("Auto test: TX'd only %u/%u packets\n", nb_tx,
+				NB_IPSEC_INB_AR_TEST_PKT);
+			for (j = nb_tx; j < NB_IPSEC_INB_AR_TEST_PKT; j++)
+				rte_pktmbuf_free(tx_pkts[j]);
+			rc = -1;
+			goto destroy_flow;
+		}
+
+		rte_delay_ms(1);
+		/* Retry few times before giving up */
+		nb_rx = 0;
+		j = 0;
+
+		do {
+			nb_rx += rte_eth_rx_burst(portid, 0, &rx_pkts_burst[nb_rx], nb_tx - nb_rx);
+			j++;
+			if (nb_rx >= nb_tx)
+				break;
+			rte_delay_ms(1);
+		} while (j < 10);
+
+		/* Check for minimum number of Rx packets expected */
+		if (nb_rx != nb_tx) {
+			app_err("Received less Rx pkts(%u)\n", nb_rx);
+			for (j = 0; j < nb_rx; j++)
+				rte_pktmbuf_free(rx_pkts_burst[j]);
+			rc = -1;
+			goto destroy_flow;
+		}
+
+		/* Post process */
+		for (j = 0; j < nb_rx; j++) {
+			m = rx_pkts_burst[j];
+			cpth = rte_pktmbuf_mtod(m, uint8_t *);
+			ph_w0 = *(uint64_t *)cpth;
+			ph_w3 = *(uint64_t *)(cpth + 24);
+			cookie = (uint32_t)(ph_w0 & 0xFFFFFFFF);
+			compcode = (uint8_t)(ph_w3 & 0xff);
+			uc_compcode = (uint8_t)((ph_w3 >> 8) & 0xff);
+
+			if ((cookie == SA_COOKIE) && uc_compcode_is_success(uc_compcode))
+				decrypt_ok++;
+			rte_pktmbuf_free(m);
+		}
+
+		if (sa_read_dump_ar(portid, sa, "POST-INJECT", false, true, &ar) != 0) {
+			rc = -1;
+			goto destroy_flow;
+		}
+
+		if (decrypt_ok != nb_rx) {
+			app_err("Auto test FAIL: %" PRIu64 "/%u packets decrypted OK\n",
+				decrypt_ok, NB_IPSEC_INB_AR_TEST_PKT);
+			rc = -1;
+		} else if (ar.ar_winbits[3] != 0x3) {
+			app_err("Auto test FAIL: ar_winbits[3]=0x%" PRIx64
+				" (expected 0x3 for seq 1216,1217), ar_base=%" PRIu64 "\n",
+				ar.ar_winbits[3], ar.ar_base);
+			rc = -1;
+		} else {
+			app_info("Auto test PASS: %" PRIu64 "/%u decrypted, ar_winbits[3]=0x3 "
+				 "(seq 1216,1217), ar_base=%" PRIu64 "\n", decrypt_ok,
+				 NB_IPSEC_INB_AR_TEST_PKT, ar.ar_base);
+			rc = 0;
+		}
+
+		goto destroy_flow;
+	}
+
+	/* -------- Packet input test (--pkt-input) --------------------------
+	 * Live monitor loop that dumps the anti-replay window per packet while an
+	 * external generator pumps traffic into the SA.
+	 */
+
+	sa_read_dump_ar(portid, sa, "PRE-RX baseline", true, true, NULL);
+
+	app_info("Basic monitor: send inbound AES-GCM ESP (SPI=1) to port %u; Ctrl-C to stop\n",
+		 portid);
+
+	while (!force_quit) {
+		bool ok;
+
+		nb_rx = rte_eth_rx_burst(portid, 0, &m, 1);
+		if (nb_rx == 0) {
+			rte_pause();
+			continue;
+		}
+
+		rx_count++;
+		cpth = rte_pktmbuf_mtod(m, uint8_t *);
+		ph_w0 = *(uint64_t *)cpth;
+		ph_w3 = *(uint64_t *)(cpth + 24);
+		cookie = (uint32_t)(ph_w0 & 0xFFFFFFFF);
+		compcode = (uint8_t)(ph_w3 & 0xff);
+		uc_compcode = (uint8_t)((ph_w3 >> 8) & 0xff);
+
+		ok = (cookie == SA_COOKIE) && uc_compcode_is_success(uc_compcode);
+		if (ok)
+			decrypt_ok++;
+
+		app_info("rx %" PRIu64 ": pkt_len=%u cookie=0x%08x compcode=0x%02x"
+			" uc_compcode=0x%02x -> %s\n",
+			rx_count, m->pkt_len, cookie, compcode, uc_compcode,
+			ok ? "DECRYPT OK" : "DECRYPT FAIL");
+
+		sa_read_dump_ar(portid, sa, " ", false, rx_count <= 50, NULL);
+
+		rte_pktmbuf_free(m);
+	}
+
+	app_info("Basic monitor stopped: rx=%" PRIu64 " decrypt_ok=%" PRIu64 "\n",
+		 rx_count, decrypt_ok);
+
+destroy_flow:
+	destroy_default_ipsec_flow(portid);
+
 	/* Destroy the SA */
 	ipsec_inb_sa_init(&sa_dptr.inb);
 	if (rte_pmd_cnxk_hw_sa_write(portid, sa, &sa_dptr, CUSTOM_SA_SZ, true))
@@ -3535,6 +3859,12 @@ main(int argc, char **argv)
 		rc = ut_ipsec_dscp_qsel_test();
 		app_info("Test %s: %s\n", ipsec_test_mode_to_string(testmode),
 		       rc ? "FAILED" : "PASS");
+		break;
+	case IPSEC_RTE_PMD_CNXK_INB_AR_TEST:
+		app_info("Model: %s Test Mode: %s\n", rte_pmd_cnxk_model_str_get(),
+		       ipsec_test_mode_to_string(testmode));
+		rc = pmd_cnxk_api_inb_ar_test();
+		app_info("Test %s: %s\n", ipsec_test_mode_to_string(testmode), rc ? "FAILED" : "PASS");
 		break;
 	}
 	ut_teardown();

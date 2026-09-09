@@ -14,10 +14,13 @@
 #include <rte_ethdev.h>
 #include <rte_hexdump.h>
 #include <rte_bitmap.h>
+#include <rte_crypto.h>
 #include <rte_ipsec.h>
 #include <rte_malloc.h>
+#include <rte_memory.h>
 #include <rte_pmd_cnxk.h>
 #include <rte_security.h>
+#include <rte_udp.h>
 #include <rte_eventdev.h>
 #include <rte_event_eth_rx_adapter.h>
 #include <rte_event_eth_tx_adapter.h>
@@ -71,6 +74,8 @@ enum test_mode {
 	IPSEC_RTE_PMD_CNXK_DSCP_QSEL_TEST,
 	/* Inbound AES-GCM AR test */
 	IPSEC_RTE_PMD_CNXK_INB_AR_TEST,
+	/* Inline outbound MSNS test via direct CPT inst submit */
+	IPSEC_RTE_PMD_CNXK_OUTBOUND_MSNS_TEST,
 };
 
 static struct rte_mempool *mbufpool[RTE_MAX_ETHPORTS];
@@ -194,6 +199,8 @@ ipsec_test_mode_to_string(enum test_mode testmode)
 		return "IPSEC_RTE_PMD_CNXK_DSCP_QSEL_TEST";
 	case IPSEC_RTE_PMD_CNXK_INB_AR_TEST:
 		return "IPSEC_RTE_PMD_CNXK_INB_AR_TEST";
+	case IPSEC_RTE_PMD_CNXK_OUTBOUND_MSNS_TEST:
+		return "IPSEC_RTE_PMD_CNXK_OUTBOUND_MSNS_TEST";
 	}
 	return NULL;
 }
@@ -295,6 +302,12 @@ copy_buf_to_pkt(void *buf, unsigned int len, struct rte_mbuf *pkt, unsigned int 
 		return;
 	}
 	copy_buf_to_pkt_segs(buf, len, pkt, offset);
+}
+
+static inline void *
+mbuf_pkt_va(struct rte_mbuf *pkt)
+{
+	return rte_mem_iova2virt(rte_mbuf_data_iova(pkt));
 }
 
 static inline int
@@ -635,6 +648,7 @@ print_usage(const char *name)
 		"\t\t\t4: IPSEC_RTE_PMD_CNXK_PCP_QSEL_TEST (CN20K)\n"
 		"\t\t\t5: IPSEC_RTE_PMD_CNXK_DSCP_QSEL_TEST (CN20K)\n"
 		"\t\t\t6: IPSEC_RTE_PMD_CNXK_INB_AR_TEST\n"
+		"\t\t\t7: IPSEC_RTE_PMD_CNXK_OUTBOUND_MSNS_TEST\n"
 		"\t[--portmask]	          Port mask to enable\n"
 		"\t[--nb-mbufs <count >]  MBUFs per packet pool\n"
 		"\t[--num-sas <count>]    Number of SA's to create\n"
@@ -1501,6 +1515,122 @@ pmd_cnxk_api_inb_session_fill(struct rte_pmd_cnxk_ipsec_inb_sa *sa)
 	sa->w1.s.cookie = SA_COOKIE;
 }
 
+/* HW ctx_size field: (ctx_size+1) * 128B = total CPT context (1KB MSNS slot) */
+#define MSNS_OUTB_SA_CTX_SIZE ((RTE_PMD_CNXK_IPSEC_OUTB_SA_MSNS_SZ / 128) - 1)
+
+#define OUTB_MSNS_CPTR_MSNS_ENA		1ULL
+#define OUTB_MSNS_CPTR_SUBSPACE_S	8
+
+static uint64_t
+msns_outb_cptr_encode(uintptr_t sa_addr)
+{
+	uint64_t cptr_val = sa_addr;
+
+	cptr_val &= ~((3ULL) << OUTB_MSNS_CPTR_SUBSPACE_S);
+	cptr_val &= ~OUTB_MSNS_CPTR_MSNS_ENA;
+	cptr_val |= OUTB_MSNS_CPTR_MSNS_ENA | (1ULL << OUTB_MSNS_CPTR_SUBSPACE_S);
+
+	return cptr_val;
+}
+
+static int
+msns_outb_esp_seq_get(const uint8_t *pkt, uint32_t pkt_len, uint32_t *spi,
+		      uint32_t *seq)
+{
+	const struct rte_ipv4_hdr *ip;
+	const struct rte_esp_hdr *esp;
+	uint32_t ip_hdr_len;
+
+	if (pkt_len < RTE_ETHER_HDR_LEN + sizeof(struct rte_ipv4_hdr))
+		return -EINVAL;
+
+	ip = (const struct rte_ipv4_hdr *)(pkt + RTE_ETHER_HDR_LEN);
+	ip_hdr_len = (ip->version_ihl & RTE_IPV4_HDR_IHL_MASK) *
+		     RTE_IPV4_IHL_MULTIPLIER;
+	if (pkt_len < RTE_ETHER_HDR_LEN + ip_hdr_len + sizeof(struct rte_esp_hdr))
+		return -EINVAL;
+
+	esp = (const struct rte_esp_hdr *)(pkt + RTE_ETHER_HDR_LEN + ip_hdr_len);
+	*spi = rte_be_to_cpu_32(esp->spi);
+	*seq = rte_be_to_cpu_32(esp->seq);
+
+	return 0;
+}
+
+static void
+msns_outb_sa_init(struct rte_pmd_cnxk_ipsec_outb_msns_sa *sa)
+{
+	size_t offset = offsetof(struct rte_pmd_cnxk_ipsec_outb_msns_sa, ctx);
+
+	memset(sa, 0, sizeof(*sa));
+
+	sa->w0.s.esn_en = 1;
+	sa->w0.s.count_glb_octets = 1;
+	sa->w0.s.count_glb_pkts = 1;
+	sa->w0.s.count_mib_bytes = 1;
+	sa->w0.s.count_mib_pkts = 1;
+
+	sa->w0.s.hw_ctx_off = offset / 8;
+	sa->w0.s.ctx_push_size =
+		RTE_PMD_CNXK_IPSEC_OUTB_MSNS_CTX_PUSH_SZ(sa->w0.s.hw_ctx_off);
+	sa->w0.s.ctx_size = MSNS_OUTB_SA_CTX_SIZE;
+	sa->w0.s.ctx_hdr_size = 1;
+	sa->w0.s.aop_valid = 1;
+}
+
+static void
+msns_outb_sa_ctx_fill(struct rte_pmd_cnxk_ipsec_outb_msns_sa *sa)
+{
+	unsigned int sp;
+
+	for (sp = 0; sp < RTE_PMD_CNXK_IPSEC_OUTB_MSNS_SPACES; sp++) {
+		sa->ctx.space[sp].rsvd = 0;
+		sa->ctx.space[sp].seqnum = 0;
+	}
+}
+
+static void
+pmd_cnxk_api_outb_session_fill(struct rte_pmd_cnxk_ipsec_outb_msns_sa *sa)
+{
+	uint8_t *salt_key = sa->iv.s.salt;
+	uint32_t src_v4 = rte_cpu_to_be_32(RTE_IPV4(192, 168, 1, 2));
+	uint32_t dst_v4 = rte_cpu_to_be_32(RTE_IPV4(192, 168, 1, 1));
+	uint32_t *tmp_salt;
+	uint64_t *tmp_key;
+	int i;
+
+	msns_outb_sa_init(sa);
+
+	sa->w2.s.dir = CPT_IE_SA_DIR_OUTBOUND;
+	sa->w2.s.ipsec_protocol = CPT_IE_SA_PROTOCOL_ESP;
+	sa->w2.s.ipsec_mode = CPT_IE_SA_MODE_TUNNEL;
+	sa->w2.s.enc_type = CPT_IE_OT_SA_ENC_AES_GCM;
+	sa->w2.s.auth_type = CPT_IE_OT_SA_AUTH_NULL;
+	sa->w2.s.encap_type = 0;
+	sa->w2.s.ipv4_df_src_or_ipv6_flw_lbl_src = 0;
+	sa->w2.s.dscp_src = 0;
+	sa->w2.s.iv_src = 2;
+	sa->w2.s.ipid_gen = 1;
+	sa->w2.s.spi = 1;
+
+	memcpy(salt_key, &sess_conf->ipsec_xform.salt, 4);
+	tmp_salt = (uint32_t *)salt_key;
+	*tmp_salt = rte_be_to_cpu_32(*tmp_salt);
+
+	memcpy(sa->cipher_key, sess_conf->key.data, 16);
+	tmp_key = (uint64_t *)sa->cipher_key;
+	for (i = 0; i < (int)(CPT_CTX_MAX_CKEY_LEN / sizeof(uint64_t)); i++)
+		tmp_key[i] = rte_be_to_cpu_64(tmp_key[i]);
+
+	sa->w2.s.aes_key_len = CPT_IE_SA_AES_KEY_LEN_128;
+	sa->w1.s.cookie = SA_COOKIE;
+
+	sa->outer_hdr.ipv4.src_addr = rte_be_to_cpu_32(src_v4);
+	sa->outer_hdr.ipv4.dst_addr = rte_be_to_cpu_32(dst_v4);
+
+	msns_outb_sa_ctx_fill(sa);
+}
+
 static int
 pmd_cnxk_api_custom_inb_sa_verify(void)
 {
@@ -1671,6 +1801,480 @@ exit:
 	i--;
 	for (; i >= 0; i--)
 		rte_free(data_ptrs[i]);
+	rte_free(inst_mem);
+
+	return rc;
+}
+
+static unsigned int
+msns_outb_cptr_subspace_get(uint64_t cptr)
+{
+	return (unsigned int)((cptr >> OUTB_MSNS_CPTR_SUBSPACE_S) & 3u);
+}
+
+#define MSNS_OUTB_ESP_HDR_LEN		8
+#define MSNS_OUTB_ESP_TRL_LEN		2
+#define MSNS_OUTB_AH_HDR_LEN		12
+#define MSNS_OUTB_TUNNEL_IPV4_LEN	20
+#define MSNS_OUTB_TUNNEL_IPV6_LEN	40
+#define MSNS_OUTB_DES_BLOCK_LEN		8
+#define MSNS_OUTB_AES_BLOCK_LEN		16
+
+static void
+msns_outb_sa_algos_get(const struct rte_pmd_cnxk_ipsec_outb_msns_sa *sa,
+		       enum rte_crypto_cipher_algorithm *c_algo,
+		       enum rte_crypto_auth_algorithm *a_algo,
+		       enum rte_crypto_aead_algorithm *aead_algo)
+{
+	*c_algo = RTE_CRYPTO_CIPHER_NULL;
+	*a_algo = RTE_CRYPTO_AUTH_NULL;
+	*aead_algo = 0;
+
+	switch (sa->w2.s.enc_type) {
+	case CPT_IE_OT_SA_ENC_AES_GCM:
+		*aead_algo = RTE_CRYPTO_AEAD_AES_GCM;
+		return;
+	case CPT_IE_OT_SA_ENC_AES_CCM:
+		*aead_algo = RTE_CRYPTO_AEAD_AES_CCM;
+		return;
+	case CPT_IE_OT_SA_ENC_NULL:
+		*c_algo = RTE_CRYPTO_CIPHER_NULL;
+		break;
+	case CPT_IE_OT_SA_ENC_DES_CBC:
+		*c_algo = RTE_CRYPTO_CIPHER_DES_CBC;
+		break;
+	case CPT_IE_OT_SA_ENC_3DES_CBC:
+		*c_algo = RTE_CRYPTO_CIPHER_3DES_CBC;
+		break;
+	case CPT_IE_OT_SA_ENC_AES_CBC:
+		*c_algo = RTE_CRYPTO_CIPHER_AES_CBC;
+		break;
+	case CPT_IE_OT_SA_ENC_AES_CTR:
+		*c_algo = RTE_CRYPTO_CIPHER_AES_CTR;
+		break;
+	default:
+		break;
+	}
+
+	switch (sa->w2.s.auth_type) {
+	case CPT_IE_OT_SA_AUTH_NULL:
+		*a_algo = RTE_CRYPTO_AUTH_NULL;
+		break;
+	case CPT_IE_OT_SA_AUTH_MD5:
+		*a_algo = RTE_CRYPTO_AUTH_MD5_HMAC;
+		break;
+	case CPT_IE_OT_SA_AUTH_SHA1:
+		*a_algo = RTE_CRYPTO_AUTH_SHA1_HMAC;
+		break;
+	case CPT_IE_OT_SA_AUTH_SHA2_224:
+		*a_algo = RTE_CRYPTO_AUTH_SHA224_HMAC;
+		break;
+	case CPT_IE_OT_SA_AUTH_SHA2_256:
+		*a_algo = RTE_CRYPTO_AUTH_SHA256_HMAC;
+		break;
+	case CPT_IE_OT_SA_AUTH_SHA2_384:
+		*a_algo = RTE_CRYPTO_AUTH_SHA384_HMAC;
+		break;
+	case CPT_IE_OT_SA_AUTH_SHA2_512:
+		*a_algo = RTE_CRYPTO_AUTH_SHA512_HMAC;
+		break;
+	case CPT_IE_OT_SA_AUTH_AES_GMAC:
+		*a_algo = RTE_CRYPTO_AUTH_AES_GMAC;
+		break;
+	case CPT_IE_OT_SA_AUTH_AES_XCBC_128:
+		*a_algo = RTE_CRYPTO_AUTH_AES_XCBC_MAC;
+		break;
+	default:
+		break;
+	}
+}
+
+static uint8_t
+msns_ipsec_ivlen_get(enum rte_crypto_cipher_algorithm c_algo,
+		     enum rte_crypto_auth_algorithm a_algo,
+		     enum rte_crypto_aead_algorithm aead_algo)
+{
+	uint8_t ivlen = 0;
+
+	if ((aead_algo == RTE_CRYPTO_AEAD_AES_GCM) || (aead_algo == RTE_CRYPTO_AEAD_AES_CCM))
+		ivlen = 8;
+
+	switch (c_algo) {
+	case RTE_CRYPTO_CIPHER_AES_CTR:
+		ivlen = 8;
+		break;
+	case RTE_CRYPTO_CIPHER_DES_CBC:
+	case RTE_CRYPTO_CIPHER_3DES_CBC:
+		ivlen = MSNS_OUTB_DES_BLOCK_LEN;
+		break;
+	case RTE_CRYPTO_CIPHER_AES_CBC:
+		ivlen = MSNS_OUTB_AES_BLOCK_LEN;
+		break;
+	default:
+		break;
+	}
+
+	switch (a_algo) {
+	case RTE_CRYPTO_AUTH_AES_GMAC:
+		ivlen = 8;
+		break;
+	default:
+		break;
+	}
+
+	return ivlen;
+}
+
+static uint8_t
+msns_ipsec_icvlen_get(enum rte_crypto_cipher_algorithm c_algo,
+		      enum rte_crypto_auth_algorithm a_algo,
+		      enum rte_crypto_aead_algorithm aead_algo)
+{
+	uint8_t icv = 0;
+
+	(void)c_algo;
+
+	switch (a_algo) {
+	case RTE_CRYPTO_AUTH_NULL:
+		icv = 0;
+		break;
+	case RTE_CRYPTO_AUTH_MD5_HMAC:
+	case RTE_CRYPTO_AUTH_SHA1_HMAC:
+		icv = 12;
+		break;
+	case RTE_CRYPTO_AUTH_SHA256_HMAC:
+	case RTE_CRYPTO_AUTH_AES_GMAC:
+		icv = 16;
+		break;
+	case RTE_CRYPTO_AUTH_SHA384_HMAC:
+		icv = 24;
+		break;
+	case RTE_CRYPTO_AUTH_SHA512_HMAC:
+		icv = 32;
+		break;
+	case RTE_CRYPTO_AUTH_AES_XCBC_MAC:
+		icv = 12;
+		break;
+	default:
+		break;
+	}
+
+	switch (aead_algo) {
+	case RTE_CRYPTO_AEAD_AES_GCM:
+	case RTE_CRYPTO_AEAD_AES_CCM:
+		icv = 16;
+		break;
+	default:
+		break;
+	}
+
+	return icv;
+}
+
+static uint8_t
+msns_ipsec_outb_roundup_byte(enum rte_crypto_cipher_algorithm c_algo,
+			     enum rte_crypto_aead_algorithm aead_algo)
+{
+	uint8_t roundup_byte = 4;
+
+	if ((aead_algo == RTE_CRYPTO_AEAD_AES_GCM) || (aead_algo == RTE_CRYPTO_AEAD_AES_CCM))
+		return roundup_byte;
+
+	switch (c_algo) {
+	case RTE_CRYPTO_CIPHER_AES_CTR:
+		roundup_byte = 4;
+		break;
+	case RTE_CRYPTO_CIPHER_AES_CBC:
+		roundup_byte = 16;
+		break;
+	case RTE_CRYPTO_CIPHER_DES_CBC:
+	case RTE_CRYPTO_CIPHER_3DES_CBC:
+		roundup_byte = 8;
+		break;
+	case RTE_CRYPTO_CIPHER_NULL:
+		roundup_byte = 4;
+		break;
+	default:
+		break;
+	}
+
+	return roundup_byte;
+}
+
+/*
+ * IPv4 outer_hdr uses 8B (src/dst); IPv6 uses 32B. Any non-zero byte
+ * beyond the IPv4 layout indicates IPv6 tunnel addresses in outer_hdr.
+ */
+static uint8_t
+msns_outb_outer_ip_ver_from_hdr(const union rte_pmd_cnxk_ipsec_outer_ip_hdr *hdr)
+{
+	const uint8_t *raw = (const uint8_t *)hdr;
+	unsigned int i;
+
+	for (i = sizeof(hdr->ipv4); i < sizeof(*hdr); i++) {
+		if (raw[i])
+			return 1;
+	}
+	return 0;
+}
+
+static void
+msns_outb_rlens_from_sa(const struct rte_pmd_cnxk_ipsec_outb_msns_sa *sa,
+			uint8_t outer_ip_ver, uint16_t *partial_len,
+			uint8_t *roundup_byte, int8_t *roundup_len)
+{
+	enum rte_crypto_cipher_algorithm c_algo;
+	enum rte_crypto_auth_algorithm a_algo;
+	enum rte_crypto_aead_algorithm aead_algo;
+	uint16_t pl;
+	int8_t rl;
+	uint8_t rb;
+
+	if (sa->w2.s.ipsec_protocol) {
+		pl = MSNS_OUTB_ESP_HDR_LEN;
+		rl = MSNS_OUTB_ESP_TRL_LEN;
+	} else {
+		pl = MSNS_OUTB_AH_HDR_LEN;
+		rl = 0;
+	}
+
+	if (sa->w2.s.ipsec_mode) {
+		if (outer_ip_ver)
+			pl += MSNS_OUTB_TUNNEL_IPV6_LEN;
+		else
+			pl += MSNS_OUTB_TUNNEL_IPV4_LEN;
+	}
+
+	msns_outb_sa_algos_get(sa, &c_algo, &a_algo, &aead_algo);
+	pl += msns_ipsec_ivlen_get(c_algo, a_algo, aead_algo);
+	pl += msns_ipsec_icvlen_get(c_algo, a_algo, aead_algo);
+	rb = msns_ipsec_outb_roundup_byte(c_algo, aead_algo);
+
+	if (sa->w2.s.encap_type == CPT_IE_OT_SA_ENCAP_UDP)
+		pl += sizeof(struct rte_udp_hdr);
+
+	*partial_len = pl;
+	*roundup_len = rl;
+	*roundup_byte = rb;
+}
+
+static uint32_t
+msns_outb_dlen_adj_calc(uint32_t pkt_len, uint8_t l2_len, uint8_t l3_len,
+			uint8_t tunnel_mode, uint8_t roundup_byte, int8_t roundup_len,
+			uint16_t partial_len)
+{
+	uint32_t dlen, rlen;
+
+	dlen = pkt_len - l2_len;
+	dlen -= tunnel_mode ? 0 : l3_len;
+	rlen = (dlen + roundup_len) + (roundup_byte - 1);
+	rlen &= ~(uint64_t)(roundup_byte - 1);
+	rlen += partial_len;
+
+	return rlen - dlen;
+}
+
+static int
+pmd_cnxk_api_outb_mbuf_prep(struct rte_mbuf *mbuf, struct cpt_inst_s *inst,
+			    const struct rte_pmd_cnxk_ipsec_outb_msns_sa *sa,
+			    uint32_t sa_idx, union roc_ot_ipsec_outb_param1 param1)
+{
+	struct msns_outb_sess_priv sess_priv;
+	uint16_t partial_len;
+	uint32_t dlen_adj, orig_pkt_len;
+	uint8_t roundup_byte, outer_ip_ver;
+	int8_t roundup_len;
+
+	(void)inst;
+
+	outer_ip_ver = msns_outb_outer_ip_ver_from_hdr(&sa->outer_hdr);
+
+	sess_priv.u64 = 0;
+	msns_outb_rlens_from_sa(sa, outer_ip_ver, &partial_len, &roundup_byte, &roundup_len);
+
+	sess_priv.sa_idx = sa_idx;
+	sess_priv.roundup_byte = roundup_byte;
+	sess_priv.roundup_len = roundup_len;
+	sess_priv.partial_len = partial_len;
+	sess_priv.mode = sa->w2.s.ipsec_mode;
+	sess_priv.outer_ip_ver = outer_ip_ver;
+	sess_priv.chksum = (param1.s.ip_csum_disable << 1) | param1.s.l4_csum_disable;
+	sess_priv.dec_ttl = param1.s.ttl_or_hop_limit;
+	sess_priv.cpt_cq_ena = 0;
+
+	*rte_security_dynfield(mbuf) = sess_priv.u64;
+
+	orig_pkt_len = mbuf->pkt_len;
+	dlen_adj = msns_outb_dlen_adj_calc(orig_pkt_len, mbuf->l2_len, mbuf->l3_len,
+					   sa->w2.s.ipsec_mode, roundup_byte, roundup_len,
+					   partial_len);
+	mbuf->pkt_len = orig_pkt_len + dlen_adj;
+	mbuf->data_len = orig_pkt_len + dlen_adj;
+
+	return 0;
+}
+
+static int
+pmd_cnxk_api_outb_inst_submit(void *cptr, uint32_t sa_idx)
+{
+	struct ipsec_test_packet *pkt = &pkt_ipv4_plain;
+	union rte_pmd_cnxk_ipsec_hw_sa sa_read;
+	union roc_ot_ipsec_outb_param1 param1;
+	struct cpt_inst_s *inst_mem, *inst;
+	struct rte_mbuf *tx_mbufs[NB_INST];
+	struct rte_mbuf *rx_pkts[NB_INST];
+	uint64_t cptr_val, sa_seq;
+	uint16_t lcore_id = rte_lcore_id();
+	uint16_t nb_rx = 0, rxq = 0, n;
+	unsigned int portid, subspace, j;
+	void *dptr;
+	uintptr_t sa_addr;
+	uint32_t esp_spi, esp_seq;
+	const uint8_t *rx_pkt;
+	const struct rte_ipv4_hdr *ip;
+	const struct rte_pmd_cnxk_ipsec_outb_msns_sa *sa;
+	uint16_t nb_prepared, nb_submitted;
+	int rc = 0, i;
+
+	portid = lcore_cfg[lcore_id].portid;
+	sa_addr = (uintptr_t)cptr;
+	sa = (const struct rte_pmd_cnxk_ipsec_outb_msns_sa *)cptr;
+	cptr_val = msns_outb_cptr_encode(sa_addr);
+
+	memset(tx_mbufs, 0, sizeof(tx_mbufs));
+	memset(rx_pkts, 0, sizeof(rx_pkts));
+	nb_prepared = 0;
+	nb_submitted = 0;
+
+	rxq = lcore_cfg[lcore_id].queueid;
+
+	inst_mem = rte_malloc(NULL, NB_INST * sizeof(struct cpt_inst_s), 0);
+	if (inst_mem == NULL) {
+		app_err("Could not allocate instruction memory\n");
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < NB_INST; i++) {
+		tx_mbufs[i] = rte_pktmbuf_alloc(mbufpool[portid]);
+		if (tx_mbufs[i] == NULL) {
+			app_err("Could not allocate mbuf for outbound packet\n");
+			nb_prepared = i;
+			rc = -ENOMEM;
+			goto exit;
+		}
+
+		tx_mbufs[i]->data_len = pkt->len;
+		tx_mbufs[i]->pkt_len = pkt->len;
+		tx_mbufs[i]->l2_len = RTE_ETHER_HDR_LEN;
+		dptr = mbuf_pkt_va(tx_mbufs[i]);
+		if (!dptr) {
+			app_err("Could not map mbuf packet IOVA for CPU\n");
+			nb_prepared = i + 1;
+			rc = -EINVAL;
+			goto exit;
+		}
+		memcpy(dptr, pkt->data, pkt->len);
+
+		ip = (const struct rte_ipv4_hdr *)((uint8_t *)dptr + RTE_ETHER_HDR_LEN);
+		tx_mbufs[i]->l3_len = (ip->version_ihl & RTE_IPV4_HDR_IHL_MASK) *
+				      RTE_IPV4_IHL_MULTIPLIER;
+
+		inst = RTE_PTR_ADD(inst_mem, i * sizeof(struct cpt_inst_s));
+
+		memset(inst, 0, sizeof(struct cpt_inst_s));
+		inst->w3.s.qord = 1;
+
+		inst->w7.s.egrp = CPT_DFLT_ENG_GRP_SE;
+		inst->w7.s.ctx_val = 1;
+		inst->w7.s.cptr = cptr_val;
+
+		inst->w4.s.opcode_major = CPT_IE_OT_MAJOR_OP_PROCESS_OUTBOUND_IPSEC | (1 << 6);
+		param1.u16 = 0;
+		param1.s.ip_csum_disable = 1;
+		param1.s.l4_csum_disable = 1;
+		inst->w4.s.param1 = param1.u16;
+		inst->w4.s.param2 = RTE_ETHER_HDR_LEN;
+
+		rc = pmd_cnxk_api_outb_mbuf_prep(tx_mbufs[i], inst, sa,
+						 sa_idx, param1);
+		if (rc) {
+			nb_prepared = i + 1;
+			goto exit;
+		}
+
+		/* CPT DLEN is plaintext after L2; dlen_adj is in mbuf->pkt_len */
+		inst->w4.s.dlen = pkt->len - RTE_ETHER_HDR_LEN;
+	}
+	nb_prepared = NB_INST;
+
+	nb_submitted = rte_pmd_cnxk_outb_submit(portid, 0, inst_mem, tx_mbufs,
+						sa_idx, NB_INST);
+	if (nb_submitted != NB_INST) {
+		app_err("Couldn't submit outbound CPT instructions, submitted %u/%u\n",
+			nb_submitted, NB_INST);
+		rc = -1;
+		goto exit;
+	}
+
+	rte_delay_ms(100);
+
+	j = 0;
+	do {
+		n = rte_eth_rx_burst(portid, rxq, &rx_pkts[nb_rx], NB_INST - nb_rx);
+		nb_rx += n;
+		j++;
+		if (nb_rx >= NB_INST)
+			break;
+		rte_delay_ms(10);
+	} while (j < 100);
+
+	if (nb_rx == 0) {
+		app_err("No outbound packets received on rx queue %u\n", rxq);
+		rc = -1;
+		goto exit;
+	}
+
+	rx_pkt = mbuf_pkt_va(rx_pkts[nb_rx - 1]);
+	if (!rx_pkt) {
+		app_err("Failed to map last rx mbuf\n");
+		rc = -EINVAL;
+		goto exit;
+	}
+	if (msns_outb_esp_seq_get(rx_pkt, rx_pkts[nb_rx - 1]->pkt_len, &esp_spi, &esp_seq) != 0) {
+		app_err("Failed to parse ESP header from last rx pkt len=%u\n",
+			rx_pkts[nb_rx - 1]->pkt_len);
+		rc = -EINVAL;
+		goto exit;
+	}
+
+	memset(&sa_read, 0, sizeof(sa_read));
+	rc = rte_pmd_cnxk_hw_sa_read(portid, (void *)(uintptr_t)sa_addr, &sa_read,
+				     RTE_PMD_CNXK_IPSEC_OUTB_SA_MSNS_WR_SZ, false);
+	if (rc) {
+		app_err("Outbound MSNS SA read failed rc=%d\n", rc);
+		goto exit;
+	}
+
+	subspace = msns_outb_cptr_subspace_get(cptr_val);
+	sa_seq = sa_read.outb_msns.ctx.space[subspace].seqnum;
+	app_info("Last RX pkt: esp_spi=%u esp_seq=%u subspace=%u SA seqnum=%" PRIu64 "\n",
+		 esp_spi, esp_seq, subspace, sa_seq);
+
+	if (sa_seq != (uint64_t)esp_seq) {
+		app_err("SA subspace[%u] seqnum %" PRIu64 " != last pkt esp_seq %u\n",
+			subspace, sa_seq, esp_seq);
+		rc = -1;
+	}
+exit:
+	for (j = 0; j < nb_rx; j++) {
+		if (rx_pkts[j])
+			rte_pktmbuf_free(rx_pkts[j]);
+	}
+	/* mbufs [0 .. nb_submitted - 1] are owned by HW after submit. */
+	for (i = nb_submitted; i < nb_prepared; i++) {
+		if (tx_mbufs[i])
+			rte_pktmbuf_free(tx_mbufs[i]);
+	}
 	rte_free(inst_mem);
 
 	return rc;
@@ -3800,6 +4404,46 @@ pmd_cnxk_custom_msns_test(void)
 	return 0;
 }
 
+#ifndef RTE_PMD_CNXK_IPSEC_OUTB_SA_MSNS_SZ
+#define RTE_PMD_CNXK_IPSEC_OUTB_SA_MSNS_SZ 1024
+#endif
+
+#define OUTB_MSNS_SA_SZ RTE_PMD_CNXK_IPSEC_OUTB_SA_MSNS_SZ
+#define OUTB_MSNS_SA_IDX 1
+
+static int
+pmd_cnxk_outbound_msns_test(void)
+{
+	union rte_pmd_cnxk_ipsec_hw_sa *sa, sa_dptr;
+	uint16_t lcore_id = rte_lcore_id();
+	unsigned int portid;
+	int rc = 0;
+
+	portid = lcore_cfg[lcore_id].portid;
+	sa = rte_pmd_cnxk_hw_session_base_get(portid, false);
+	sa = RTE_PTR_ADD(sa, OUTB_MSNS_SA_IDX * OUTB_MSNS_SA_SZ);
+	memset(sa, 0, OUTB_MSNS_SA_SZ);
+
+	pmd_cnxk_api_outb_session_fill(&sa_dptr.outb_msns);
+
+	/* Copy word0 from sa_dptr to populate ctx_push_sz ctx_size fields */
+	memcpy(sa, &sa_dptr.outb_msns, 8);
+	sa_dptr.outb_msns.w2.s.valid = 1;
+
+	rc = rte_pmd_cnxk_hw_sa_write(portid, sa, &sa_dptr,
+				      RTE_PMD_CNXK_IPSEC_OUTB_SA_MSNS_WR_SZ, false);
+	if (rc) {
+		app_err("Couldn't create the outbound MSNS SA\n");
+		return rc;
+	}
+
+	rc = pmd_cnxk_api_outb_inst_submit(sa, OUTB_MSNS_SA_IDX);
+	if (rc)
+		app_err("Outbound MSNS CPT instruction submit failed\n");
+
+	return rc;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3865,6 +4509,11 @@ main(int argc, char **argv)
 		       ipsec_test_mode_to_string(testmode));
 		rc = pmd_cnxk_api_inb_ar_test();
 		app_info("Test %s: %s\n", ipsec_test_mode_to_string(testmode), rc ? "FAILED" : "PASS");
+		break;
+	case IPSEC_RTE_PMD_CNXK_OUTBOUND_MSNS_TEST:
+		app_info("Model: %s Test Mode: %s\n", rte_pmd_cnxk_model_str_get(),
+		       ipsec_test_mode_to_string(testmode));
+		rc = pmd_cnxk_outbound_msns_test();
 		break;
 	}
 	ut_teardown();

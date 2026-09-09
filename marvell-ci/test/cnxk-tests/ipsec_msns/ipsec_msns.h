@@ -49,6 +49,7 @@ enum {
 
 enum {
 	CPT_IE_OT_SA_ENC_NULL = 0,
+	CPT_IE_OT_SA_ENC_DES_CBC = 1,
 	CPT_IE_OT_SA_ENC_3DES_CBC = 2,
 	CPT_IE_OT_SA_ENC_AES_CBC = 3,
 	CPT_IE_OT_SA_ENC_AES_CTR = 4,
@@ -58,12 +59,19 @@ enum {
 
 enum {
 	CPT_IE_OT_SA_AUTH_NULL = 0,
+	CPT_IE_OT_SA_AUTH_MD5 = 1,
 	CPT_IE_OT_SA_AUTH_SHA1 = 2,
+	CPT_IE_OT_SA_AUTH_SHA2_224 = 3,
 	CPT_IE_OT_SA_AUTH_SHA2_256 = 4,
 	CPT_IE_OT_SA_AUTH_SHA2_384 = 5,
 	CPT_IE_OT_SA_AUTH_SHA2_512 = 6,
 	CPT_IE_OT_SA_AUTH_AES_GMAC = 7,
 	CPT_IE_OT_SA_AUTH_AES_XCBC_128 = 8,
+};
+
+enum {
+	CPT_IE_OT_SA_ENCAP_NONE = 0,
+	CPT_IE_OT_SA_ENCAP_UDP = 1,
 };
 
 enum {
@@ -170,6 +178,38 @@ union roc_ot_ipsec_inb_param1 {
 		uint16_t reserved_3_15 : 13;
 	} s;
 };
+
+union roc_ot_ipsec_outb_param1 {
+	uint16_t u16;
+	struct {
+		uint16_t l4_csum_disable : 1;
+		uint16_t ip_csum_disable : 1;
+		uint16_t ttl_or_hop_limit : 1;
+		uint16_t dummy_pkt : 1;
+		uint16_t rfc_or_override_mode : 1;
+		uint16_t reserved_5_15 : 11;
+	} s;
+};
+
+/** Matches struct cn20k_sec_sess_priv in the CN20K PMD */
+struct __rte_packed_begin msns_outb_sess_priv {
+	union {
+		struct {
+			uint32_t sa_idx;
+			uint8_t inb_sa : 1;
+			uint8_t outer_ip_ver : 1;
+			uint8_t mode : 1;
+			uint8_t roundup_byte : 5;
+			uint8_t roundup_len;
+			uint16_t partial_len : 10;
+			uint16_t chksum : 2;
+			uint16_t dec_ttl : 1;
+			uint16_t cpt_cq_ena : 1;
+			uint16_t rsvd : 2;
+		};
+		uint64_t u64;
+	};
+} __rte_packed_end;
 
 struct ipsec_session_data {
 	uint32_t spi;

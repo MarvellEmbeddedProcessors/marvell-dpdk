@@ -2,14 +2,21 @@
  * Copyright(C) 2024 Marvell.
  */
 
+#include <inttypes.h>
+
 #include <rte_cryptodev.h>
+#include <rte_ether.h>
 #include <rte_eventdev.h>
+#include <rte_malloc.h>
+#include <rte_memory.h>
 #include <rte_pmd_cnxk.h>
 #include <rte_security.h>
 #include <rte_security_driver.h>
+#include <rte_udp.h>
 
 #include <cn20k_ethdev.h>
 #include <cn20k_rx.h>
+#include <cn20k_tx.h>
 #include <cnxk_security.h>
 #include <roc_priv.h>
 
@@ -1373,6 +1380,41 @@ cn20k_eth_sec_rx_inject_config(void *device, uint16_t port_id, bool enable)
 }
 
 #define CPT_LMTST_BURST 32
+
+static uint16_t
+cn20k_outb_cpt_submit(struct cn20k_eth_txq *txq, void *inst, uint16_t nb_inst)
+{
+	uintptr_t lbase = txq->lmt_base;
+	uint8_t lnum, shft, loff;
+	uint16_t left, burst;
+	rte_iova_t io_addr;
+	uint16_t lmt_id;
+
+	io_addr = txq->cpt_io_addr;
+	ROC_LMT_CPT_BASE_ID_GET(lbase, lmt_id);
+
+	left = nb_inst;
+again:
+	burst = left > CPT_LMTST_BURST ? CPT_LMTST_BURST : left;
+
+	lnum = 0;
+	loff = 0;
+	shft = 16;
+	memcpy(PLT_PTR_CAST(lbase), inst, burst * sizeof(struct cpt_inst_s));
+	loff = (burst % 2) ? 1 : 0;
+	lnum = (burst / 2);
+	shft = shft + (lnum * 3);
+
+	left -= burst;
+	cn20k_nix_sec_steorl(io_addr, lmt_id, lnum, loff, shft);
+	rte_io_wmb();
+	if (left) {
+		inst = RTE_PTR_ADD(inst, burst * sizeof(struct cpt_inst_s));
+		goto again;
+	}
+	return nb_inst;
+}
+
 static uint16_t
 cn20k_inl_dev_submit(struct roc_nix_inl_dev_q *q, void *inst, uint16_t nb_inst)
 {
@@ -1411,6 +1453,88 @@ again:
 	return nb_inst;
 }
 
+static __rte_always_inline int
+cn20k_outb_is_ipsec(const struct cpt_inst_s *inst)
+{
+	uint8_t major = inst->w4.s.opcode_major & ~ROC_IE_OW_INPLACE_BIT;
+
+	return major == ROC_IE_OW_MAJOR_OP_PROCESS_OUTBOUND_IPSEC;
+}
+
+static void
+cn20k_outb_inst_nix_prep(struct cpt_inst_s *inst, struct cn20k_eth_txq *txq,
+			 struct cnxk_eth_dev *dev, struct rte_mbuf *mbuf)
+{
+	struct cn20k_sec_sess_priv sess_priv;
+	uint64_t cmd[8];
+	uint64_t cq_ena;
+	uint8_t chksum, l2_len;
+	rte_iova_t pkt_iova, nixtx_iova, cpt_dptr_iova;
+	uint32_t pkt_len;
+	uint16_t flags = dev->tx_offload_flags;
+
+	if (!cn20k_outb_is_ipsec(inst))
+		return;
+
+	if (!mbuf)
+		return;
+
+	sess_priv.u64 = *rte_security_dynfield(mbuf);
+	if (!sess_priv.u64)
+		return;
+
+	pkt_iova = rte_mbuf_data_iova(mbuf);
+	pkt_len = mbuf->pkt_len;
+	l2_len = mbuf->l2_len ? mbuf->l2_len :
+				(inst->w4.s.param2 ? inst->w4.s.param2 : RTE_ETHER_HDR_LEN);
+
+	/* App folds outbound dlen_adj into mbuf->pkt_len */
+	nixtx_iova = cn20k_nix_outb_nixtx_align(pkt_iova, pkt_len, 0);
+	cpt_dptr_iova = rte_pktmbuf_iova_offset(mbuf, l2_len);
+
+	cn20k_nix_tx_skeleton(txq, cmd, flags, 0);
+	cn20k_nix_outb_send_finish(cmd, flags, pkt_len, pkt_iova, mbuf);
+	cn20k_nix_xmit_mv_lmt_base(nixtx_iova, cmd, flags);
+
+	chksum = sess_priv.chksum;
+	inst->w0.u64 = cn20k_nix_outb_cpt_w0_get(nixtx_iova, cpt_dptr_iova, flags, chksum);
+	inst->dptr = cpt_dptr_iova;
+
+	cq_ena = inst->cq_ena;
+	inst->res_addr = nixtx_iova - 16;
+	inst->cq_ena = cq_ena;
+}
+
+static uint16_t
+cn20k_outb_dev_submit(struct cnxk_eth_dev *dev, uint16_t tx_qid, void *inst,
+		      struct rte_mbuf **tx_mbuf, uint32_t sa_idx, uint16_t nb_inst)
+{
+	struct cn20k_eth_txq *txq;
+	struct cpt_inst_s *cinst = inst;
+	uint16_t i;
+
+	(void)sa_idx;
+
+	if (!dev->outb.lf_base || tx_qid >= dev->eth_dev->data->nb_tx_queues || !tx_mbuf) {
+		if (!tx_mbuf)
+			plt_err("Invalid tx_mbuf for outbound CPT submit");
+		return 0;
+	}
+
+	txq = dev->eth_dev->data->tx_queues[tx_qid];
+	if (!txq || !txq->cpt_io_addr)
+		return 0;
+
+	/* Check the flow control to avoid the queue overflow */
+	if (cnxk_nix_inl_fc_check(txq->cpt_fc, (int32_t *)txq->cpt_fc_sw, txq->cpt_desc, nb_inst))
+		return 0;
+
+	for (i = 0; i < nb_inst; i++)
+		cn20k_outb_inst_nix_prep(&cinst[i], txq, dev, tx_mbuf[i]);
+
+	return cn20k_outb_cpt_submit(txq, inst, nb_inst);
+}
+
 void
 cn20k_eth_sec_ops_override(void)
 {
@@ -1438,4 +1562,5 @@ cn20k_eth_sec_ops_override(void)
 
 	/* Update platform specific rte_pmd_cnxk ops */
 	cnxk_pmd_ops.inl_dev_submit = cn20k_inl_dev_submit;
+	cnxk_pmd_ops.outb_dev_submit = cn20k_outb_dev_submit;
 }

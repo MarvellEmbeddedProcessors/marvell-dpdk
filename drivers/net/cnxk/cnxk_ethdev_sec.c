@@ -321,6 +321,28 @@ rte_pmd_cnxk_inl_dev_qptr_get(void)
 	return roc_nix_inl_dev_qptr_get(0);
 }
 
+RTE_EXPORT_EXPERIMENTAL_SYMBOL(rte_pmd_cnxk_outb_submit, 25.11)
+uint16_t
+rte_pmd_cnxk_outb_submit(uint16_t portid, uint16_t tx_qid, void *inst,
+			 struct rte_mbuf **tx_mbuf, uint32_t sa_idx, uint16_t nb_inst)
+{
+	struct rte_eth_dev *eth_dev;
+	struct cnxk_eth_dev *dev;
+
+	if (portid >= RTE_MAX_ETHPORTS)
+		return 0;
+
+	eth_dev = &rte_eth_devices[portid];
+	if (!rte_eth_dev_is_valid_port(portid) || eth_dev->state != RTE_ETH_DEV_ATTACHED)
+		return 0;
+
+	dev = cnxk_eth_pmd_priv(eth_dev);
+	if (!cnxk_pmd_ops.outb_dev_submit)
+		return 0;
+
+	return cnxk_pmd_ops.outb_dev_submit(dev, tx_qid, inst, tx_mbuf, sa_idx, nb_inst);
+}
+
 RTE_EXPORT_EXPERIMENTAL_SYMBOL(rte_pmd_cnxk_cpt_q_stats_get, 23.11)
 int
 rte_pmd_cnxk_cpt_q_stats_get(uint16_t portid, enum rte_pmd_cnxk_cpt_q_stats_type type,

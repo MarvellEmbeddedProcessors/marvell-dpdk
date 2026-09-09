@@ -563,6 +563,9 @@ extern struct rte_tm_ops cnxk_tm_ops;
 /* Platform specific rte pmd cnxk ops */
 typedef uint16_t (*cnxk_inl_dev_submit_cb_t)(struct roc_nix_inl_dev_q *q, void *inst,
 					     uint16_t nb_inst);
+typedef uint16_t (*cnxk_outb_dev_submit_cb_t)(struct cnxk_eth_dev *dev, uint16_t tx_qid,
+					      void *inst, struct rte_mbuf **tx_mbuf,
+					      uint32_t sa_idx, uint16_t nb_inst);
 
 typedef void (*cnxk_ethdev_rx_offload_cb_t)(uint16_t port_id, uint64_t flags);
 
@@ -570,6 +573,7 @@ extern cnxk_ethdev_rx_offload_cb_t cnxk_ethdev_rx_offload_cb;
 
 struct cnxk_ethdev_pmd_ops {
 	cnxk_inl_dev_submit_cb_t inl_dev_submit;
+	cnxk_outb_dev_submit_cb_t outb_dev_submit;
 };
 extern struct cnxk_ethdev_pmd_ops cnxk_pmd_ops;
 

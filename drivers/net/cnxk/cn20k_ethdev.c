@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: BSD-3-Clause
  * Copyright(C) 2024 Marvell.
  */
+#include "rte_pmd_cnxk.h"
+
 #include "cn20k_ethdev.h"
 #include "cn20k_flow.h"
 #include "cn20k_rx.h"

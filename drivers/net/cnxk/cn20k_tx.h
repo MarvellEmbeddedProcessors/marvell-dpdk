@@ -308,6 +308,54 @@ cn20k_nix_tx_steor_vec_data(const uint16_t flags)
 	return data;
 }
 
+static __rte_always_inline union nix_send_sg_s *
+cn20k_nix_outb_cmd_sg(uint64_t *cmd, const uint16_t flags)
+{
+	if (flags & NIX_TX_NEED_EXT_HDR)
+		return (union nix_send_sg_s *)&cmd[4];
+
+	return (union nix_send_sg_s *)&cmd[2];
+}
+
+static __rte_always_inline uintptr_t
+cn20k_nix_outb_nixtx_align(uintptr_t dptr, uint32_t pkt_len, uint32_t dlen_adj)
+{
+	uintptr_t nixtx;
+
+	nixtx = dptr + pkt_len + dlen_adj;
+	nixtx += BIT_ULL(7);
+	nixtx = (nixtx - 1) & ~(BIT_ULL(7) - 1);
+	nixtx += 16;
+
+	return nixtx;
+}
+
+static __rte_always_inline uint64_t
+cn20k_nix_outb_cpt_w0_get(uintptr_t nixtx, uintptr_t cpt_dptr, const uint16_t flags,
+			  uint8_t chksum)
+{
+	uint64_t w0;
+
+	w0 = cn20k_nix_tx_ext_subs(flags) + 1ULL;
+	w0 |= chksum ? BIT_ULL(63) : BIT_ULL(62);
+	w0 |= ((((int64_t)nixtx - (int64_t)cpt_dptr) & 0xFFFFF) << 32);
+
+	return w0;
+}
+
+static __rte_always_inline void
+cn20k_nix_outb_send_finish(uint64_t *cmd, const uint16_t flags, uint32_t total_len,
+			   rte_iova_t seg_iova, struct rte_mbuf *mbuf)
+{
+	struct nix_send_hdr_s *send_hdr = (struct nix_send_hdr_s *)cmd;
+	union nix_send_sg_s *sg = cn20k_nix_outb_cmd_sg(cmd, flags);
+
+	send_hdr->w0.total = total_len;
+	send_hdr->w0.aura = roc_npa_aura_handle_to_aura(mbuf->pool->pool_id);
+	sg->seg1_size = total_len;
+	*(rte_iova_t *)(sg + 1) = seg_iova;
+}
+
 static __rte_always_inline void
 cn20k_nix_tx_skeleton(struct cn20k_eth_txq *txq, uint64_t *cmd, const uint16_t flags,
 		      const uint16_t static_sz)
@@ -512,22 +560,17 @@ cn20k_nix_prep_sec_vec(struct rte_mbuf *m, uint64x2_t *cmd0, uint64x2_t *cmd1,
 		w0 = (uint64_t)l2_len << 16;
 		w0 |= cn20k_nix_tx_ext_subs(flags) + NIX_NB_SEGS_TO_SEGDW(m->nb_segs);
 		ucode_cmd[1] = dptr | ((uint64_t)m->nb_segs << 60);
+		w0 |= ((((int64_t)nixtx - (int64_t)dptr) & 0xFFFFF) << 32);
 	} else {
-		/* Get area where NIX descriptor needs to be stored */
-		nixtx = dptr + pkt_len + dlen_adj;
-		nixtx += BIT_ULL(7);
-		nixtx = (nixtx - 1) & ~(BIT_ULL(7) - 1);
-		nixtx += 16;
+		nixtx = cn20k_nix_outb_nixtx_align(dptr, pkt_len, dlen_adj);
 
-		w0 |= cn20k_nix_tx_ext_subs(flags) + 1ULL;
-		w0 |= sess_priv.chksum ? BIT_ULL(63) : BIT_ULL(62);
+		w0 = cn20k_nix_outb_cpt_w0_get(nixtx, dptr + l2_len, flags, sess_priv.chksum);
 		dptr += l2_len;
 		ucode_cmd[1] = dptr;
 		*cmd1 = vsetq_lane_u16(pkt_len + dlen_adj, *cmd1, 0);
 		/* DLEN passed is excluding L2 HDR */
 		pkt_len -= l2_len;
 	}
-	w0 |= ((((int64_t)nixtx - (int64_t)dptr) & 0xFFFFF) << 32);
 	/* CPT word 0 and 1 */
 	cmd01 = vdupq_n_u64(0);
 	cmd01 = vsetq_lane_u64(w0, cmd01, 0);
@@ -590,10 +633,7 @@ cn20k_nix_prep_sec(struct rte_mbuf *m, uint64_t *cmd, uintptr_t *nixtx_addr, uin
 	sess_priv.u64 = *rte_security_dynfield(m);
 	cpt_cq_ena = sess_priv.cpt_cq_ena;
 	send_hdr = (struct nix_send_hdr_s *)cmd;
-	if (flags & NIX_TX_NEED_EXT_HDR)
-		sg = (union nix_send_sg_s *)&cmd[4];
-	else
-		sg = (union nix_send_sg_s *)&cmd[2];
+	sg = cn20k_nix_outb_cmd_sg(cmd, flags);
 
 	if (flags & NIX_TX_NEED_SEND_HDR_W1) {
 		/* Extract l3l4type either from il3il4type or ol3ol4type */
@@ -653,21 +693,16 @@ cn20k_nix_prep_sec(struct rte_mbuf *m, uint64_t *cmd, uintptr_t *nixtx_addr, uin
 		w0 = (uint64_t)l2_len << 16;
 		w0 |= cn20k_nix_tx_ext_subs(flags) + NIX_NB_SEGS_TO_SEGDW(m->nb_segs);
 		ucode_cmd[1] = dptr | ((uint64_t)m->nb_segs << 60);
+		w0 |= ((((int64_t)nixtx - (int64_t)dptr) & 0xFFFFF) << 32);
 	} else {
-		/* Get area where NIX descriptor needs to be stored */
-		nixtx = dptr + pkt_len + dlen_adj;
-		nixtx += BIT_ULL(7);
-		nixtx = (nixtx - 1) & ~(BIT_ULL(7) - 1);
-		nixtx += 16;
+		nixtx = cn20k_nix_outb_nixtx_align(dptr, pkt_len, dlen_adj);
 
-		w0 |= cn20k_nix_tx_ext_subs(flags) + 1ULL;
-		w0 |= sess_priv.chksum ? BIT_ULL(63) : BIT_ULL(62);
+		w0 = cn20k_nix_outb_cpt_w0_get(nixtx, dptr + l2_len, flags, sess_priv.chksum);
 		dptr += l2_len;
 		ucode_cmd[1] = dptr;
 		sg->seg1_size = pkt_len + dlen_adj;
 		pkt_len -= l2_len;
 	}
-	w0 |= ((((int64_t)nixtx - (int64_t)dptr) & 0xFFFFF) << 32);
 	/* CPT word 0 and 1 */
 	cmd01 = vdupq_n_u64(0);
 	cmd01 = vsetq_lane_u64(w0, cmd01, 0);

@@ -706,6 +706,210 @@ struct rte_pmd_cnxk_ipsec_outb_sa {
 	struct rte_pmd_cnxk_ipsec_outb_ctx_update_reg ctx;
 };
 
+/** Number of MSNS sequence-number spaces per outbound SA CTX entry */
+#define RTE_PMD_CNXK_IPSEC_OUTB_MSNS_SPACES 4
+
+/** Per-space reserved + sequence number pair in outbound MSNS CTX */
+struct rte_pmd_cnxk_ipsec_outb_msns_seq {
+	/** Reserved */
+	uint64_t rsvd;
+	/** Sequence number */
+	uint64_t seqnum;
+};
+
+/**
+ * Outbound IPsec MSNS packed context update region.
+ *
+ * 32-byte aligned layout:
+ *   reserved, seqnum[0], reserved, seqnum[1], ... lifetimes and MIB counters.
+ */
+struct __rte_aligned(32) rte_pmd_cnxk_ipsec_outb_ctx_msns_reg {
+	/** Sequence number slots (reserved + seqnum per MSNS space) */
+	struct rte_pmd_cnxk_ipsec_outb_msns_seq space[RTE_PMD_CNXK_IPSEC_OUTB_MSNS_SPACES];
+	/** Hard lifetime */
+	uint64_t hard_life;
+	/** Soft lifetime */
+	uint64_t soft_life;
+	/** MIB byte statistics */
+	uint64_t mib_octs;
+	/** MIB packet statistics */
+	uint64_t mib_pkts;
+};
+
+static_assert(sizeof(struct rte_pmd_cnxk_ipsec_outb_ctx_msns_reg) == 96,
+	      "outb_msns ctx must be 96B");
+static_assert(offsetof(struct rte_pmd_cnxk_ipsec_outb_ctx_msns_reg, space[0].rsvd) == 0,
+	      "outb_msns ctx reserved0 at +0B");
+static_assert(offsetof(struct rte_pmd_cnxk_ipsec_outb_ctx_msns_reg, space[0].seqnum) == 8,
+	      "outb_msns ctx seqnum0 at +8B");
+static_assert(offsetof(struct rte_pmd_cnxk_ipsec_outb_ctx_msns_reg, space[1].rsvd) == 16,
+	      "outb_msns ctx reserved1 at +16B");
+static_assert(offsetof(struct rte_pmd_cnxk_ipsec_outb_ctx_msns_reg, space[1].seqnum) == 24,
+	      "outb_msns ctx seqnum1 at +24B");
+static_assert(offsetof(struct rte_pmd_cnxk_ipsec_outb_ctx_msns_reg, space[2].rsvd) == 32,
+	      "outb_msns ctx reserved2 at +32B");
+static_assert(offsetof(struct rte_pmd_cnxk_ipsec_outb_ctx_msns_reg, space[2].seqnum) == 40,
+	      "outb_msns ctx seqnum2 at +40B");
+static_assert(offsetof(struct rte_pmd_cnxk_ipsec_outb_ctx_msns_reg, space[3].rsvd) == 48,
+	      "outb_msns ctx reserved3 at +48B");
+static_assert(offsetof(struct rte_pmd_cnxk_ipsec_outb_ctx_msns_reg, space[3].seqnum) == 56,
+	      "outb_msns ctx seqnum3 at +56B");
+static_assert(offsetof(struct rte_pmd_cnxk_ipsec_outb_ctx_msns_reg, hard_life) == 64,
+	      "outb_msns ctx hard_life at +64B");
+static_assert(offsetof(struct rte_pmd_cnxk_ipsec_outb_ctx_msns_reg, soft_life) == 72,
+	      "outb_msns ctx soft_life at +72B");
+static_assert(offsetof(struct rte_pmd_cnxk_ipsec_outb_ctx_msns_reg, mib_octs) == 80,
+	      "outb_msns ctx mib_octs at +80B");
+static_assert(offsetof(struct rte_pmd_cnxk_ipsec_outb_ctx_msns_reg, mib_pkts) == 88,
+	      "outb_msns ctx mib_pkts at +88B");
+
+/** Outbound IPsec MSNS SA slot size (1KB) */
+#define RTE_PMD_CNXK_IPSEC_OUTB_SA_MSNS_SZ 1024
+
+/** Byte offset of outbound MSNS HW ctx region (32-byte aligned, Word32) */
+#define RTE_PMD_CNXK_IPSEC_OUTB_MSNS_CTX_OFF \
+	RTE_ALIGN_CEIL(offsetof(struct rte_pmd_cnxk_ipsec_outb_sa, ctx), 32)
+
+/** Pad bytes before outbound MSNS HW ctx to reach RTE_PMD_CNXK_IPSEC_OUTB_MSNS_CTX_OFF */
+#define RTE_PMD_CNXK_IPSEC_OUTB_MSNS_CTX_ALIGN_PAD \
+	(RTE_PMD_CNXK_IPSEC_OUTB_MSNS_CTX_OFF - \
+	offsetof(struct rte_pmd_cnxk_ipsec_outb_sa, ctx))
+
+/** MSNS outbound ctx_push_size: push ends at HW ctx (not hw_ctx_off + 1) */
+#define RTE_PMD_CNXK_IPSEC_OUTB_MSNS_CTX_PUSH_SZ(hw_ctx_off_words) (hw_ctx_off_words)
+
+/**
+ * Outbound IPsec SA for MSNS with packed ESN subspaces in one CTX cache entry.
+ *
+ * Word0 - Word30 match struct rte_pmd_cnxk_ipsec_outb_sa.
+ * Word32+ is the 32-byte aligned MSNS HW context update region.
+ */
+struct rte_pmd_cnxk_ipsec_outb_msns_sa {
+	/** Word0 */
+	union {
+		struct {
+			uint64_t esn_en : 1;
+			uint64_t ip_id : 1;
+			uint64_t rsvd0 : 1;
+			uint64_t hard_life_dec : 1;
+			uint64_t soft_life_dec : 1;
+			uint64_t count_glb_octets : 1;
+			uint64_t count_glb_pkts : 1;
+			uint64_t count_mib_bytes : 1;
+			uint64_t count_mib_pkts : 1;
+			uint64_t hw_ctx_off : 7;
+			uint64_t ctx_id : 16;
+			uint64_t rsvd1 : 16;
+			uint64_t ctx_push_size : 7;
+			uint64_t rsvd2 : 1;
+			uint64_t ctx_hdr_size : 2;
+			uint64_t aop_valid : 1;
+			uint64_t rsvd3 : 1;
+			uint64_t ctx_size : 4;
+		} s;
+		uint64_t u64;
+	} w0;
+
+	/** Word1 */
+	union {
+		struct {
+			uint64_t rsvd4 : 32;
+			uint64_t cookie : 32;
+		} s;
+		uint64_t u64;
+	} w1;
+
+	/** Word 2 */
+	union {
+		struct {
+			uint64_t valid : 1;
+			uint64_t dir : 1;
+			uint64_t rsvd11 : 1;
+			uint64_t rsvd5 : 1;
+			uint64_t ipsec_mode : 1;
+			uint64_t ipsec_protocol : 1;
+			uint64_t aes_key_len : 2;
+			uint64_t enc_type : 3;
+			uint64_t life_unit : 1;
+			uint64_t auth_type : 4;
+			uint64_t encap_type : 2;
+			uint64_t ipv4_df_src_or_ipv6_flw_lbl_src : 1;
+			uint64_t dscp_src : 1;
+			uint64_t iv_src : 2;
+			uint64_t ipid_gen : 1;
+			uint64_t rsvd6 : 1;
+			uint64_t rsvd7 : 7;
+			uint64_t rsvd12 : 1;
+			uint64_t spi : 32;
+		} s;
+		uint64_t u64;
+	} w2;
+
+	/** Word3 */
+	uint64_t rsvd8;
+
+	/** Word4 - Word7 */
+	uint8_t cipher_key[RTE_PMD_CNXK_CTX_MAX_CKEY_LEN];
+
+	/** Word8 - Word9 */
+	union rte_pmd_cnxk_ipsec_outb_iv iv;
+
+	/** Word10 */
+	union {
+		struct {
+			uint64_t rsvd9 : 4;
+			uint64_t ipv4_df_or_ipv6_flw_lbl : 20;
+			uint64_t dscp : 6;
+			uint64_t rsvd10 : 2;
+			uint64_t udp_dst_port : 16;
+			uint64_t udp_src_port : 16;
+		} s;
+		uint64_t u64;
+	} w10;
+
+	/** Word11 - Word14 */
+	union rte_pmd_cnxk_ipsec_outer_ip_hdr outer_hdr;
+
+	/** Word15 - Word30 */
+	uint8_t hmac_opad_ipad[RTE_PMD_CNXK_CTX_MAX_OPAD_IPAD_LEN];
+
+	/** Pad Word31 so MSNS HW ctx region is 32-byte aligned */
+	uint8_t ctx_align_pad[RTE_PMD_CNXK_IPSEC_OUTB_MSNS_CTX_ALIGN_PAD];
+
+	/** Word32+ MSNS HW context update region (32-byte aligned) */
+	struct rte_pmd_cnxk_ipsec_outb_ctx_msns_reg ctx;
+
+	/** Reserved to pad SA to 1KB */
+	uint8_t rsvd[RTE_PMD_CNXK_IPSEC_OUTB_SA_MSNS_SZ - RTE_PMD_CNXK_IPSEC_OUTB_MSNS_CTX_OFF -
+		     sizeof(struct rte_pmd_cnxk_ipsec_outb_ctx_msns_reg)];
+};
+
+static_assert(sizeof(struct rte_pmd_cnxk_ipsec_outb_msns_sa) == RTE_PMD_CNXK_IPSEC_OUTB_SA_MSNS_SZ,
+	      "rte_pmd_cnxk_ipsec_outb_msns_sa must be 1KB");
+static_assert(sizeof(((struct rte_pmd_cnxk_ipsec_outb_msns_sa *)0)->rsvd) == 672,
+	      "outb_msns_sa rsvd must be 672B");
+static_assert(RTE_PMD_CNXK_IPSEC_OUTB_MSNS_CTX_ALIGN_PAD == 8,
+	      "outb_msns_sa ctx align pad must be 8B");
+static_assert((offsetof(struct rte_pmd_cnxk_ipsec_outb_msns_sa, ctx) % 32) == 0,
+	      "outb_msns_sa ctx must be 32-byte aligned");
+static_assert(offsetof(struct rte_pmd_cnxk_ipsec_outb_msns_sa, ctx) ==
+		      RTE_PMD_CNXK_IPSEC_OUTB_MSNS_CTX_OFF,
+	      "outb_msns_sa ctx must start at Word32");
+static_assert((offsetof(struct rte_pmd_cnxk_ipsec_outb_msns_sa, ctx) / 8) <= 32,
+	      "outb_msns_sa hw_ctx_off must be <= 32 without CTX caching");
+static_assert(offsetof(struct rte_pmd_cnxk_ipsec_outb_msns_sa, w1) ==
+		      offsetof(struct rte_pmd_cnxk_ipsec_outb_sa, w1),
+	      "outb_msns_sa w1 offset must match outb_sa");
+static_assert(offsetof(struct rte_pmd_cnxk_ipsec_outb_msns_sa, w2) ==
+		      offsetof(struct rte_pmd_cnxk_ipsec_outb_sa, w2),
+	      "outb_msns_sa w2 offset must match outb_sa");
+
+/** 1KB-aligned outbound MSNS SA slot size */
+#define RTE_PMD_CNXK_IPSEC_OUTB_SA_MSNS_SZ_ALIGN RTE_PMD_CNXK_IPSEC_OUTB_SA_MSNS_SZ
+
+/** HW write size for outbound MSNS SA (push + MSNS ctx, excludes sw priv tail) */
+#define RTE_PMD_CNXK_IPSEC_OUTB_SA_MSNS_WR_SZ offsetof(struct rte_pmd_cnxk_ipsec_outb_msns_sa, rsvd)
+
 /** Inbound/Outbound IPsec SA */
 union rte_pmd_cnxk_ipsec_hw_sa {
 	/** Inbound SA */
@@ -714,6 +918,8 @@ union rte_pmd_cnxk_ipsec_hw_sa {
 	struct rte_pmd_cnxk_ipsec_outb_sa outb;
 	/** Inbound MSNS SA (1KB, 4 packed AR spaces) */
 	struct rte_pmd_cnxk_ipsec_inb_msns_sa inb_msns;
+	/** Outbound MSNS SA (1KB, packed ESN subspaces) */
+	struct rte_pmd_cnxk_ipsec_outb_msns_sa outb_msns;
 };
 
 /** CPT HW result format */
@@ -919,6 +1125,37 @@ struct rte_pmd_cnxk_inl_dev_q *rte_pmd_cnxk_inl_dev_qptr_get(void);
 __rte_experimental
 uint16_t rte_pmd_cnxk_inl_dev_submit(struct rte_pmd_cnxk_inl_dev_q *qptr, void *inst,
 				     uint16_t nb_inst);
+
+/**
+ * Submit CPT instruction(s) (cpt_inst_s) to outbound CPT LF.
+ *
+ * The outbound CPT LF is selected from ``tx_qid`` using the same mapping as the
+ * driver fast path, i.e. ``tx_qid % nb_crypto_qs``.
+ *
+ * For outbound IPsec instructions, the PMD also prepares the associated NIX TX
+ * descriptor in the mbuf tailroom; applications must provide mbufs with
+ * sufficient tailroom and a valid ``rte_security_dynfield(mbuf)`` payload
+ * (as used by the driver fast path).
+ * @param portid
+ *   Port identifier of Ethernet device.
+ * @param tx_qid
+ *   Ethernet TX queue identifier.
+ * @param inst
+ *   Pointer to an array of ``cpt_inst_s`` prepared by application.
+ * @param tx_mbuf
+ *   Pointer to an array of ``rte_mbuf`` corresponding to each CPT instruction.
+ * @param sa_idx
+ *   Outbound SA index for this submit burst.
+ * @param nb_inst
+ *   Number of instructions to be processed.
+ *
+ * @return
+ *   Number of instructions processed.
+ */
+__rte_experimental
+uint16_t rte_pmd_cnxk_outb_submit(uint16_t portid, uint16_t tx_qid, void *inst,
+				   struct rte_mbuf **tx_mbuf, uint32_t sa_idx,
+				   uint16_t nb_inst);
 
 /**
  * Retrieves the hardware statistics of a given port and stats type.

@@ -135,20 +135,33 @@ cnxk_ae_fill_rsa_params(struct cnxk_ae_sess *sess,
 	size_t mod_len = xfrm_rsa->n.length;
 	size_t exp_len = xfrm_rsa->e.length;
 	uint64_t total_size;
+	size_t max_len;
 	size_t len = 0;
 
 	/* Set private key type */
 	rsa->key_type = xfrm_rsa->key_type;
 
 	if (rsa->key_type == RTE_RSA_KEY_TYPE_QT) {
-		if (qt.p.length != 0 && qt.p.data == NULL)
+		max_len = mod_len / 2;
+
+		/*
+		 * Each quintuple component (q, dQ, p, dP, qInv) is independently
+		 * caller-controlled and copied with its own length, so every one of
+		 * them must be bounds-checked individually against mod_len/2 -
+		 * relying on qt.p.length alone is not sufficient.
+		 */
+		if (qt.p.length == 0 || qt.p.length > max_len || qt.p.data == NULL ||
+		    qt.q.length == 0 || qt.q.length > max_len || qt.q.data == NULL ||
+		    qt.dP.length == 0 || qt.dP.length > max_len || qt.dP.data == NULL ||
+		    qt.dQ.length == 0 || qt.dQ.length > max_len || qt.dQ.data == NULL ||
+		    qt.qInv.length == 0 || qt.qInv.length > max_len || qt.qInv.data == NULL)
 			return -EINVAL;
 
-		/* Make sure key length used is not more than mod_len/2 */
-		if (qt.p.data != NULL)
-			len = (((mod_len / 2) < qt.p.length) ? 0 : qt.p.length * 5);
+		/* Total size is the actual sum of the quintuple component lengths */
+		len = qt.q.length + qt.dQ.length + qt.p.length + qt.dP.length + qt.qInv.length;
 	} else if (rsa->key_type == RTE_RSA_KEY_TYPE_EXP) {
-		if (d.length != 0 && d.data == NULL)
+		/* Private exponent cannot be larger than the modulus */
+		if (d.length == 0 || d.length > mod_len || d.data == NULL)
 			return -EINVAL;
 
 		len = d.length;
@@ -174,8 +187,7 @@ cnxk_ae_fill_rsa_params(struct cnxk_ae_sess *sess,
 		rsa->qt.dQ.data = rsa->qt.q.data + qt.q.length;
 		memcpy(rsa->qt.dQ.data, qt.dQ.data, qt.dQ.length);
 		rsa->qt.p.data = rsa->qt.dQ.data + qt.dQ.length;
-		if (qt.p.data != NULL)
-			memcpy(rsa->qt.p.data, qt.p.data, qt.p.length);
+		memcpy(rsa->qt.p.data, qt.p.data, qt.p.length);
 		rsa->qt.dP.data = rsa->qt.p.data + qt.p.length;
 		memcpy(rsa->qt.dP.data, qt.dP.data, qt.dP.length);
 		rsa->qt.qInv.data = rsa->qt.dP.data + qt.dP.length;

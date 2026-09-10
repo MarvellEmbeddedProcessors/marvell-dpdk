@@ -4514,6 +4514,7 @@ main(int argc, char **argv)
 		app_info("Model: %s Test Mode: %s\n", rte_pmd_cnxk_model_str_get(),
 		       ipsec_test_mode_to_string(testmode));
 		rc = pmd_cnxk_outbound_msns_test();
+		app_info("Test %s: %s\n", ipsec_test_mode_to_string(testmode), rc ? "FAILED" : "PASS");
 		break;
 	}
 	ut_teardown();

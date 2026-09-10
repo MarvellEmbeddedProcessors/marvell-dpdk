@@ -55,3 +55,19 @@ would be enabled.
 MBUF COUNT:
 ==========
 When "--nb-mbufs" argument is given, packet pool will be created for specified count.
+
+cnxk_ipsec_msns_api:
+====================
+Companion application to exercise RTE PMD CNXK IPsec APIs via --testmode.
+
+IPSEC_RTE_PMD_CNXK_OUTBOUND_MSNS_TEST (testmode 7):
+===================================================
+Programs a 1KB outbound MSNS SA and submits outbound CPT instructions via
+rte_pmd_cnxk_outb_submit(). Receives encrypted packets on the RX queue in
+loopback mode and verifies the ESP sequence number from the last received
+packet against the SA subspace sequence counter.
+
+Usage:
+======
+./cnxk_ipsec_msns_api -c 0x3 -a 0002:01:00.2,custom_inb_sa=1,custom_sa_act=1 \
+	-a 0002:1d:00.0 -a 0002:20:00.1 -a 0002:1e:00.0 -- --testmode 7 --portmask 0x1

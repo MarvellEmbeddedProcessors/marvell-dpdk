@@ -47,9 +47,13 @@ function get_cpu_string() {
 		cpu_str="96xx"
 	elif [[ $cpu_impl == 0x43 ]] && [[ $cpu_pn == 0x0b4 ]]; then
 		cpu_str="95xx"
-	elif [[ $cpu_impl == 0x41 ]] && [[ $cpu_pn == 0xd49 ]]; then
-		cpu_str="cn10ka"
-		compatible=`cat /proc/device-tree/compatible`
+	elif [[ $cpu_impl == 0x41 ]] && ([[ $cpu_pn == 0xd49 ]] || [[ $cpu_pn == 0xd8e ]]); then
+		if [[ $cpu_pn == 0xd49 ]]; then
+			cpu_str="cn10ka"
+		else
+			cpu_str="cn20ka"
+		fi
+		compatible=$(tr -d '\0' < /proc/device-tree/compatible)
 		IFS=',' read -ra list <<< "$compatible"
 		if [[ "${list[0]}" = "marvell" ]]
 		then
@@ -94,7 +98,7 @@ function setup_devices() {
 	nix_lbk_vfs="0002:01:00.1 0002:01:00.2 0002:01:00.3"
 	devs=${DEVS:-$nix_lbk_vfs}
 
-	if [[ $CPU == "cn10ka" ]] || [[ $CPU == "cn10kb" ]]; then
+	if [[ $CPU == "cn10ka" ]] || [[ $CPU == "cn10kb" ]] || [[ $CPU == "cn20ka" ]]; then
 		cpt_pf="0002:20:00.0"
 		cpt_vf="0002:20:00.1"
 	elif [[ $IS_CN9K -eq 1 ]]; then
@@ -132,7 +136,7 @@ function setup_devices() {
 		devs+=" $dma_vf"
 	fi
 
-	if [[ $CPU == "cn10ka" ]]; then
+	if [[ $CPU == "cn10ka" ]] || [[ $CPU == "cn20ka" ]]; then
 		inl_pf=${INL_DEV:-$(lspci -d :a0f0 | tail -1 | awk -e '{ print $1 }')}
 		devs+=" $inl_pf"
 	fi

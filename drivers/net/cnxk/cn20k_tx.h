@@ -1307,8 +1307,10 @@ cn20k_nix_prepare_mseg(struct cn20k_eth_txq *txq, struct rte_mbuf *m, struct rte
 	len -= dlen;
 	nb_segs = m->nb_segs - 1;
 	m_next = m->next;
-	m->next = NULL;
-	m->nb_segs = 1;
+	if (!(flags & NIX_TX_OFFLOAD_MBUF_NOFF_F) || RTE_MBUF_HAS_EXTBUF(m)) {
+		m->next = NULL;
+		m->nb_segs = 1;
+	}
 	slist = &cmd[3 + off + 1];
 
 	cookie = RTE_MBUF_DIRECT(m) ? m : rte_mbuf_from_indirect(m);
@@ -1357,7 +1359,8 @@ cn20k_nix_prepare_mseg(struct cn20k_eth_txq *txq, struct rte_mbuf *m, struct rte
 		aura = aura0;
 		prefree = 0;
 
-		m->next = NULL;
+		if (!(flags & NIX_TX_OFFLOAD_MBUF_NOFF_F) || RTE_MBUF_HAS_EXTBUF(m))
+			m->next = NULL;
 
 		cookie = RTE_MBUF_DIRECT(m) ? m : rte_mbuf_from_indirect(m);
 		if (flags & NIX_TX_OFFLOAD_MBUF_NOFF_F) {

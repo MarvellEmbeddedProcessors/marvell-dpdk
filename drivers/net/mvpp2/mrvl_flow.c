@@ -8,6 +8,7 @@
 #include <rte_flow_driver.h>
 #include <rte_malloc.h>
 #include <rte_log.h>
+#include <rte_string_fns.h>
 
 #include <arpa/inet.h>
 
@@ -1193,20 +1194,53 @@ mrvl_string_to_hex_values(const uint8_t *input_string,
 			  uint8_t *length)
 {
 	char tmp_arr[3], tmp_string[MRVL_CLS_STR_SIZE_MAX], *string_iter;
+	size_t str_len;
+	uint8_t byte_len;
 	int i;
 
-	strcpy(tmp_string, (const char *)input_string);
+	/* input_string is not guaranteed NUL-terminated by DPDK API; bound the read */
+	str_len = strnlen((const char *)input_string, MRVL_CLS_STR_SIZE_MAX);
+	if (str_len >= MRVL_CLS_STR_SIZE_MAX) {
+		MRVL_LOG(ERR, "raw pattern string too long (max %zu chars)",
+			 (size_t)MRVL_CLS_STR_SIZE_MAX - 1);
+		return -EINVAL;
+	}
+
+	rte_strscpy(tmp_string, (const char *)input_string, sizeof(tmp_string));
 	string_iter = tmp_string;
 
-	string_iter += 2; /* skip the '0x' */
-	*length = ((*length - 2) + 1) / 2;
+	if (*length < 2) {
+		MRVL_LOG(ERR, "pattern length field must be at least 2 (for '0x' prefix)");
+		return -EINVAL;
+	}
 
-	for (i = 0; i < *length; i++) {
+	if (str_len < 2 || (str_len - 2) % 2 != 0) {
+		MRVL_LOG(ERR, "raw pattern must be '0x' followed by even number of hex digits");
+		return -EINVAL;
+	}
+
+	if (str_len != *length) {
+		MRVL_LOG(ERR, "raw pattern length mismatch: declared=%u actual=%zu",
+			 *length, str_len);
+		return -EINVAL;
+	}
+
+	string_iter += 2; /* skip the '0x' */
+	byte_len = (uint8_t)((str_len - 2) / 2);
+	if (byte_len > MRVL_CLS_STR_SIZE_MAX) {
+		MRVL_LOG(ERR, "raw pattern byte length %u exceeds buffer size %d",
+			 byte_len, MRVL_CLS_STR_SIZE_MAX);
+		return -EINVAL;
+	}
+
+	*length = byte_len;
+
+	for (i = 0; i < byte_len; i++) {
 		strncpy(tmp_arr, string_iter, 2);
 		tmp_arr[2] = '\0';
 		if (get_val_securely8(tmp_arr, 16,
-				      &hex_key[*length - 1 - i]) < 0)
-			return -1;
+				      &hex_key[byte_len - 1 - i]) < 0)
+			return -EINVAL;
 		string_iter += 2;
 	}
 
@@ -1276,6 +1310,12 @@ mrvl_parse_raw(const struct rte_flow_item *item,
 		return -rte_errno;
 	}
 
+	if (spec->length > MRVL_CLS_STR_SIZE_MAX) {
+		rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM_SPEC,
+				   NULL, "'length' option exceeds maximum supported size\n");
+		return -rte_errno;
+	}
+
 	length = spec->length & mask->length;
 	if (!length) {
 		rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM_SPEC,
@@ -1283,8 +1323,21 @@ mrvl_parse_raw(const struct rte_flow_item *item,
 		return -rte_errno;
 	}
 
+	if (strnlen((const char *)spec->pattern, MRVL_CLS_STR_SIZE_MAX) >=
+	    MRVL_CLS_STR_SIZE_MAX) {
+		rte_flow_error_set(error, EINVAL, RTE_FLOW_ERROR_TYPE_ITEM_SPEC,
+				   NULL, "'pattern' string exceeds maximum length\n");
+		return -rte_errno;
+	}
+
 	key_field = &flow->rule.fields[flow->rule.num_fields];
-	mrvl_alloc_key_mask(key_field);
+	ret = mrvl_alloc_key_mask(key_field);
+	if (ret) {
+		rte_flow_error_set(error, ENOMEM,
+				   RTE_FLOW_ERROR_TYPE_UNSPECIFIED,
+				   NULL, "failed to allocate key/mask\n");
+		return -rte_errno;
+	}
 
 	/* pattern and length refer to string bytes. we need to convert it to
 	 * values.

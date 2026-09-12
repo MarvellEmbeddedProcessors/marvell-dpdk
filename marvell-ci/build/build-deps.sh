@@ -299,7 +299,7 @@ mkdir -p $BUILD_ROOT
 BUILD_ROOT=$(realpath $BUILD_ROOT)
 
 if [[ -z $INSTALL_ROOT ]]; then
-	INSTALL_ROOT=$BUILD_ROOT/prefix
+	INSTALL_ROOT=$BUILD_ROOT/deps
 fi
 
 cd $PROJECT_ROOT

@@ -56,10 +56,10 @@ PTPC_CMD="$TESTPTP -c $COREMASK -n $MEMCHANNEL \
 	-- -p $PORTMAST -T $TIMESTAMP"
 
 declare -a ptp_log_strings=(
-	"T2 - Slave  Clock."
-	"T1 - Master Clock."
-	"T3 - Slave  Clock."
-	"T4 - Master Clock."
+	"T2 - time receiver clock."
+	"T1 - time transmitter clock."
+	"T3 - time receiver clock."
+	"T4 - time transmitter clock."
 )
 
 SUDO="sudo"
@@ -233,12 +233,16 @@ dump_ptplog
 exit_app
 
 echo "Exit"
+test_status=0
+
 #Validate scapy log
 res=`validate_scapy`
 if [ $res -eq -1 ]; then
 	echo "FAILURE: Scapy failed"
+	test_status=1
 elif [ $res -eq 0 ]; then
 	echo "FAILURE: No PTP Delay Response packet sent"
+	test_status=1
 else
 	echo "SUCCESS: PTP Delay Response packet sent"
 fi
@@ -246,6 +250,9 @@ fi
 res=`validate_ptp`
 if [ $res -eq 0 ]; then
 	echo "FAILURE: PTP test"
+	test_status=1
 else
 	echo "SUCCESS: PTP test completed"
 fi
+
+exit $test_status

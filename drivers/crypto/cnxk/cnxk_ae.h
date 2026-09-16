@@ -19,6 +19,17 @@
 
 #define CNXK_AE_EDDSA_MAX_PARAM_LEN 1024
 
+/*
+ * Maximum RSA modulus length (in bytes) supported by CNXK hardware. Must
+ * match CNXK_CPT_MAX_ASYM_OP_MOD_LEN in cnxk_cryptodev_ops.c and the
+ * modlen.max capability advertised in cnxk_cryptodev_capabilities.c. The
+ * per-op scratch buffer (CNXK_CPT_MAX_ASYM_OP_NUM_PARAMS *
+ * CNXK_CPT_MAX_ASYM_OP_MOD_LEN) that cnxk_ae_rsa_crt_prep()/
+ * cnxk_ae_rsa_exp_prep() write into is sized against this limit, so RSA
+ * key material must be rejected up front if it exceeds it.
+ */
+#define CNXK_AE_RSA_MAX_MODLEN 1024
+
 struct cnxk_ae_sess {
 	uint8_t rte_sess[ASYM_SESS_SIZE];
 	enum rte_crypto_asym_xform_type xfrm_type;
@@ -138,11 +149,21 @@ cnxk_ae_fill_rsa_params(struct cnxk_ae_sess *sess,
 	size_t max_len;
 	size_t len = 0;
 
+	/* Bound n/e against CNXK's RSA capability and require valid data,
+	 * since they're used unconditionally below.
+	 */
+	if (mod_len > CNXK_AE_RSA_MAX_MODLEN || exp_len == 0 || exp_len > CNXK_AE_RSA_MAX_MODLEN ||
+	    xfrm_rsa->n.data == NULL || xfrm_rsa->e.data == NULL)
+		return -EINVAL;
+
 	/* Set private key type */
 	rsa->key_type = xfrm_rsa->key_type;
 
 	if (rsa->key_type == RTE_RSA_KEY_TYPE_QT) {
-		max_len = mod_len / 2;
+		/* Round up so an odd-length modulus doesn't reject a legitimately
+		 * sized factor (mod_len/2 alone truncates down).
+		 */
+		max_len = (mod_len + 1) / 2;
 
 		/*
 		 * Each quintuple component (q, dQ, p, dP, qInv) is independently
@@ -160,11 +181,20 @@ cnxk_ae_fill_rsa_params(struct cnxk_ae_sess *sess,
 		/* Total size is the actual sum of the quintuple component lengths */
 		len = qt.q.length + qt.dQ.length + qt.p.length + qt.dP.length + qt.qInv.length;
 	} else if (rsa->key_type == RTE_RSA_KEY_TYPE_EXP) {
-		/* Private exponent cannot be larger than the modulus */
-		if (d.length == 0 || d.length > mod_len || d.data == NULL)
+		/*
+		 * d is optional here: RTE_RSA_KEY_TYPE_EXP also covers
+		 * public-only (encrypt/verify) transforms that supply just
+		 * n/e, which cnxk_ae_rsa_prep() uses without ever reading d.
+		 * When a private exponent is supplied, bound it and require
+		 * its data.
+		 */
+		if (d.length > mod_len || (d.length != 0 && d.data == NULL))
 			return -EINVAL;
 
 		len = d.length;
+	} else {
+		/* Reject unknown key_type instead of silently treating it as EXP. */
+		return -EINVAL;
 	}
 
 	/* Total size required for RSA key params(n,e,(q,dQ,p,dP,qInv)) */
@@ -201,7 +231,8 @@ cnxk_ae_fill_rsa_params(struct cnxk_ae_sess *sess,
 	} else if (rsa->key_type == RTE_RSA_KEY_TYPE_EXP) {
 		/* Private key in exponent format */
 		rsa->d.data = rsa->e.data + exp_len;
-		memcpy(rsa->d.data, d.data, d.length);
+		if (d.data != NULL)
+			memcpy(rsa->d.data, d.data, d.length);
 		rsa->d.length = d.length;
 	}
 	rsa->n.length = mod_len;

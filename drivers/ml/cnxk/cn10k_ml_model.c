@@ -2,6 +2,8 @@
  * Copyright (c) 2022 Marvell.
  */
 
+#include <inttypes.h>
+
 #include <rte_hash_crc.h>
 
 #include <mldev_utils.h>
@@ -48,11 +50,62 @@ cn10k_ml_model_metadata_check(uint8_t *buffer, uint64_t size)
 	struct cn10k_ml_model_metadata *metadata;
 	uint32_t payload_crc32c;
 	uint32_t header_crc32c;
+	uint64_t model_finish_offset;
+	uint64_t model_payload_size;
+	uint64_t model_wb_offset;
 	uint32_t version;
 	uint8_t i;
 	uint8_t j;
 
+	/* Validate buffer size */
+	if (buffer == NULL || size < sizeof(struct cn10k_ml_model_metadata)) {
+		plt_err("Invalid model buffer (addr=%p size=%" PRIu64 "), expected "
+			"non-NULL and >= %zu",
+			(void *)buffer, size, sizeof(struct cn10k_ml_model_metadata));
+		return -EINVAL;
+	}
+
 	metadata = (struct cn10k_ml_model_metadata *)buffer;
+
+	model_payload_size = size - sizeof(struct cn10k_ml_model_metadata);
+	if (model_payload_size < metadata->init_model.file_size) {
+		plt_err("Invalid model buffer size = %" PRIu64 ", "
+			"model sections exceed buffer",
+			size);
+		return -EINVAL;
+	}
+
+	model_payload_size -= metadata->init_model.file_size;
+	if (model_payload_size < metadata->main_model.file_size) {
+		plt_err("Invalid model buffer size = %" PRIu64 ", "
+			"model sections exceed buffer",
+			size);
+		return -EINVAL;
+	}
+
+	model_payload_size -= metadata->main_model.file_size;
+	if (model_payload_size < metadata->finish_model.file_size) {
+		plt_err("Invalid model buffer size = %" PRIu64 ", "
+			"model sections exceed buffer",
+			size);
+		return -EINVAL;
+	}
+
+	model_payload_size -= metadata->finish_model.file_size;
+	if (model_payload_size < metadata->weights_bias.file_size) {
+		plt_err("Invalid model buffer size = %" PRIu64 ", "
+			"model sections exceed buffer",
+			size);
+		return -EINVAL;
+	}
+
+	model_finish_offset =
+		(uint64_t)metadata->init_model.file_size + metadata->main_model.file_size;
+	model_wb_offset = model_finish_offset + metadata->finish_model.file_size;
+	if (model_finish_offset > UINT32_MAX || model_wb_offset > UINT32_MAX) {
+		plt_err("Invalid model, cumulative code section offsets exceed descriptor limit");
+		return -EINVAL;
+	}
 
 	/* Header CRC check */
 	if (metadata->header.header_crc32c != 0) {
@@ -322,7 +375,7 @@ cn10k_ml_layer_addr_update(struct cnxk_ml_layer *layer, uint8_t *buffer, uint8_t
 	struct cn10k_ml_model_metadata *metadata;
 	struct cn10k_ml_layer_addr *addr;
 	uint8_t *dma_addr_load;
-	int fpos;
+	uint64_t fpos;
 
 	metadata = &layer->glow.metadata;
 	addr = &layer->glow.addr;

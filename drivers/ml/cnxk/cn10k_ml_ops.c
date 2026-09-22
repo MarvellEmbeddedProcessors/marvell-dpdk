@@ -591,6 +591,9 @@ cn10k_ml_layer_load(void *device, uint16_t model_id, const char *layer_name, uin
 	size_t layer_scratch_size;
 	size_t layer_xstats_size;
 	uint8_t *base_dma_addr;
+	uint64_t model_finish_offset;
+	uint64_t model_object_size;
+	uint64_t model_wb_offset;
 	uint16_t scratch_pages;
 	uint16_t layer_id;
 	uint16_t wb_pages;
@@ -646,8 +649,16 @@ cn10k_ml_layer_load(void *device, uint16_t model_id, const char *layer_name, uin
 
 	/* Compute layer memzone size */
 	metadata = (struct cn10k_ml_model_metadata *)buffer;
-	layer_object_size = metadata->init_model.file_size + metadata->main_model.file_size +
-			    metadata->finish_model.file_size + metadata->weights_bias.file_size;
+	model_finish_offset =
+		(uint64_t)metadata->init_model.file_size + metadata->main_model.file_size;
+	model_wb_offset = model_finish_offset + metadata->finish_model.file_size;
+	model_object_size = model_wb_offset + metadata->weights_bias.file_size;
+	if (model_finish_offset > UINT32_MAX || model_wb_offset > UINT32_MAX ||
+	    model_object_size > (uint64_t)UINT32_MAX + 1) {
+		plt_err("Invalid model, cumulative section offsets exceed descriptor limit");
+		return -EINVAL;
+	}
+	layer_object_size = model_object_size;
 	layer_object_size = PLT_ALIGN_CEIL(layer_object_size, ML_CN10K_ALIGN_SIZE);
 	layer_scratch_size = PLT_ALIGN_CEIL(metadata->model.ddr_scratch_range_end -
 						    metadata->model.ddr_scratch_range_start + 1,

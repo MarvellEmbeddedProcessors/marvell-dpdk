@@ -16,11 +16,24 @@ cnxk_ml_model_get_type(struct rte_ml_model_params *params)
 	uint32_t payload_crc32c;
 	uint32_t header_crc32c;
 
+	if (params->addr == NULL) {
+		plt_err("Invalid model buffer (addr=%p size=%zu)", (void *)params->addr,
+			params->size);
+		return ML_CNXK_MODEL_TYPE_INVALID;
+	}
+
 	type = tvmrt_ml_model_type_get(params);
 	if (type == ML_CNXK_MODEL_TYPE_TVM)
 		return ML_CNXK_MODEL_TYPE_TVM;
 	else if (type == ML_CNXK_MODEL_TYPE_INVALID)
 		return ML_CNXK_MODEL_TYPE_INVALID;
+
+	if (params->size < sizeof(struct cn10k_ml_model_metadata_header)) {
+		plt_err("Invalid Glow model buffer (addr=%p size=%zu), expected >= %zu",
+			(void *)params->addr, params->size,
+			sizeof(struct cn10k_ml_model_metadata_header));
+		return ML_CNXK_MODEL_TYPE_INVALID;
+	}
 
 	/* Check model magic string */
 	metadata_header = (struct cn10k_ml_model_metadata_header *)params->addr;

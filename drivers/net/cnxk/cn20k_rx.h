@@ -339,13 +339,11 @@ nix_cqe_xtract_mseg(const union nix_rx_parse_u *rx, struct rte_mbuf *mbuf, uint6
 	struct cn20k_inb_priv_data *inb_priv = NULL;
 	const struct cpt_frag_info_s *finfo = NULL;
 	uint64_t fsz_w1 = 0, cq_w1, cq_w5 = 0, sg;
-	uint32_t offset = hdr->w2.ptr_offset;
 	uint8_t num_frags = 0, nxt_frag = 0;
+	uint16_t rlen = 0, sg_len, data_len;
 	struct rte_mbuf *head, *last_mbuf;
-	uint16_t rlen = hdr->w3.rlen;
 	const rte_iova_t *iova_list;
 	uint8_t sg_cnt = 1, nb_segs;
-	uint16_t sg_len, data_len;
 	uint16x4_t fsz, sg_swap;
 	uint16_t later_skip = 0;
 	bool reas_fail = false;
@@ -354,6 +352,7 @@ nix_cqe_xtract_mseg(const union nix_rx_parse_u *rx, struct rte_mbuf *mbuf, uint6
 	uint16_t data_off = 0;
 	bool is_oop = false;
 	uint16_t l4_off = 0;
+	uint32_t offset = 0;
 	uint8_t ts_rx_off;
 	int dyn_off = 0;
 	int64_t len;
@@ -369,6 +368,8 @@ nix_cqe_xtract_mseg(const union nix_rx_parse_u *rx, struct rte_mbuf *mbuf, uint6
 		if (!hdr->w4.gthr_size)
 			return;
 
+		rlen = hdr->w3.rlen;
+		offset = hdr->w2.ptr_offset;
 		cq_w5 = *((const uint64_t *)rx + 4);
 		len = rlen + ((cq_w5 >> 16) & 0xFF) - (cq_w5 & 0xFF);
 		num_frags = hdr->w0.num_frags;

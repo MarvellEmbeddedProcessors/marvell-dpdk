@@ -377,6 +377,9 @@ cn20k_nix_rx_queue_bufsize_update(struct rte_eth_dev *eth_dev)
 	struct cnxk_eth_dev *dev = cnxk_eth_pmd_priv(eth_dev);
 	struct cn20k_eth_rxq *rxq;
 
+	if (!eth_dev->data->nb_rx_queues)
+		return;
+
 	rxq = eth_dev->data->rx_queues[0];
 
 	/* Store bufsize in lookup mem */

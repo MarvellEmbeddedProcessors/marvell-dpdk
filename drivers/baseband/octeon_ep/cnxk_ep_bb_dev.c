@@ -795,53 +795,145 @@ upd_out_sg_len(struct rte_bbdev_op_data *output, struct oct_bbdev_op_sg_list *sg
 {
 	struct oct_bbdev_seg_data *seg = sg_list->seg_data;
 	struct rte_mbuf *mbuf = output->data;
+	uint32_t total = output->length;
+	uint32_t sum = 0;
+	uint16_t n;
 
-	/* Set total packet length */
-	mbuf->pkt_len = output->length;
-	/* Set each segment length */
-	while (mbuf) {
-		mbuf->data_len = seg->length;
-		++seg;
+	if (unlikely(mbuf == NULL))
+		return;
+
+	for (n = 0; n < sg_list->num_segs && mbuf != NULL; n++) {
+		uint32_t seg_len = seg[n].length;
+
+		if (seg_len > rte_pktmbuf_tailroom(mbuf))
+			seg_len = rte_pktmbuf_tailroom(mbuf);
+		mbuf->data_len = seg_len;
+		sum += seg_len;
 		mbuf = mbuf->next;
 	}
-	/* Not validating num_segs or sum of segment length vs total length */
+	if (total > sum)
+		total = sum;
+	output->data->pkt_len = total;
+	output->length = total;
 }
 
-#define UPD_MBUF_LEN_CHK(buf)	do {			\
-	if ((buf)->data)				\
-		(buf)->data->data_len = (buf)->length;	\
+#define UPD_MBUF_LEN_CHK(buf)	do {					\
+	if ((buf)->data) {						\
+		uint32_t len = (buf)->length;				\
+		uint32_t room = rte_pktmbuf_tailroom((buf)->data);	\
+		if (len > room)						\
+			len = room;					\
+		(buf)->data->data_len = len;				\
+		(buf)->length = len;					\
+	}								\
 } while (0)
+
+static void
+apply_turbo_dec_resp(struct rte_bbdev_dec_op *host,
+		     const struct rte_bbdev_dec_op *dev,
+		     struct oct_bbdev_op_sg_list *out_sg)
+{
+	struct rte_mempool *mp = host->mempool;
+	void *opaque = host->opaque_data;
+	struct rte_bbdev_op_turbo_dec saved = host->turbo_dec;
+
+	host->status = dev->status;
+	host->turbo_dec = dev->turbo_dec;
+	host->mempool = mp;
+	host->opaque_data = opaque;
+	host->turbo_dec.input = saved.input;
+	host->turbo_dec.hard_output.data = saved.hard_output.data;
+	host->turbo_dec.hard_output.offset = saved.hard_output.offset;
+	host->turbo_dec.soft_output.data = saved.soft_output.data;
+	host->turbo_dec.soft_output.offset = saved.soft_output.offset;
+	upd_out_sg_len(&host->turbo_dec.hard_output, out_sg);
+	UPD_MBUF_LEN_CHK(&host->turbo_dec.soft_output);
+}
+
+static void
+apply_ldpc_dec_resp(struct rte_bbdev_dec_op *host,
+		    const struct rte_bbdev_dec_op *dev,
+		    struct oct_bbdev_op_sg_list *out_sg)
+{
+	struct rte_mempool *mp = host->mempool;
+	void *opaque = host->opaque_data;
+	struct rte_bbdev_op_ldpc_dec saved = host->ldpc_dec;
+
+	host->status = dev->status;
+	host->ldpc_dec = dev->ldpc_dec;
+	host->mempool = mp;
+	host->opaque_data = opaque;
+	host->ldpc_dec.input = saved.input;
+	host->ldpc_dec.hard_output.data = saved.hard_output.data;
+	host->ldpc_dec.hard_output.offset = saved.hard_output.offset;
+	host->ldpc_dec.soft_output.data = saved.soft_output.data;
+	host->ldpc_dec.soft_output.offset = saved.soft_output.offset;
+	host->ldpc_dec.harq_combined_input.data = saved.harq_combined_input.data;
+	host->ldpc_dec.harq_combined_input.offset = saved.harq_combined_input.offset;
+	host->ldpc_dec.harq_combined_output.data = saved.harq_combined_output.data;
+	host->ldpc_dec.harq_combined_output.offset = saved.harq_combined_output.offset;
+	upd_out_sg_len(&host->ldpc_dec.hard_output, out_sg);
+	UPD_MBUF_LEN_CHK(&host->ldpc_dec.soft_output);
+	UPD_MBUF_LEN_CHK(&host->ldpc_dec.harq_combined_output);
+}
+
+static void
+apply_turbo_enc_resp(struct rte_bbdev_enc_op *host,
+		     const struct rte_bbdev_enc_op *dev,
+		     struct oct_bbdev_op_sg_list *out_sg)
+{
+	struct rte_mempool *mp = host->mempool;
+	void *opaque = host->opaque_data;
+	struct rte_bbdev_op_turbo_enc saved = host->turbo_enc;
+
+	host->status = dev->status;
+	host->turbo_enc = dev->turbo_enc;
+	host->mempool = mp;
+	host->opaque_data = opaque;
+	host->turbo_enc.input = saved.input;
+	host->turbo_enc.output.data = saved.output.data;
+	host->turbo_enc.output.offset = saved.output.offset;
+	upd_out_sg_len(&host->turbo_enc.output, out_sg);
+}
+
+static void
+apply_ldpc_enc_resp(struct rte_bbdev_enc_op *host,
+		    const struct rte_bbdev_enc_op *dev,
+		    struct oct_bbdev_op_sg_list *out_sg)
+{
+	struct rte_mempool *mp = host->mempool;
+	void *opaque = host->opaque_data;
+	struct rte_bbdev_op_ldpc_enc saved = host->ldpc_enc;
+
+	host->status = dev->status;
+	host->ldpc_enc = dev->ldpc_enc;
+	host->mempool = mp;
+	host->opaque_data = opaque;
+	host->ldpc_enc.input = saved.input;
+	host->ldpc_enc.output.data = saved.output.data;
+	host->ldpc_enc.output.offset = saved.output.offset;
+	upd_out_sg_len(&host->ldpc_enc.output, out_sg);
+}
 
 /* Copy response into original request */
 #define	COPY_RESP()	do {		\
 	switch (q_data->conf.op_type) {	\
-	case RTE_BBDEV_OP_TURBO_DEC: {	\
-		struct rte_bbdev_dec_op *op1 = req->op_ptr, *op2 = &resp->turbo_dec.op;		\
-		*op1 = *op2;		\
-		upd_out_sg_len(&op1->turbo_dec.hard_output, &resp->turbo_dec.out_sg_list);	\
-		UPD_MBUF_LEN_CHK(&op1->turbo_dec.soft_output);					\
+	case RTE_BBDEV_OP_TURBO_DEC:	\
+		apply_turbo_dec_resp(req->op_ptr, &resp->turbo_dec.op,		\
+				     &resp->turbo_dec.out_sg_list);		\
 		break;			\
-	}				\
-	case RTE_BBDEV_OP_LDPC_DEC: {	\
-		struct rte_bbdev_dec_op *op1 = req->op_ptr, *op2 = &resp->ldpc_dec.op;		\
-		*op1 = *op2;		\
-		upd_out_sg_len(&op1->ldpc_dec.hard_output, &resp->ldpc_dec.out_sg_list);	\
-		UPD_MBUF_LEN_CHK(&op1->ldpc_dec.soft_output);					\
-		UPD_MBUF_LEN_CHK(&op1->ldpc_dec.harq_combined_output);				\
+	case RTE_BBDEV_OP_LDPC_DEC:	\
+		apply_ldpc_dec_resp(req->op_ptr, &resp->ldpc_dec.op,		\
+				    &resp->ldpc_dec.out_sg_list);		\
 		break;			\
-	}				\
-	case RTE_BBDEV_OP_TURBO_ENC: {	\
-		struct rte_bbdev_enc_op *op1 = req->op_ptr, *op2 = &resp->turbo_enc.op;		\
-		*op1 = *op2;		\
-		upd_out_sg_len(&op1->turbo_enc.output, &resp->turbo_enc.out_sg_list);		\
+	case RTE_BBDEV_OP_TURBO_ENC:	\
+		apply_turbo_enc_resp(req->op_ptr, &resp->turbo_enc.op,		\
+				     &resp->turbo_enc.out_sg_list);		\
 		break;			\
-	}				\
-	case RTE_BBDEV_OP_LDPC_ENC: {	\
-		struct rte_bbdev_enc_op *op1 = req->op_ptr, *op2 = &resp->ldpc_enc.op;		\
-		*op1 = *op2;		\
-		upd_out_sg_len(&op1->ldpc_enc.output, &resp->ldpc_enc.out_sg_list);		\
+	case RTE_BBDEV_OP_LDPC_ENC:	\
+		apply_ldpc_enc_resp(req->op_ptr, &resp->ldpc_enc.op,		\
+				    &resp->ldpc_enc.out_sg_list);		\
 		break;			\
-	}				\
 	default:			\
 		break;			\
 	}				\

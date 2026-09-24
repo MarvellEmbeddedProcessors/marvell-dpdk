@@ -913,9 +913,25 @@ cnxk_ep_bb_droq_read_packet(struct cnxk_ep_bb_device *cnxk_ep_bb_vf,
 		rte_prefetch_non_temporal((const void *)info2);
 	}
 
-	info->length = rte_bswap64(info->length);
+	/* Length is in the upper 16 bits (same SDP info word layout as octeon_ep net). */
+	info->length = rte_bswap16(info->length >> 48);
 	/* Deduce the actual data size */
 	total_pkt_len = info->length + INFO_SIZE;
+
+	if (unlikely(info->length > cnxk_ep_bb_vf->max_rx_pktlen)) {
+		cnxk_ep_bb_err("OQ[%d]: pkt length %" PRIu64 " > max %" PRIu32 ", dropping",
+			       droq->q_no, (uint64_t)info->length,
+			       cnxk_ep_bb_vf->max_rx_pktlen);
+		droq_pkt = droq->recv_buf_list[droq->read_idx];
+		if (droq_pkt != NULL)
+			rte_pktmbuf_free(droq_pkt);
+		droq->recv_buf_list[droq->read_idx] = NULL;
+		droq->read_idx = cnxk_ep_bb_incr_index(droq->read_idx, 1,
+						   droq->nb_desc);
+		droq->refill_count++;
+		droq->stats.rx_err++;
+		goto oq_read_fail;
+	}
 
 	/* total_pkt_len is derived from the device-DMA'd info->length. Bound it
 	 * against the ring capacity before it is used to drive the reassembly
@@ -937,7 +953,22 @@ cnxk_ep_bb_droq_read_packet(struct cnxk_ep_bb_device *cnxk_ep_bb_vf,
 	}
 
 	if (total_pkt_len <= droq->buffer_size) {
-		info->length -=  rh_size[cnxk_ep_bb_vf->sdp_packet_mode];
+		uint8_t rh = rh_size[cnxk_ep_bb_vf->sdp_packet_mode];
+
+		if (unlikely(info->length < rh)) {
+			cnxk_ep_bb_err("OQ[%d]: pkt length %" PRIu64 " < rh %u, dropping",
+				       droq->q_no, (uint64_t)info->length, rh);
+			droq_pkt = droq->recv_buf_list[droq->read_idx];
+			if (droq_pkt != NULL)
+				rte_pktmbuf_free(droq_pkt);
+			droq->recv_buf_list[droq->read_idx] = NULL;
+			droq->read_idx = cnxk_ep_bb_incr_index(droq->read_idx, 1,
+							   droq->nb_desc);
+			droq->refill_count++;
+			droq->stats.rx_err++;
+			goto oq_read_fail;
+		}
+		info->length -= rh;
 		droq_pkt  = droq->recv_buf_list[droq->read_idx];
 		if (likely(droq_pkt != NULL)) {
 			droq_pkt->data_off += info_size;

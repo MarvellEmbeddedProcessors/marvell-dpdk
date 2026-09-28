@@ -9,6 +9,15 @@ DPDK Release 25.11
 New Features
 ------------
 
+* **Added RSA-specific capability parameters in cryptodev.**
+
+  Added ``rte_crypto_rsa_capa`` to report RSA modulus length, supported
+  padding schemes, and MGF1 hash algorithms. Also added
+  ``pss_explicit_salt`` so a PMD can advertise support for an
+  application-supplied RSA-PSS salt, along with the corresponding
+  ``pss_salt`` field in ``rte_crypto_rsa_op_param`` to carry it per
+  sign operation.
+
 * **Added automatic lcore-id remapping option.**
 
   Added the EAL option ``--remap-lcore-ids`` or ``-R``
@@ -221,6 +230,13 @@ ABI Changes
 
 * stack: The structure ``rte_stack_lf_head`` alignment has been updated to 16 bytes
   to avoid unaligned accesses.
+
+* cryptodev: The struct ``rte_cryptodev_asymmetric_xform_capability`` is
+  updated to include ``rsa_capa``, a new ``rte_crypto_rsa_capa`` field for
+  reporting RSA modulus length, padding schemes, and MGF1 hash algorithms.
+
+* cryptodev: The struct ``rte_crypto_rsa_op_param`` is updated to include
+  ``pss_salt``, allowing an application to supply an explicit RSA-PSS salt.
 
 * ethdev: Added ``link_connector`` field to ``rte_eth_link`` structure
   to report the type of link connector for a port.

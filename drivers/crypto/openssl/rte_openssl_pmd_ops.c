@@ -2,6 +2,7 @@
  * Copyright(c) 2016-2017 Intel Corporation
  */
 
+#include <limits.h>
 #include <string.h>
 
 #include <rte_common.h>
@@ -985,6 +986,35 @@ openssl_pmd_sym_session_configure(struct rte_cryptodev *dev,
 	return 0;
 }
 
+#if (OPENSSL_VERSION_NUMBER >= 0x30000000L)
+static const EVP_MD *
+openssl_get_md(enum rte_crypto_auth_algorithm alg)
+{
+	switch (alg) {
+	case RTE_CRYPTO_AUTH_SHA1:
+		return EVP_sha1();
+	case RTE_CRYPTO_AUTH_SHA224:
+		return EVP_sha224();
+	case RTE_CRYPTO_AUTH_SHA256:
+		return EVP_sha256();
+	case RTE_CRYPTO_AUTH_SHA384:
+		return EVP_sha384();
+	case RTE_CRYPTO_AUTH_SHA512:
+		return EVP_sha512();
+	case RTE_CRYPTO_AUTH_SHA3_224:
+		return EVP_sha3_224();
+	case RTE_CRYPTO_AUTH_SHA3_256:
+		return EVP_sha3_256();
+	case RTE_CRYPTO_AUTH_SHA3_384:
+		return EVP_sha3_384();
+	case RTE_CRYPTO_AUTH_SHA3_512:
+		return EVP_sha3_512();
+	default:
+		return NULL;
+	}
+}
+#endif
+
 static int openssl_set_asym_session_parameters(
 		struct openssl_asym_session *asym_session,
 		struct rte_crypto_asym_xform *xform)
@@ -1006,6 +1036,10 @@ static int openssl_set_asym_session_parameters(
 		BIGNUM *d = NULL;
 		BIGNUM *p = NULL, *q = NULL, *dmp1 = NULL;
 		BIGNUM *iqmp = NULL, *dmq1 = NULL;
+#if (OPENSSL_VERSION_NUMBER >= 0x30000000L)
+		uint32_t label_len = 0;
+		enum rte_crypto_auth_algorithm mgf1;
+#endif
 
 		/* copy xfrm data into rsa struct */
 		n = BN_bin2bn((const unsigned char *)xform->rsa.n.data,
@@ -1018,6 +1052,56 @@ static int openssl_set_asym_session_parameters(
 
 		asym_session->u.r.pad = xform->rsa.padding.type;
 #if (OPENSSL_VERSION_NUMBER >= 0x30000000L)
+		if (xform->rsa.padding.type == RTE_CRYPTO_RSA_PADDING_OAEP) {
+			asym_session->u.r.oaep_md = openssl_get_md(xform->rsa.padding.hash);
+
+			if (asym_session->u.r.oaep_md == NULL) {
+				OPENSSL_LOG(ERR,
+					"Unsupported OAEP hash algorithm %u",
+					xform->rsa.padding.hash);
+				goto err_rsa;
+			}
+
+			mgf1 = xform->rsa.padding.mgf1hash;
+			if (mgf1 == 0)
+				mgf1 = xform->rsa.padding.hash;
+
+			asym_session->u.r.mgf1_md = openssl_get_md(mgf1);
+			if (asym_session->u.r.mgf1_md == NULL) {
+				OPENSSL_LOG(ERR,
+					"Unsupported OAEP MGF1 hash algorithm %u", mgf1);
+				goto err_rsa;
+			}
+
+			if (xform->rsa.padding.oaep_label.length > (size_t)INT_MAX) {
+				OPENSSL_LOG(ERR,
+					"OAEP label length %zu is too large",
+					xform->rsa.padding.oaep_label.length);
+				goto err_rsa;
+			}
+
+			label_len = (uint32_t)xform->rsa.padding.oaep_label.length;
+			if (label_len > 0) {
+				if (xform->rsa.padding.oaep_label.data == NULL) {
+					OPENSSL_LOG(ERR,
+						"OAEP label length is non-zero but data is NULL");
+					goto err_rsa;
+				}
+
+				asym_session->u.r.label = OPENSSL_zalloc(label_len);
+				if (asym_session->u.r.label == NULL)
+					goto err_rsa;
+
+				memcpy(asym_session->u.r.label,
+					xform->rsa.padding.oaep_label.data,
+					label_len);
+				asym_session->u.r.label_len = label_len;
+			} else {
+				asym_session->u.r.label_len = 0;
+				asym_session->u.r.label = NULL;
+			}
+		}
+
 		OSSL_PARAM_BLD * param_bld = OSSL_PARAM_BLD_new();
 		if (!param_bld) {
 			OPENSSL_LOG(ERR, "failed to allocate resources");
@@ -1192,6 +1276,13 @@ static int openssl_set_asym_session_parameters(
 		break;
 #endif
 err_rsa:
+#if (OPENSSL_VERSION_NUMBER >= 0x30000000L)
+		if (ret != 0 && asym_session->u.r.label) {
+			OPENSSL_free(asym_session->u.r.label);
+			asym_session->u.r.label = NULL;
+			asym_session->u.r.label_len = 0;
+		}
+#endif
 		BN_clear_free(n);
 		BN_clear_free(e);
 		BN_clear_free(d);
@@ -1774,6 +1865,11 @@ static void openssl_reset_asym_session(struct openssl_asym_session *sess)
 	case RTE_CRYPTO_ASYM_XFORM_RSA:
 #if (OPENSSL_VERSION_NUMBER >= 0x30000000L)
 		EVP_PKEY_CTX_free(sess->u.r.ctx);
+		if (sess->u.r.label_len > 0) {
+			OPENSSL_free(sess->u.r.label);
+			sess->u.r.label = NULL;
+			sess->u.r.label_len = 0;
+		}
 #else
 		if (sess->u.r.rsa)
 			RSA_free(sess->u.r.rsa);

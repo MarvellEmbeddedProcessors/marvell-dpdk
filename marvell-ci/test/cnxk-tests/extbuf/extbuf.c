@@ -242,7 +242,7 @@ initialize(struct port_info *pinfo, struct app_arg *arg)
 	struct rte_eth_fc_conf fc_conf;
 	uint16_t nb_txd, nb_rxd;
 	uint64_t cache_sz;
-	char name[16];
+	char name[32];
 	int ret;
 	struct rte_eth_conf port_conf = {
 		.rxmode = {

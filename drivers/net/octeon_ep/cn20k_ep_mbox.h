@@ -16,12 +16,25 @@ enum otx_ep_cn20k_mbox_opcode {
 	OCTEP_CN20K_MBOX_CMD_VF_READY = 0x100,  /* CN20K VF readiness notification */
 };
 
-/* SDP mbox IDs */
+/* SDP ring mbox message IDs */
 #define MBOX_MSG_SDP_RING_ALLOC	0x1002
 #define MBOX_MSG_SDP_RING_FREE	0x1003
+#define OCTEP_SDP_RING_FREE_ALL	1
+#define OCTEP_SDP_RING_FREE_ONE	0
 
-/* Mailbox message header */
-struct otx_ep_cn20k_mbox_msghdr {
+#define OCTEP_MBOX_BUNDLE_VALID 1
+
+/* Message ID helpers */
+#define MBOX_MSG_MASK		0xFFFF
+#define MBOX_MSG_INVALID	0xFFFE
+#define MBOX_MSG_MAX		0xFFFF
+
+#define MBOX_MSG_ALIGN 16
+#define MBOX_DOWN_MSG  1
+#define MBOX_UP_MSG    2
+
+/* Per-message header (payload after cn20k_mbox_bundle_hdr). */
+struct cn20k_mbox_msg_hdr {
 	uint16_t pcifunc;       /* VF/PF identifier */
 	uint16_t id;            /* Message ID (opcode) */
 #define OCTEP_CN20K_MBOX_REQ_SIG (0xdead)
@@ -33,40 +46,23 @@ struct otx_ep_cn20k_mbox_msghdr {
 	int rc;                 /* Return code */
 };
 
-/* Generic request msg used for those mbox messages which
- * don't send any data in the request.
- */
-struct otx_ep_cn20k_msg_req {
-	struct otx_ep_cn20k_mbox_msghdr hdr;
-};
-
-/* Generic response msg used as ack or response for those mbox
- * messages which don't have a specific rsp msg format.
- */
-struct otx_ep_cn20k_msg_rsp {
-	struct otx_ep_cn20k_mbox_msghdr hdr;
-};
-
 /* VF_READY request message (VF → PF) */
 struct otx_ep_cn20k_ready_msg_req {
-	struct otx_ep_cn20k_mbox_msghdr hdr;
+	struct cn20k_mbox_msg_hdr hdr;
 };
 
 /* VF_READY response message (PF → VF) */
 struct otx_ep_cn20k_ready_msg_rsp {
-	struct otx_ep_cn20k_mbox_msghdr hdr;
+	struct cn20k_mbox_msg_hdr hdr;
 };
 
-#define MBOX_MSG_ALIGN 16
-#define MBOX_DOWN_MSG  1
-#define MBOX_UP_MSG    2
-
-/* Mailbox message header */
-struct cn20k_mbox_hdr {
+/* Bundle header at the start of each mbox region (TX/RX). */
+struct cn20k_mbox_bundle_hdr {
 	uint64_t msg_size;
 	uint16_t num_msgs;
 	uint16_t opt_msg;
-	uint16_t sig;
+	uint8_t  sig;        /* OCTEP_MBOX_BUNDLE_VALID when TX batch is valid */
+	uint8_t  rsvd[3];
 };
 
 enum cn20k_mbox_dir {
@@ -101,19 +97,19 @@ struct otx_ep_cn20k_mbox {
 
 /* SDP Ring allocation/free structures (same as octeon_ep) */
 struct sdp_rings_alloc_req {
-	struct otx_ep_cn20k_mbox_msghdr hdr;
+	struct cn20k_mbox_msg_hdr hdr;
 	uint16_t nr_rings;
 	uint16_t rsvd[16];   /* Reserved */
 };
 
 struct sdp_rings_alloc_rsp {
-	struct otx_ep_cn20k_mbox_msghdr hdr;
+	struct cn20k_mbox_msg_hdr hdr;
 	uint16_t count; /* Number of rings allocated */
 	uint16_t rsvd[16];   /* Reserved */
 };
 
 struct sdp_rings_free_req {
-	struct otx_ep_cn20k_mbox_msghdr hdr;
+	struct cn20k_mbox_msg_hdr hdr;
 	uint16_t ring;
 	uint8_t all;
 };
@@ -121,6 +117,7 @@ struct sdp_rings_free_req {
 int otx_ep_cn20k_mbox_init(struct rte_eth_dev *eth_dev);
 void otx_ep_cn20k_mbox_uninit(struct rte_eth_dev *eth_dev);
 
+/* otx_ep->mbox_lock must be held by the caller. */
 int otx_ep_cn20k_mbox_send_cmd(struct otx_ep_device *otx_ep, union otx_ep_mbox_word cmd,
 			       union otx_ep_mbox_word *rsp);
 int otx_ep_cn20k_mbox_bulk_read(struct otx_ep_device *otx_ep, enum otx_ep_mbox_opcode opcode,

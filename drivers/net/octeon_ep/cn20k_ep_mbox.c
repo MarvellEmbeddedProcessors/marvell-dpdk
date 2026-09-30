@@ -17,7 +17,7 @@
 #define MBOX_RSP_TIMEOUT_MS     10000
 #define MBOX_CMD_TIMEOUT_US     1000000
 
-#define CN20K_MBOX_MSGS_OFFSET  RTE_ALIGN(sizeof(struct cn20k_mbox_hdr), MBOX_MSG_ALIGN)
+#define CN20K_MBOX_MSGS_OFFSET  RTE_ALIGN(sizeof(struct cn20k_mbox_bundle_hdr), MBOX_MSG_ALIGN)
 
 static int
 cn20k_mbox_wait_wr_cmd_out(struct otx_ep_device *otx_ep, uint16_t offset)
@@ -184,12 +184,15 @@ static int
 otx_ep_cn20k_mbox_msg_send(struct otx_ep_cn20k_mbox_priv *mbox)
 {
 	struct otx_ep_device *otx_ep = mbox->otx_ep;
-	struct cn20k_mbox_hdr tx_hdr, rx_hdr_zero = {0};
+	struct cn20k_mbox_bundle_hdr tx_hdr, rx_hdr_zero = {0};
 	int ret = 0;
 
 	tx_hdr.msg_size = mbox->msg_size;
 	tx_hdr.num_msgs = mbox->num_msgs;
-	tx_hdr.sig = OCTEP_CN20K_MBOX_REQ_SIG;
+	tx_hdr.sig = OCTEP_MBOX_BUNDLE_VALID;
+	tx_hdr.rsvd[0] = 0;
+	tx_hdr.rsvd[1] = 0;
+	tx_hdr.rsvd[2] = 0;
 
 	rte_smp_wmb();
 
@@ -231,7 +234,7 @@ static int
 otx_ep_cn20k_mbox_check_rsp_msgs(struct otx_ep_cn20k_mbox_priv *mbox)
 {
 	struct otx_ep_device *otx_ep = mbox->otx_ep;
-	struct cn20k_mbox_hdr rx_hdr;
+	struct cn20k_mbox_bundle_hdr rx_hdr;
 	int ret;
 
 	ret = otx_ep_cn20k_mbox_read(otx_ep, (uint16_t)mbox->rx_start, &rx_hdr, sizeof(rx_hdr));
@@ -287,14 +290,14 @@ otx_ep_cn20k_mbox_wait_for_rsp(struct otx_ep_cn20k_mbox_priv *mbox)
 static void *
 otx_ep_cn20k_mbox_alloc_msg(struct otx_ep_cn20k_mbox_priv *mbox, int size, int size_rsp)
 {
-	struct otx_ep_cn20k_mbox_msghdr *msghdr;
+	struct cn20k_mbox_msg_hdr *msghdr;
 
 	if ((uint32_t)(mbox->msg_size + size) > mbox->tx_size - CN20K_MBOX_MSGS_OFFSET) {
 		otx_ep_err("Mailbox message size exceeds limit");
 		return NULL;
 	}
 
-	msghdr = (struct otx_ep_cn20k_mbox_msghdr *)((uint8_t *)mbox->mbase + mbox->tx_start +
+	msghdr = (struct cn20k_mbox_msg_hdr *)((uint8_t *)mbox->mbase + mbox->tx_start +
 					      CN20K_MBOX_MSGS_OFFSET + mbox->msg_size);
 
 	memset(msghdr, 0, size);
@@ -434,13 +437,14 @@ otx_ep_cn20k_delete_mbox(struct otx_ep_device *otx_ep)
 	otx_ep_dbg("CN20K VF mailbox cleaned up");
 }
 
+/* Caller must hold otx_ep->mbox_lock. */
 int
 otx_ep_cn20k_mbox_send_cmd(struct otx_ep_device *otx_ep, union otx_ep_mbox_word cmd,
 			   union otx_ep_mbox_word *rsp)
 {
 	struct otx_ep_cn20k_mbox *mbox_info = otx_ep->mbox_info;
+	struct cn20k_mbox_msg_hdr *msghdr;
 	struct otx_ep_cn20k_mbox_priv *mbox;
-	struct otx_ep_cn20k_mbox_msghdr *msghdr;
 	union otx_ep_mbox_word *msg_data;
 	int ret;
 
@@ -455,8 +459,8 @@ otx_ep_cn20k_mbox_send_cmd(struct otx_ep_device *otx_ep, union otx_ep_mbox_word 
 	mbox->msgs_acked = 0;
 
 	msghdr = otx_ep_cn20k_mbox_alloc_msg(mbox,
-					     sizeof(struct otx_ep_cn20k_mbox_msghdr) + sizeof(cmd),
-					     sizeof(struct otx_ep_cn20k_mbox_msghdr) +
+					     sizeof(struct cn20k_mbox_msg_hdr) + sizeof(cmd),
+					     sizeof(struct cn20k_mbox_msg_hdr) +
 					     sizeof(*rsp));
 	if (!msghdr)
 		return -ENOMEM;
@@ -481,7 +485,7 @@ otx_ep_cn20k_mbox_send_cmd(struct otx_ep_device *otx_ep, union otx_ep_mbox_word 
 	if (ret)
 		return ret;
 
-	msghdr = (struct otx_ep_cn20k_mbox_msghdr *)((uint8_t *)mbox->mbase + mbox->rx_start +
+	msghdr = (struct cn20k_mbox_msg_hdr *)((uint8_t *)mbox->mbase + mbox->rx_start +
 					      CN20K_MBOX_MSGS_OFFSET);
 	msg_data = (union otx_ep_mbox_word *)(msghdr + 1);
 	*rsp = *msg_data;
@@ -636,9 +640,12 @@ otx_ep_cn20k_mbox_send_ready(struct otx_ep_device *otx_ep)
 	struct otx_ep_cn20k_ready_msg_rsp *rsp;
 	int ret;
 
+	rte_spinlock_lock(&otx_ep->mbox_lock);
+
 	if (!otx_ep->mbox_info) {
 		otx_ep_err("CN20K mailbox not initialized");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto unlock;
 	}
 
 	cn20k_mbox = otx_ep->mbox_info;
@@ -651,7 +658,8 @@ otx_ep_cn20k_mbox_send_ready(struct otx_ep_device *otx_ep)
 	req = otx_ep_cn20k_mbox_alloc_msg_ready(otx_ep);
 	if (!req) {
 		otx_ep_err("CN20K: Failed to allocate VF_READY message");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto unlock;
 	}
 
 	otx_ep_dbg("CN20K: Allocated VF_READY request (id=0x%x, sig=0x%x, ver=0x%x)", req->hdr.id,
@@ -660,7 +668,7 @@ otx_ep_cn20k_mbox_send_ready(struct otx_ep_device *otx_ep)
 	ret = otx_ep_cn20k_mbox_msg_send(mbox);
 	if (ret) {
 		otx_ep_err("CN20K: Failed to send VF_READY request: %d", ret);
-		return ret;
+		goto unlock;
 	}
 
 	otx_ep_dbg("CN20K: VF_READY request sent to PF");
@@ -668,13 +676,13 @@ otx_ep_cn20k_mbox_send_ready(struct otx_ep_device *otx_ep)
 	ret = otx_ep_cn20k_mbox_wait_for_rsp(mbox);
 	if (ret) {
 		otx_ep_err("CN20K: Timeout waiting for VF_READY response: %d", ret);
-		return ret;
+		goto unlock;
 	}
 
 	ret = otx_ep_cn20k_mbox_check_rsp_msgs(mbox);
 	if (ret) {
 		otx_ep_err("CN20K: Failed to read VF_READY response: %d", ret);
-		return ret;
+		goto unlock;
 	}
 
 	rsp = (struct otx_ep_cn20k_ready_msg_rsp *)((uint8_t *)mbox->mbase +
@@ -683,38 +691,49 @@ otx_ep_cn20k_mbox_send_ready(struct otx_ep_device *otx_ep)
 	if (rsp->hdr.sig != OCTEP_CN20K_MBOX_RSP_SIG) {
 		otx_ep_err("CN20K: Invalid VF_READY response signature: 0x%x (expected 0x%x)",
 			   rsp->hdr.sig, OCTEP_CN20K_MBOX_RSP_SIG);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto unlock;
 	}
 
 	if (rsp->hdr.rc != 0) {
 		otx_ep_err("CN20K: VF_READY rejected by PF: rc=%d", rsp->hdr.rc);
-		return rsp->hdr.rc;
+		ret = rsp->hdr.rc;
+		goto unlock;
 	}
 
 	otx_ep_dbg("CN20K: VF_READY acknowledged by PF (sig=0x%x, rc=%d)", rsp->hdr.sig,
 		   rsp->hdr.rc);
 
-	return 0;
+	ret = 0;
+
+unlock:
+	rte_spinlock_unlock(&otx_ep->mbox_lock);
+	return ret;
 }
 
 int
 otx_ep_cn20k_mbox_alloc_sdp_rings(struct otx_ep_device *otx_ep, uint16_t nr_rings)
 {
-	struct otx_ep_cn20k_mbox *cn20k_mbox = otx_ep->mbox_info;
+	struct otx_ep_cn20k_mbox *cn20k_mbox;
+	struct cn20k_mbox_msg_hdr *msghdr;
 	struct otx_ep_cn20k_mbox_priv *mbox;
 	struct sdp_rings_alloc_req *req;
 	struct sdp_rings_alloc_rsp *rsp;
-	struct otx_ep_cn20k_mbox_msghdr *msghdr;
 	int ret;
 
+	rte_spinlock_lock(&otx_ep->mbox_lock);
+
+	cn20k_mbox = otx_ep->mbox_info;
 	if (!cn20k_mbox) {
 		otx_ep_err("CN20K mailbox not initialized");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto unlock;
 	}
 
 	if (nr_rings == 0) {
 		otx_ep_err("Invalid nr_rings=0");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto unlock;
 	}
 
 	mbox = &cn20k_mbox->mbox;
@@ -727,7 +746,8 @@ otx_ep_cn20k_mbox_alloc_sdp_rings(struct otx_ep_device *otx_ep, uint16_t nr_ring
 	req = otx_ep_cn20k_mbox_alloc_msg(mbox, sizeof(*req), sizeof(struct sdp_rings_alloc_rsp));
 	if (!req) {
 		otx_ep_err("Failed to allocate SDP_RING_ALLOC message");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto unlock;
 	}
 
 	req->hdr.id = MBOX_MSG_SDP_RING_ALLOC;
@@ -741,42 +761,53 @@ otx_ep_cn20k_mbox_alloc_sdp_rings(struct otx_ep_device *otx_ep, uint16_t nr_ring
 	ret = otx_ep_cn20k_mbox_msg_send(mbox);
 	if (ret) {
 		otx_ep_err("Failed to send SDP_RING_ALLOC message: %d", ret);
-		return ret;
+		goto unlock;
 	}
 
 	ret = otx_ep_cn20k_mbox_wait_for_rsp(mbox);
 	if (ret) {
 		otx_ep_err("Failed to get response: %d", ret);
-		return ret;
+		goto unlock;
 	}
 
-	msghdr = (struct otx_ep_cn20k_mbox_msghdr *)((uint8_t *)mbox->mbase +
+	msghdr = (struct cn20k_mbox_msg_hdr *)((uint8_t *)mbox->mbase +
 						     mbox->rx_start + CN20K_MBOX_MSGS_OFFSET);
 	if (msghdr->rc) {
 		otx_ep_err("PF returned error for SDP_RING_ALLOC: %d", msghdr->rc);
-		return msghdr->rc;
+		ret = msghdr->rc;
+		goto unlock;
 	}
 
 	rsp = (struct sdp_rings_alloc_rsp *)msghdr;
 
-	if (rsp->count == 0)
-		return -EIO;
+	if (rsp->count == 0) {
+		ret = -EIO;
+		goto unlock;
+	}
 
-	return rsp->count;
+	ret = rsp->count;
+
+unlock:
+	rte_spinlock_unlock(&otx_ep->mbox_lock);
+	return ret;
 }
 
 int
 otx_ep_cn20k_mbox_free_sdp_rings(struct otx_ep_device *otx_ep, uint16_t ring, uint8_t all)
 {
-	struct otx_ep_cn20k_mbox *mbox_info = otx_ep->mbox_info;
-	struct otx_ep_cn20k_mbox_msghdr *msghdr;
+	struct otx_ep_cn20k_mbox *mbox_info;
+	struct cn20k_mbox_msg_hdr *msghdr;
 	struct otx_ep_cn20k_mbox_priv *mbox;
 	struct sdp_rings_free_req *req;
 	int ret;
 
+	rte_spinlock_lock(&otx_ep->mbox_lock);
+
+	mbox_info = otx_ep->mbox_info;
 	if (!mbox_info) {
 		otx_ep_err("CN20K mailbox not initialized");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto unlock;
 	}
 
 	mbox = &mbox_info->mbox;
@@ -785,10 +816,11 @@ otx_ep_cn20k_mbox_free_sdp_rings(struct otx_ep_device *otx_ep, uint16_t ring, ui
 	mbox->num_msgs = 0;
 	mbox->msgs_acked = 0;
 
-	req = otx_ep_cn20k_mbox_alloc_msg(mbox, sizeof(*req), sizeof(struct otx_ep_cn20k_msg_rsp));
+	req = otx_ep_cn20k_mbox_alloc_msg(mbox, sizeof(*req), sizeof(struct cn20k_mbox_msg_hdr));
 	if (!req) {
 		otx_ep_err("Failed to allocate SDP_RING_FREE message");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto unlock;
 	}
 
 	req->hdr.id = MBOX_MSG_SDP_RING_FREE;
@@ -805,21 +837,26 @@ otx_ep_cn20k_mbox_free_sdp_rings(struct otx_ep_device *otx_ep, uint16_t ring, ui
 	ret = otx_ep_cn20k_mbox_msg_send(mbox);
 	if (ret) {
 		otx_ep_err("Failed to send SDP_RING_FREE message: %d", ret);
-		return ret;
+		goto unlock;
 	}
 
 	ret = otx_ep_cn20k_mbox_wait_for_rsp(mbox);
 	if (ret) {
 		otx_ep_err("Failed to get rsp for SDP_RING_FREE message: %d", ret);
-		return ret;
+		goto unlock;
 	}
 
-	msghdr = (struct otx_ep_cn20k_mbox_msghdr *)((uint8_t *)mbox->mbase +
+	msghdr = (struct cn20k_mbox_msg_hdr *)((uint8_t *)mbox->mbase +
 						    mbox->rx_start + CN20K_MBOX_MSGS_OFFSET);
 	if (msghdr->rc) {
 		otx_ep_err("PF returned error for SDP_RING_FREE: %d", msghdr->rc);
-		return msghdr->rc;
+		ret = msghdr->rc;
+		goto unlock;
 	}
 
-	return 0;
+	ret = 0;
+
+unlock:
+	rte_spinlock_unlock(&otx_ep->mbox_lock);
+	return ret;
 }

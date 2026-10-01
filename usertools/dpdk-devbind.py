@@ -43,7 +43,7 @@ cnxk_bphy = {'Class': '08', 'Vendor': '177d', 'Device': 'a089',
              'SVendor': None, 'SDevice': None}
 cnxk_bphy_cgx = {'Class': '08', 'Vendor': '177d', 'Device': 'a059,a060',
                  'SVendor': None, 'SDevice': None}
-cnxk_dma = {'Class': '08', 'Vendor': '177d', 'Device': 'a081',
+cnxk_dma = {'Class': '08', 'Vendor': '177d', 'Device': 'a081,a0e8,a0e9',
             'SVendor': None, 'SDevice': None}
 cnxk_inl_dev = {'Class': '08', 'Vendor': '177d', 'Device': 'a0f0,a0f1',
                 'SVendor': None, 'SDevice': None}

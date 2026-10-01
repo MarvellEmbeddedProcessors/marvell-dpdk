@@ -6,7 +6,7 @@ set -e
 
 PLAT=${PLAT:?}
 
-if [[ "$PLAT" != "cn9k" && "$PLAT" != "cn10k" ]]; then
+if [[ "$PLAT" != "cn9k" && "$PLAT" != "cn10k" && "$PLAT" != "cn20k" ]]; then
 	exit 0
 fi
 
@@ -19,10 +19,11 @@ LOG=./log.txt
 
 rm -rf $LOG
 
-sh ./dpi-test-setup.sh
+bash ./dpi-test-setup.sh
 
 timeout 15 stdbuf -o 0 ./cnxk_dma_test -l 0-4 -- -r 0x400000000 \
                           -m 0 -p -t 1 -s 64 -b 128 -i 5 > $LOG &
+dma_pid=$!
 
 sleep 8
 echo "================================"
@@ -33,8 +34,15 @@ while [[ ! -f $LOG ]]; do
 done
 echo "================================"
 
-sh ./dpi-test-setup.sh unbind
+bash ./dpi-test-setup.sh unbind
 sleep 2
+wait $dma_pid
+dma_ret=$?
 cat $LOG
+
+if [[ $dma_ret -ne 0 ]]; then
+	echo "cnxk_dma_test failed with exit code $dma_ret"
+	exit $dma_ret
+fi
 
 echo "CNXK_DMA_TEST SUCCESSFUL"

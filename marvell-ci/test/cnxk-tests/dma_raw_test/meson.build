@@ -35,7 +35,7 @@ cnxk_dma_test=executable(
 # Add the meson test
 test(
     test_name,
-    cnxk_dma_test,
+    cnxk_test_script_wrapper,
     env : ['DPDK_TEST=' + test_name, 'TEST_DIR=' + test_dir],
     args : [test_script, test_args],
     is_parallel : false,

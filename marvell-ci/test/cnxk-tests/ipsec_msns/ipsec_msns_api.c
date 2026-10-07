@@ -15,11 +15,14 @@
 #include <rte_hexdump.h>
 #include <rte_bitmap.h>
 #include <rte_crypto.h>
+#include <rte_cryptodev.h>
 #include <rte_ipsec.h>
 #include <rte_malloc.h>
 #include <rte_memory.h>
 #include <rte_pmd_cnxk.h>
+#include <rte_pmd_cnxk_crypto.h>
 #include <rte_security.h>
+#include <rte_security_driver.h>
 #include <rte_udp.h>
 #include <rte_eventdev.h>
 #include <rte_event_eth_rx_adapter.h>
@@ -76,6 +79,8 @@ enum test_mode {
 	IPSEC_RTE_PMD_CNXK_INB_AR_TEST,
 	/* Inline outbound MSNS test via direct CPT inst submit */
 	IPSEC_RTE_PMD_CNXK_OUTBOUND_MSNS_TEST,
+	/* Lookaside outbound MSNS test via direct CPT inst submit */
+	IPSEC_RTE_PMD_CNXK_LA_OUTBOUND_MSNS_TEST,
 };
 
 static struct rte_mempool *mbufpool[RTE_MAX_ETHPORTS];
@@ -162,6 +167,8 @@ static uint32_t nb_bufs;
 static enum test_mode testmode;
 static bool event_en;
 static int eventdev_id;
+static uint8_t crypto_dev_id;
+static bool crypto_dev_configured;
 static int rx_adapter_id;
 static int tx_adapter_id;
 static int nb_event_queues;
@@ -201,6 +208,8 @@ ipsec_test_mode_to_string(enum test_mode testmode)
 		return "IPSEC_RTE_PMD_CNXK_INB_AR_TEST";
 	case IPSEC_RTE_PMD_CNXK_OUTBOUND_MSNS_TEST:
 		return "IPSEC_RTE_PMD_CNXK_OUTBOUND_MSNS_TEST";
+	case IPSEC_RTE_PMD_CNXK_LA_OUTBOUND_MSNS_TEST:
+		return "IPSEC_RTE_PMD_CNXK_LA_OUTBOUND_MSNS_TEST";
 	}
 	return NULL;
 }
@@ -649,6 +658,7 @@ print_usage(const char *name)
 		"\t\t\t5: IPSEC_RTE_PMD_CNXK_DSCP_QSEL_TEST (CN20K)\n"
 		"\t\t\t6: IPSEC_RTE_PMD_CNXK_INB_AR_TEST\n"
 		"\t\t\t7: IPSEC_RTE_PMD_CNXK_OUTBOUND_MSNS_TEST\n"
+		"\t\t\t8: IPSEC_RTE_PMD_CNXK_LA_OUTBOUND_MSNS_TEST\n"
 		"\t[--portmask]	          Port mask to enable\n"
 		"\t[--nb-mbufs <count >]  MBUFs per packet pool\n"
 		"\t[--num-sas <count>]    Number of SA's to create\n"
@@ -1023,6 +1033,71 @@ custom_msns_profile_setup(uint16_t portid)
 	return ret;
 }
 
+#define CDEV_NB_DESC 1024
+
+static void
+ut_cryptodev_teardown(void)
+{
+	int ret;
+
+	if (!crypto_dev_configured)
+		return;
+
+	rte_cryptodev_stop(crypto_dev_id);
+
+	ret = rte_cryptodev_close(crypto_dev_id);
+	if (ret != 0)
+		app_err("rte_cryptodev_close: err=%d, dev=%u\n", ret, crypto_dev_id);
+
+	crypto_dev_configured = false;
+}
+
+static int
+ut_cryptodev_setup(void)
+{
+	struct rte_cryptodev_qp_conf qp_conf;
+	struct rte_cryptodev_config config;
+	uint8_t cdev_id;
+	int ret;
+
+	if (rte_cryptodev_devices_get("crypto_cn20k", &cdev_id, 1) != 1) {
+		app_err("No CN20K cryptodev available for lookaside test\n");
+		return -ENODEV;
+	}
+
+	memset(&config, 0, sizeof(config));
+	config.nb_queue_pairs = 1;
+	config.socket_id = rte_socket_id();
+
+	ret = rte_cryptodev_configure(cdev_id, &config);
+	if (ret < 0) {
+		app_err("Could not configure cryptodev %u\n", cdev_id);
+		return ret;
+	}
+
+	crypto_dev_id = cdev_id;
+	crypto_dev_configured = true;
+
+	memset(&qp_conf, 0, sizeof(qp_conf));
+	qp_conf.nb_descriptors = CDEV_NB_DESC;
+
+	ret = rte_cryptodev_queue_pair_setup(cdev_id, 0, &qp_conf, rte_socket_id());
+	if (ret < 0) {
+		app_err("Could not setup cryptodev %u queue pair 0\n", cdev_id);
+		ut_cryptodev_teardown();
+		return ret;
+	}
+
+	ret = rte_cryptodev_start(cdev_id);
+	if (ret < 0) {
+		app_err("Could not start cryptodev %u\n", cdev_id);
+		ut_cryptodev_teardown();
+		return ret;
+	}
+
+	return 0;
+}
+
 static int
 ut_setup(int argc, char **argv)
 {
@@ -1042,6 +1117,8 @@ ut_setup(int argc, char **argv)
 	argc -= ret;
 	argv += ret;
 
+	is_plat_cn20k = strstr(rte_pmd_cnxk_model_str_get(), "cn20k") ? true : false;
+
 	ret = parse_args(argc, argv);
 	if (ret < 0)
 		return ret;
@@ -1054,6 +1131,14 @@ ut_setup(int argc, char **argv)
 	nb_ports = rte_eth_dev_count_avail();
 	if (nb_ports < NB_ETHPORTS_USED || ethdev_port_mask == 0) {
 		app_err("At least %u port(s) used for test\n", NB_ETHPORTS_USED);
+		return -1;
+	}
+
+	if ((testmode == IPSEC_RTE_PMD_CNXK_OUTBOUND_MSNS_TEST ||
+	     testmode == IPSEC_RTE_PMD_CNXK_LA_OUTBOUND_MSNS_TEST) &&
+	    !rte_security_dynfield_is_registered() &&
+	    rte_security_dynfield_register() < 0) {
+		app_err("Failed to register security dynfield for outbound MSNS test\n");
 		return -1;
 	}
 
@@ -1100,6 +1185,14 @@ ut_setup(int argc, char **argv)
 		ret = ut_eventdev_setup();
 		if (ret < 0) {
 			app_err("Failed to setup eventdev, err=%d\n", ret);
+			return ret;
+		}
+	}
+
+	if (testmode == IPSEC_RTE_PMD_CNXK_LA_OUTBOUND_MSNS_TEST && is_plat_cn20k) {
+		ret = ut_cryptodev_setup();
+		if (ret < 0) {
+			app_err("Failed to setup cryptodev, err=%d\n", ret);
 			return ret;
 		}
 	}
@@ -1176,6 +1269,9 @@ ut_teardown(void)
 		if (ret != 0)
 			app_err("rte_eth_dev_stop: err=%s, port=%u\n", rte_strerror(-ret), portid);
 	}
+
+	/* Cryptodev cleanup */
+	ut_cryptodev_teardown();
 
 	/* Event device cleanup */
 	if (event_en)
@@ -1709,6 +1805,8 @@ exit:
 
 #define NB_INST		65
 #define CPT_RES_ALIGN	sizeof(union rte_pmd_cnxk_cpt_res_s)
+static_assert(NB_INST < CDEV_NB_DESC, "NB_INST must be less than CDEV_NB_DESC");
+
 static int
 pmd_cnxk_api_inl_dev_inst_submit(void *cptr)
 {
@@ -2163,12 +2261,10 @@ pmd_cnxk_api_outb_inst_submit(void *cptr, uint32_t sa_idx)
 			goto exit;
 		}
 
-		tx_mbufs[i]->data_len = pkt->len;
-		tx_mbufs[i]->pkt_len = pkt->len;
 		tx_mbufs[i]->l2_len = RTE_ETHER_HDR_LEN;
-		dptr = mbuf_pkt_va(tx_mbufs[i]);
-		if (!dptr) {
-			app_err("Could not map mbuf packet IOVA for CPU\n");
+		dptr = rte_pktmbuf_append(tx_mbufs[i], pkt->len);
+		if (dptr == NULL) {
+			app_err("Not enough tailroom in mbuf for %u byte packet\n", pkt->len);
 			nb_prepared = i + 1;
 			rc = -EINVAL;
 			goto exit;
@@ -4419,6 +4515,11 @@ pmd_cnxk_outbound_msns_test(void)
 	unsigned int portid;
 	int rc = 0;
 
+	if (!is_plat_cn20k) {
+		app_info("Skipping OUTBOUND_MSNS_TEST: CN20K required\n");
+		return 0;
+	}
+
 	portid = lcore_cfg[lcore_id].portid;
 	sa = rte_pmd_cnxk_hw_session_base_get(portid, false);
 	sa = RTE_PTR_ADD(sa, OUTB_MSNS_SA_IDX * OUTB_MSNS_SA_SZ);
@@ -4444,10 +4545,233 @@ pmd_cnxk_outbound_msns_test(void)
 	return rc;
 }
 
+static int
+pmd_cnxk_api_laoutb_inst_submit(struct rte_pmd_cnxk_crypto_qptr *qptr, void *cptr)
+{
+	const struct rte_pmd_cnxk_ipsec_outb_msns_sa *sa;
+	struct ipsec_test_packet *pkt = &pkt_ipv4_plain;
+	struct rte_pmd_cnxk_crypto_cptr *crypto_cptr;
+	union rte_pmd_cnxk_cpt_res_s res, *hw_res;
+	union rte_pmd_cnxk_ipsec_hw_sa sa_read;
+	union roc_ot_ipsec_outb_param1 param1;
+	struct cpt_inst_s *inst_mem, *inst;
+	struct rte_mbuf *tx_mbufs[NB_INST];
+	uint64_t cptr_val, sa_seq, timeout;
+	const struct rte_ipv4_hdr *ip;
+	unsigned int portid, subspace;
+	uint32_t esp_spi, esp_seq;
+	void *res_bufs[NB_INST];
+	const uint8_t *out_pkt;
+	uint8_t l2_len, l3_len;
+	uint16_t lcore_id, i;
+	int rc = 0, retries;
+	uintptr_t sa_addr;
+	void *dptr;
+
+	const union rte_pmd_cnxk_cpt_res_s res_init = {
+		.cn10k.compcode = CPT_COMP_NOT_DONE,
+	};
+
+	lcore_id = rte_lcore_id();
+	portid = lcore_cfg[lcore_id].portid;
+	sa_addr = (uintptr_t)cptr;
+	sa = (const struct rte_pmd_cnxk_ipsec_outb_msns_sa *)cptr;
+	crypto_cptr = (struct rte_pmd_cnxk_crypto_cptr *)cptr;
+	cptr_val = msns_outb_cptr_encode(sa_addr);
+
+	l2_len = RTE_ETHER_HDR_LEN;
+	ip = (const struct rte_ipv4_hdr *)(pkt->data + l2_len);
+	l3_len = (ip->version_ihl & RTE_IPV4_HDR_IHL_MASK) * RTE_IPV4_IHL_MULTIPLIER;
+
+	memset(tx_mbufs, 0, sizeof(tx_mbufs));
+	memset(res_bufs, 0, sizeof(res_bufs));
+
+	inst_mem = rte_malloc(NULL, NB_INST * sizeof(struct cpt_inst_s), 0);
+	if (inst_mem == NULL) {
+		app_err("Could not allocate instruction memory\n");
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < NB_INST; i++) {
+		tx_mbufs[i] = rte_pktmbuf_alloc(mbufpool[portid]);
+		if (tx_mbufs[i] == NULL) {
+			app_err("Could not allocate mbuf for lookaside outbound packet\n");
+			rc = -ENOMEM;
+			goto exit;
+		}
+
+		res_bufs[i] = rte_zmalloc(NULL, CPT_RES_ALIGN * 2, 0);
+		if (res_bufs[i] == NULL) {
+			app_err("Could not allocate CPT result buffer\n");
+			rc = -ENOMEM;
+			goto exit;
+		}
+
+		tx_mbufs[i]->l2_len = l2_len;
+		tx_mbufs[i]->l3_len = l3_len;
+		dptr = rte_pktmbuf_append(tx_mbufs[i], pkt->len);
+		if (dptr == NULL) {
+			app_err("Not enough tailroom in mbuf for %u byte packet\n", pkt->len);
+			rc = -EINVAL;
+			goto exit;
+		}
+		memcpy(dptr, pkt->data, pkt->len);
+
+		inst = RTE_PTR_ADD(inst_mem, i * sizeof(struct cpt_inst_s));
+		memset(inst, 0, sizeof(struct cpt_inst_s));
+		inst->w3.s.qord = 1;
+
+		inst->w7.s.egrp = CPT_DFLT_ENG_GRP_SE;
+		inst->w7.s.ctx_val = 1;
+		inst->w7.s.cptr = cptr_val;
+
+		inst->w4.s.opcode_major = CPT_IE_OT_MAJOR_OP_PROCESS_OUTBOUND_IPSEC | (1 << 6);
+		param1.u16 = 0;
+		param1.s.ip_csum_disable = 1;
+		param1.s.l4_csum_disable = 1;
+		inst->w4.s.param1 = param1.u16;
+		inst->w4.s.param2 = RTE_ETHER_HDR_LEN;
+
+		rc = pmd_cnxk_api_outb_mbuf_prep(tx_mbufs[i], inst, sa, 0, param1);
+		if (rc)
+			goto exit;
+
+		inst->w4.s.dlen = pkt->len - RTE_ETHER_HDR_LEN;
+		inst->dptr = rte_pktmbuf_iova_offset(tx_mbufs[i], RTE_ETHER_HDR_LEN);
+
+		hw_res = RTE_PTR_ALIGN_CEIL(res_bufs[i], CPT_RES_ALIGN);
+		inst->res_addr = (uint64_t)hw_res;
+		__atomic_store_n(&hw_res->u64[0], res_init.u64[0], __ATOMIC_RELAXED);
+	}
+
+	rte_pmd_cnxk_crypto_submit(qptr, inst_mem, NB_INST);
+
+	timeout = rte_rdtsc() + rte_get_tsc_hz() * 60;
+	hw_res = RTE_PTR_ALIGN_CEIL(res_bufs[NB_INST - 1], CPT_RES_ALIGN);
+	do {
+		res.u64[0] = __atomic_load_n(&hw_res->u64[0], __ATOMIC_RELAXED);
+	} while ((res.cn10k.compcode == CPT_COMP_NOT_DONE) && (rte_rdtsc() < timeout));
+
+	if (res.cn10k.compcode == CPT_COMP_NOT_DONE) {
+		app_err("CPT timed out waiting for completion\n");
+		rc = -1;
+		goto exit;
+	}
+
+	if (res.cn10k.compcode != CPT_COMP_GOOD && res.cn10k.compcode != CPT_COMP_WARN) {
+		app_err("res.compcode: %d\n", res.cn10k.compcode);
+		rc = -1;
+		goto exit;
+	}
+
+	if (!uc_compcode_is_success(res.cn10k.uc_compcode)) {
+		app_err("res.uc_compcode: 0x%x\n", res.cn10k.uc_compcode);
+		rc = -1;
+		goto exit;
+	}
+
+	out_pkt = mbuf_pkt_va(tx_mbufs[NB_INST - 1]);
+	if (msns_outb_esp_seq_get(out_pkt, tx_mbufs[NB_INST - 1]->pkt_len, &esp_spi,
+				  &esp_seq) != 0) {
+		app_err("Failed to parse ESP header from last output pkt\n");
+		rc = -EINVAL;
+		goto exit;
+	}
+
+	/* Evict the CPT CTX cache so the updated seqnum is visible in SA memory */
+	rc = -EAGAIN;
+	for (retries = 0; retries < 100; retries++) {
+		rc = rte_pmd_cnxk_crypto_cptr_flush(qptr, crypto_cptr, true);
+		if (rc == 0)
+			break;
+		rte_delay_ms(1);
+	}
+	if (rc != 0) {
+		app_err("MSNS CPTR flush (invalidate) failed after 100 retries, rc=%d\n", rc);
+		goto exit;
+	}
+
+	memset(&sa_read, 0, sizeof(sa_read));
+	rc = rte_pmd_cnxk_crypto_cptr_read(qptr, crypto_cptr, &sa_read,
+					   RTE_PMD_CNXK_IPSEC_OUTB_SA_MSNS_WR_SZ);
+	if (rc) {
+		app_err("Lookaside outbound MSNS CPTR read failed rc=%d\n", rc);
+		goto exit;
+	}
+
+	subspace = msns_outb_cptr_subspace_get(cptr_val);
+	sa_seq = sa_read.outb_msns.ctx.space[subspace].seqnum;
+	app_info("LA outbound last pkt: esp_spi=%u esp_seq=%u subspace=%u SA seqnum=%" PRIu64 "\n",
+		 esp_spi, esp_seq, subspace, sa_seq);
+
+	if (sa_seq != (uint64_t)esp_seq) {
+		app_err("SA subspace[%u] seqnum %" PRIu64 " != last pkt esp_seq %u\n",
+			subspace, sa_seq, esp_seq);
+		rc = -1;
+	}
+exit:
+	for (i = 0; i < NB_INST; i++) {
+		if (tx_mbufs[i])
+			rte_pktmbuf_free(tx_mbufs[i]);
+		if (res_bufs[i])
+			rte_free(res_bufs[i]);
+	}
+	rte_free(inst_mem);
+
+	return rc;
+}
+
+static int
+pmd_cnxk_laoutbound_msns_test(void)
+{
+	union rte_pmd_cnxk_ipsec_hw_sa sa_dptr;
+	struct rte_pmd_cnxk_crypto_qptr *qptr;
+	void *sa_mem = NULL;
+	int rc = 0;
+
+	if (!is_plat_cn20k) {
+		app_info("Skipping LAOUTBOUND_MSNS_TEST: CN20K required\n");
+		return 0;
+	}
+
+	qptr = rte_pmd_cnxk_crypto_qptr_get(crypto_dev_id, 0);
+	if (qptr == NULL) {
+		app_err("Failed to get crypto queue pair pointer\n");
+		return -1;
+	}
+
+	sa_mem = rte_zmalloc("msns_la_sa",
+			     RTE_PMD_CNXK_IPSEC_OUTB_SA_MSNS_SZ,
+			     RTE_PMD_CNXK_IPSEC_OUTB_SA_MSNS_SZ);
+	if (!sa_mem) {
+		app_err("Failed to allocate lookaside MSNS SA\n");
+		return -ENOMEM;
+	}
+
+	pmd_cnxk_api_outb_session_fill((struct rte_pmd_cnxk_ipsec_outb_msns_sa *)sa_mem);
+	sa_dptr = *(union rte_pmd_cnxk_ipsec_hw_sa *)sa_mem;
+	sa_dptr.outb_msns.w2.s.valid = 1;
+
+	rc = rte_pmd_cnxk_crypto_cptr_write(qptr,
+					    (struct rte_pmd_cnxk_crypto_cptr *)sa_mem,
+					    &sa_dptr,
+					    RTE_PMD_CNXK_IPSEC_OUTB_SA_MSNS_WR_SZ);
+	if (rc) {
+		app_err("Couldn't write the lookaside outbound MSNS SA, rc=%d\n", rc);
+		goto exit;
+	}
+
+	rc = pmd_cnxk_api_laoutb_inst_submit(qptr, sa_mem);
+	if (rc)
+		app_err("Lookaside outbound MSNS CPT instruction submit failed\n");
+exit:
+	rte_free(sa_mem);
+	return rc;
+}
+
 int
 main(int argc, char **argv)
 {
-	const char *pattern = "cn20k";
 	int rc = 0;
 
 	signal(SIGINT, signal_handler);
@@ -4462,8 +4786,6 @@ main(int argc, char **argv)
 		app_err("TEST FAILED: ut_setup\n");
 		return rc;
 	}
-
-	is_plat_cn20k = strstr(rte_pmd_cnxk_model_str_get(), pattern) ? true : false;
 
 	app_info("\n");
 	switch (testmode) {
@@ -4514,6 +4836,12 @@ main(int argc, char **argv)
 		app_info("Model: %s Test Mode: %s\n", rte_pmd_cnxk_model_str_get(),
 		       ipsec_test_mode_to_string(testmode));
 		rc = pmd_cnxk_outbound_msns_test();
+		app_info("Test %s: %s\n", ipsec_test_mode_to_string(testmode), rc ? "FAILED" : "PASS");
+		break;
+	case IPSEC_RTE_PMD_CNXK_LA_OUTBOUND_MSNS_TEST:
+		app_info("Model: %s Test Mode: %s\n", rte_pmd_cnxk_model_str_get(),
+		       ipsec_test_mode_to_string(testmode));
+		rc = pmd_cnxk_laoutbound_msns_test();
 		app_info("Test %s: %s\n", ipsec_test_mode_to_string(testmode), rc ? "FAILED" : "PASS");
 		break;
 	}

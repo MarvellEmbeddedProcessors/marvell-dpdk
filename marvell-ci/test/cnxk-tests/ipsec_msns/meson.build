@@ -47,7 +47,8 @@ ipsec_msns_api_test=executable(
     files('ipsec_msns_api.c', 'flow.c', 'parser.c'),
     link_whole: link_libs,
     include_directories: includes,
-    dependencies: [cnxk_test_dep_objs, get_variable(def_lib + '_rte_net_cnxk')],
+    dependencies: [cnxk_test_dep_objs, get_variable(def_lib + '_rte_net_cnxk'),
+                   get_variable(def_lib + '_rte_crypto_cnxk')],
     c_args: cflags,
     install_dir: 'bin/cnxk/ipsec_msns',
     install: true

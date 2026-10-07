@@ -71,3 +71,21 @@ Usage:
 ======
 ./cnxk_ipsec_msns_api -c 0x3 -a 0002:01:00.2,custom_inb_sa=1,custom_sa_act=1 \
 	-a 0002:1d:00.0 -a 0002:20:00.1 -a 0002:1e:00.0 -- --testmode 7 --portmask 0x1
+
+IPSEC_RTE_PMD_CNXK_LA_OUTBOUND_MSNS_TEST (testmode 8):
+=====================================================
+Programs a 1KB outbound MSNS SA in application memory and writes it
+to the CPT context with rte_pmd_cnxk_crypto_cptr_write() before submitting
+outbound IPsec CPT instructions via rte_pmd_cnxk_crypto_submit() (lookaside).
+The encrypted result is read from mbuf memory and its ESP sequence number
+is verified against the SA subspace counter. Packets are submitted from
+mbufs and CPT writes the completion descriptor to res_addr. The first
+available CPT cryptodev (dev 0, qp 0) is auto-configured, so a CPT crypto VF
+must be bound in addition to the NIX ports. Bind the CPT VF with ctx_ilen=7
+for 1 KB MSNS context.
+
+Usage:
+======
+./cnxk_ipsec_msns_api -l 0-1 -a 0002:01:00.1,custom_sa_act=1 \
+	-a 0002:1d:00.0 -a 0002:20:00.1,ctx_ilen=7 \
+	-- --testmode 8 --portmask 0x1

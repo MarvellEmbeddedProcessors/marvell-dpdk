@@ -555,9 +555,6 @@ cnxk_dmadev_vchan_setup(struct rte_dma_dev *dev, uint16_t vchan,
 
 	RTE_SET_USED(conf_sz);
 
-	if (conf->auto_free.m2d.pool != NULL && conf->direction != RTE_DMA_DIR_MEM_TO_DEV)
-		return -EINVAL;
-
 	header = (union cnxk_dpi_instr_cmd *)&dpi_conf->cmd.u;
 
 	if (roc_model_is_cn20k())
